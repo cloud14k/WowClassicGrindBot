@@ -1,6 +1,7 @@
 ﻿using Newtonsoft.Json;
 
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Advanced;
 using SixLabors.ImageSharp.PixelFormats;
 
 using System;
@@ -10,7 +11,10 @@ namespace Core;
 
 public static class FrameConfigMeta
 {
-    public const int Version = 4;
+    // Version 5 stores coordinates derived from the addon's frame geometry.
+    // Version 4 could contain coordinates inferred from obstructed pixels.
+    public const int Version = 6;
+    public const int TopOffset = 16;
     public const string DefaultFilename = "frame_config.json";
 }
 
@@ -97,32 +101,70 @@ public static class FrameConfig
 
     public static DataFrame[] CreateFrames(DataFrameMeta meta, Image<Bgra32> bmp)
     {
-        DataFrame[] frames = new DataFrame[meta.Count];
-        frames[0] = new(0, 0, 0);
+        if (meta.Count <= 1 || meta.Rows <= 0 || meta.Sizes <= 0 || meta.Spacing < 0)
+            return Array.Empty<DataFrame>();
 
-        for (int i = 1; i < meta.Count; i++)
+        DataFrame[] frames = new DataFrame[meta.Count];
+
+        // The addon uses WoW UI coordinates, which are scaled before WGC sees
+        // them. In setup mode every frame has a unique exact colour, so locate
+        // the physical screen pixels instead of deriving screen coordinates
+        // from CELL_SIZE/CELL_SPACING.
+        if (!TryFindMetadataPoint(meta, bmp, out int metadataX, out int metadataY))
+            return Array.Empty<DataFrame>();
+
+        frames[0] = new(0, metadataX, metadataY);
+
+        int previousX = metadataX;
+        for (int i = 1; i < frames.Length; i++)
         {
-            if (TryGetNextPoint(bmp, i, frames[i].X, out int x, out int y))
-            {
-                frames[i] = new(i, x, y);
-            }
-            else
-            {
-                break;
-            }
+            if (!TryFindIndexPoint(bmp, i, previousX, metadataY, out int x, out int y))
+                return Array.Empty<DataFrame>();
+
+            frames[i] = new(i, x, y);
+            previousX = x;
         }
 
         return frames;
     }
 
-    private static bool TryGetNextPoint(Image<Bgra32> bmp, int i, int startX, out int x, out int y)
+    private static bool TryFindMetadataPoint(
+        DataFrameMeta meta, Image<Bgra32> bmp, out int x, out int y)
     {
-        for (int xi = startX; xi < bmp.Width; xi++)
+        int maxX = Math.Min(bmp.Width, 512);
+        int maxY = Math.Min(bmp.Height, 128);
+
+        for (int yi = 0; yi < maxY; yi++)
         {
-            for (int yi = 0; yi < bmp.Height; yi++)
+            ReadOnlySpan<Bgra32> row = bmp.DangerousGetPixelRowMemory(yi).Span;
+            for (int xi = 0; xi < maxX; xi++)
+            {
+                if (GetMeta(row[xi]).Hash == meta.Hash)
+                {
+                    x = xi;
+                    y = yi;
+                    return true;
+                }
+            }
+        }
+
+        x = y = -1;
+        return false;
+    }
+
+    private static bool TryFindIndexPoint(
+        Image<Bgra32> bmp, int index, int startX, int targetY, out int x, out int y)
+    {
+        int minY = Math.Max(0, targetY - 32);
+        int maxY = Math.Min(bmp.Height, targetY + 33);
+        byte blue = (byte)index;
+
+        for (int xi = Math.Max(0, startX); xi < bmp.Width; xi++)
+        {
+            for (int yi = minY; yi < maxY; yi++)
             {
                 Bgra32 pixel = bmp[xi, yi];
-                if (pixel.B == i && pixel.R == 0 && pixel.G == 0)
+                if (pixel.R == 0 && pixel.G == 0 && pixel.B == blue)
                 {
                     x = xi;
                     y = yi;

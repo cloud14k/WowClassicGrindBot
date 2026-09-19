@@ -51,7 +51,19 @@ DataToColor.C.CHARACTER_CLASS_MAP = {
     ["Warlock"] = 9,
     ["Monk"] = 10,
     ["Druid"] = 11,
-    ["DemonHunter"] = 12
+    ["DemonHunter"] = 12,
+    ["战士"] = 1,
+    ["圣骑士"] = 2,
+    ["猎人"] = 3,
+    ["盗贼"] = 4,
+    ["牧师"] = 5,
+    ["死亡骑士"] = 6,
+    ["萨满祭司"] = 7,
+    ["法师"] = 8,
+    ["术士"] = 9,
+    ["武僧"] = 10,
+    ["德鲁伊"] = 11,
+    ["恶魔猎手"] = 12
 }
 
 DataToColor.C.CHARACTER_RACE_MAP = {
@@ -69,7 +81,21 @@ DataToColor.C.CHARACTER_RACE_MAP = {
     ["Draenei"] = 11,
     ["Worgen"] = 22,
     ["Gilnean"] = 23,
-    ["Pandaren"] = 24
+    ["Pandaren"] = 24,
+    ["人类"] = 1,
+    ["兽人"] = 2,
+    ["矮人"] = 3,
+    ["暗夜精灵"] = 4,
+    ["亡灵"] = 5,
+    ["牛头人"] = 6,
+    ["侏儒"] = 7,
+    ["巨魔"] = 8,
+    ["地精"] = 9,
+    ["血精灵"] = 10,
+    ["德莱尼"] = 11,
+    ["狼人"] = 22,
+    ["吉尔尼斯人"] = 23,
+    ["熊猫人"] = 24
 }
 
 -- MoP gives a Pandaren a different race id per faction. The bot models a single
@@ -90,15 +116,37 @@ DataToColor.C.FACTION_MAP = {
 function DataToColor:DetectPlayerCharacter()
     DataToColor.C.CHARACTER_NAME = UnitName(DataToColor.C.unitPlayer)
     DataToColor.C.CHARACTER_GUID = UnitGUID(DataToColor.C.unitPlayer)
-    DataToColor.C.CHARACTER_CLASS_LOWER, DataToColor.C.CHARACTER_CLASS, DataToColor.C.CHARACTER_CLASS_ID = UnitClass(DataToColor.C.unitPlayer)
-    DataToColor.C.CHARACTER_RACE, _, DataToColor.C.CHARACTER_RACE_ID = UnitRace(DataToColor.C.unitPlayer)
+    local localizedClass, classToken, classId = UnitClass(DataToColor.C.unitPlayer)
+    local localizedRace, raceToken, raceId = UnitRace(DataToColor.C.unitPlayer)
+
+    DataToColor.C.CHARACTER_CLASS_LOWER = localizedClass
+    DataToColor.C.CHARACTER_CLASS = classToken
+    DataToColor.C.CHARACTER_CLASS_ID = classId
+    DataToColor.C.CHARACTER_RACE = localizedRace
+    DataToColor.C.CHARACTER_RACE_ID = raceId
+
+    -- Older Classic clients may omit the numeric IDs. The second return value
+    -- is the locale-independent token (e.g. WARRIOR / DWARF), so prefer it
+    -- over the localized first return value when resolving the fallback.
+    local function lookupTokenId(map, token, localized)
+        if token then
+            for name, id in pairs(map) do
+                if string.upper(name) == string.upper(token) then
+                    return id
+                end
+            end
+        end
+        return map[localized]
+    end
 
     if DataToColor.C.CHARACTER_RACE_ID == nil then
-        DataToColor.C.CHARACTER_RACE_ID = DataToColor.C.CHARACTER_RACE_MAP[DataToColor.C.CHARACTER_RACE]
+        DataToColor.C.CHARACTER_RACE_ID = lookupTokenId(
+            DataToColor.C.CHARACTER_RACE_MAP, raceToken, localizedRace)
     end
 
     if DataToColor.C.CHARACTER_CLASS_ID == nil then
-        DataToColor.C.CHARACTER_CLASS_ID = DataToColor.C.CHARACTER_CLASS_MAP[DataToColor.C.CHARACTER_CLASS_LOWER]
+        DataToColor.C.CHARACTER_CLASS_ID = lookupTokenId(
+            DataToColor.C.CHARACTER_CLASS_MAP, classToken, localizedClass)
     end
 
     if DataToColor.C.CHARACTER_RACE_ID == DataToColor.C.PANDAREN_ALLIANCE_RACE_ID

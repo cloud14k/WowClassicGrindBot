@@ -42,7 +42,8 @@ public readonly record struct DataFrameMeta
             return Size.Empty;
 
         SizeF estimated =
-            new((float)Math.Ceiling(Count / (float)Rows) * cellSize, Rows * cellSize);
+            new((float)Math.Ceiling(Count / (float)Rows) * cellSize,
+                FrameConfigMeta.TopOffset + Rows * cellSize);
 
         return estimated.Width > screenRect.Width ||
             estimated.Height > screenRect.Height

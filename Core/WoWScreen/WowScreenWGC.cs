@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using SharpGen.Runtime;
 
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Advanced;
 using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -45,6 +46,8 @@ namespace Core;
 /// </summary>
 public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuTextureProvider
 {
+    private static readonly Bgra32 addonLastColor = new(30, 132, 129, 255);
+
     private readonly ILogger<WowScreenWGC> logger;
     private readonly WowProcess process;
     private const int Bgra32Size = ScreenCaptureHelper.Bgra32Size;
@@ -126,6 +129,7 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
     private SixLabors.ImageSharp.Size addonSize;
     private DataFrame[] frames = null!;
     private Image<Bgra32> addonImage = null!;
+    private bool loggedInvalidAddonSentinels;
 
     public int[] Data { get; private set; } = [];
     public StringBuilder TextBuilder { get; } = new(3);
@@ -374,6 +378,7 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
     {
         this.frames = frames;
         Data = new int[frames.Length];
+        loggedInvalidAddonSentinels = false;
 
         addonSize = new();
         for (int i = 0; i < frames.Length; i++)
@@ -595,6 +600,43 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
     {
         if (frames.Length <= 2)
             return;
+
+        ref readonly Bgra32 first = ref addonImage.DangerousGetPixelRowMemory(frames[0].Y)
+            .Span[frames[0].X];
+        ref readonly Bgra32 last = ref addonImage.DangerousGetPixelRowMemory(frames[^1].Y)
+            .Span[frames[^1].X];
+
+        if (!loggedInvalidAddonSentinels &&
+            (!first.Equals(new Bgra32(0, 0, 0, 255)) || !last.Equals(addonLastColor)))
+        {
+            loggedInvalidAddonSentinels = true;
+            StringBuilder candidates = new();
+            int candidateCount = 0;
+            int rowsToScan = Math.Min(20, ScreenImage.Height);
+            for (int y = 0; y < rowsToScan; y++)
+            {
+                ReadOnlySpan<Bgra32> row = ScreenImage.DangerousGetPixelRowMemory(y).Span;
+                for (int x = 0; x < row.Length; x++)
+                {
+                    if (!row[x].Equals(addonLastColor))
+                        continue;
+
+                    candidateCount++;
+                    if (candidateCount <= 8)
+                    {
+                        if (candidates.Length > 0)
+                            candidates.Append(' ');
+                        candidates.Append('(').Append(x).Append(',').Append(y).Append(')');
+                    }
+                }
+            }
+
+            logger.LogWarning(
+                "Addon sentinel mismatch: First=({FirstR},{FirstG},{FirstB},{FirstA}) Last=({LastR},{LastG},{LastB},{LastA}) Frames={FrameCount} ExpectedLastCandidatesTop20={Candidates} CandidateCount={CandidateCount}",
+                first.R, first.G, first.B, first.A,
+                last.R, last.G, last.B, last.A,
+                frames.Length, candidates.ToString(), candidateCount);
+        }
 
         IAddonDataProvider.InternalUpdate(addonImage, frames, Data);
     }

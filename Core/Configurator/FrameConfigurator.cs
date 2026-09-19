@@ -5,7 +5,9 @@ using Microsoft.Extensions.Logging;
 using SharedLib;
 
 using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Advanced;
 using SixLabors.ImageSharp.Formats.Jpeg;
+using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 
 using System;
@@ -231,7 +233,13 @@ public sealed partial class FrameConfigurator : IDisposable
                 break;
             case Stage.CreateDataFrames:
 
-                Size addonSize = size;
+                // The physical WGC coordinates can be larger than the logical
+                // size encoded by the addon because of WoW UI scaling. Keep a
+                // generous top-left scan region so every setup-mode colour is
+                // available to FrameConfig.CreateFrames.
+                int scanWidth = Math.Min(screenRect.Width, Math.Max(size.Width + 256, 512));
+                int scanHeight = Math.Min(screenRect.Height, Math.Max(size.Height + 64, 128));
+                Size addonSize = new(scanWidth, scanHeight);
                 var cropped = screen.ScreenImage.Clone(cropSize);
                 void cropSize(IImageProcessingContext x)
                 {
@@ -320,7 +328,10 @@ public sealed partial class FrameConfigurator : IDisposable
                 }
                 else
                 {
-                    logger.LogError("Unable to identify ClientVersion UnitRace and UnitClass!");
+                    int rawCell46 = reader.Data.Length > 46 ? reader.GetInt(46) : -1;
+                    logger.LogError(
+                        "Unable to identify ClientVersion UnitRace and UnitClass! RawCell46={RawCell46} DataLength={DataLength}",
+                        rawCell46, reader.Data.Length);
                     stage = Stage.Reset;
 
                     if (auto)
@@ -357,7 +368,40 @@ public sealed partial class FrameConfigurator : IDisposable
 
     private DataFrameMeta GetDataFrameMeta()
     {
-        return FrameConfig.GetMeta(screen.ScreenImage[0, 0]);
+        // The WoW client can occupy the first few rows of the client area even
+        // with third-party addons disabled. Find the metadata marker instead of
+        // assuming it is visible at (0, 0).
+        int maxX = Math.Min(screen.ScreenImage.Width, 256);
+        int maxY = Math.Min(screen.ScreenImage.Height, FrameConfigMeta.TopOffset + 64);
+
+        for (int y = 0; y < maxY; y++)
+        {
+            ReadOnlySpan<Bgra32> row = screen.ScreenImage.DangerousGetPixelRowMemory(y).Span;
+            for (int x = 0; x < maxX; x++)
+            {
+                DataFrameMeta meta = FrameConfig.GetMeta(row[x]);
+                // This addon publishes a fixed metadata signature. Do not
+                // accept arbitrary UI colours as metadata, otherwise a normal
+                // top-bar pixel can start a failed configuration retry loop.
+                if (meta == DataFrameMeta.Empty ||
+                    meta.Spacing != 1 ||
+                    meta.Sizes != 4 ||
+                    meta.Rows != 1 ||
+                    meta.Count != 119)
+                {
+                    continue;
+                }
+
+                int expectedHash = meta.Spacing * 10000000 +
+                    meta.Sizes * 100000 +
+                    meta.Rows * 1000 +
+                    meta.Count;
+                if (meta.Hash == expectedHash)
+                    return meta;
+            }
+        }
+
+        return DataFrameMeta.Empty;
     }
 
     public void ToggleManualConfig()

@@ -9,9 +9,12 @@ local NUMBER_OF_FRAMES = 119
 -- Set number of pixel rows
 local FRAME_ROWS = 1
 -- Size of data squares in px. Varies based on rounding errors as well as dimension size. Use as a guideline, but not 100% accurate.
-local CELL_SIZE = 1 -- 1-9
+local CELL_SIZE = 4 -- 1-9
 -- Spacing in px between data squares.
 local CELL_SPACING = 1 -- 0 or 1
+-- Keep the data strip below the client's top edge, which can be occupied by
+-- built-in UI even when no third-party addons are enabled.
+local FRAME_TOP_OFFSET = 0
 
 local GLOBAL_TIME_CELL = NUMBER_OF_FRAMES - 2
 
@@ -386,11 +389,16 @@ DataToColor.customTrigger1 = {}
 DataToColor.sessionKillCount = 0
 
 function DataToColor:RegisterSlashCommands()
+    DataToColor:RegisterChatCommand('wowclassicgrindbot', 'StartSetup')
     DataToColor:RegisterChatCommand('dc', 'StartSetup')
     DataToColor:RegisterChatCommand('dccpu', 'GetCPUImpact')
     DataToColor:RegisterChatCommand('dcflush', 'FushState')
     DataToColor:RegisterChatCommand('dcbindings', 'SetDefaultBindings')
     DataToColor:RegisterChatCommand('dcactions', 'CreateSecureButtons')
+    -- Keep the configured default title prefix available as an alias. The
+    -- generated frontend may call these names after addon installation.
+    DataToColor:RegisterChatCommand('wowclassicgrindbotbindings', 'SetDefaultBindings')
+    DataToColor:RegisterChatCommand('wowclassicgrindbotactions', 'CreateSecureButtons')
     DataToColor:RegisterChatCommand('dccache', 'ToggleBitCache')
 end
 
@@ -966,17 +974,19 @@ function DataToColor:CreateFrames()
     local unitsTargetTick = -999
 
     local function updateFrames()
-        if not SETUP_SEQUENCE and globalTick >= initPhase then
+        if not SETUP_SEQUENCE then
+            -- Keep both integrity markers present throughout normal mode,
+            -- including the initialization phase after leaving setup mode.
+            Pixel(int, 0, 0)
+            Pixel(int, 2000001, NUMBER_OF_FRAMES - 1)
+
+            if globalTick >= initPhase then
             -- Ensure globalTime is past the C# FullReset threshold (Value <= 3)
             -- so queue data is processed immediately when rendering starts.
             -- Without this, the first queue items only get ~1 frame of C# visibility.
             if DataToColor.globalTime < initPhase then
                 DataToColor.globalTime = initPhase
             end
-
-            Pixel(int, 0, 0)
-            -- The final data square, reserved for additional metadata.
-            Pixel(int, 2000001, NUMBER_OF_FRAMES - 1)
 
             local x, y = DataToColor:GetPosition()
             Pixel(fixed24, x, 1)
@@ -1489,14 +1499,13 @@ function DataToColor:CreateFrames()
             DataToColor:HandlePlayerInteractionEvents()
 
             DataToColor:Update()
-        elseif not SETUP_SEQUENCE then
-            if globalTick < initPhase then
+            else
                 for i = 1, NUMBER_OF_FRAMES - 1 do
                     Pixel(int, 0, i)
                     updateCount[i] = 0
                 end
+                UpdateGlobalTime()
             end
-            UpdateGlobalTime()
         end
 
         if SETUP_SEQUENCE then
@@ -1516,7 +1525,7 @@ function DataToColor:CreateFrames()
         local f = CreateFrame("Frame", name, UIParent, BackdropTemplateMixin and "BackdropTemplate") or CreateFrame("Frame", name, UIParent)
 
         local xx = x * floor(CELL_SIZE + CELL_SPACING)
-        local yy = floor(-y * (CELL_SIZE + CELL_SPACING))
+        local yy = -FRAME_TOP_OFFSET + floor(-y * (CELL_SIZE + CELL_SPACING))
         --DataToColor:Print(name, " ", xx, " ", yy)
 
         f:SetPoint("TOPLEFT", xx, yy)
@@ -1526,7 +1535,11 @@ function DataToColor:CreateFrames()
             bgFile = "Interface\\AddOns\\DataToColor\\white.tga",
             insets = { top = 0, left = 0, bottom = 0, right = 0 },
         })
+        -- The final validation frame must remain visible because the reader uses
+        -- it as an integrity marker. Some UI addons publish their own pixel
+        -- layers at TOOLTIP/frame level 128, so use a higher level here.
         f:SetFrameStrata("TOOLTIP")
+        f:SetFrameLevel(1000)
         f:SetBackdropColor(0, 0, 0, 1)
         return f
     end
@@ -1535,7 +1548,8 @@ function DataToColor:CreateFrames()
     local backgroundframe = genFrame("frame_bg", 0, 0)
     backgroundframe:SetHeight(FRAME_ROWS * (CELL_SIZE + CELL_SPACING))
     backgroundframe:SetWidth(ceil(NUMBER_OF_FRAMES / FRAME_ROWS) * (CELL_SIZE + CELL_SPACING))
-    backgroundframe:SetFrameStrata("FULLSCREEN_DIALOG")
+    backgroundframe:SetFrameStrata("TOOLTIP")
+    backgroundframe:SetFrameLevel(0)
     backgroundframe:SetBackdropColor(0, 0, 0, 1)
 
     for frame = 0, NUMBER_OF_FRAMES - 1 do
