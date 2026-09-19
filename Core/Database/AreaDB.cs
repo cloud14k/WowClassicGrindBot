@@ -32,9 +32,11 @@ public sealed class AreaDB : IDisposable
     private readonly WorldMapAreaDB worldMapAreaDB;
     private readonly FactionTemplateDB factionDB;
 
+    private readonly CancellationTokenSource disposeCts = new();
     private readonly CancellationToken token;
     private readonly ManualResetEventSlim resetEvent;
     private readonly Thread thread;
+    private int disposed;
 
     private readonly JsonSerializerSettings npcJsonSettings = new()
     {
@@ -53,7 +55,6 @@ public sealed class AreaDB : IDisposable
     public AreaDB(ILogger logger, DataConfig dataConfig,
         CreatureDB creatures,
         WorldMapAreaDB worldMapAreaDB,
-        CancellationTokenSource cts,
         FactionTemplateDB factionDB)
     {
         this.logger = logger;
@@ -62,16 +63,26 @@ public sealed class AreaDB : IDisposable
         this.factionDB = factionDB;
         this.worldMapAreaDB = worldMapAreaDB;
 
-        token = cts.Token;
+        token = disposeCts.Token;
         resetEvent = new();
 
         thread = new(ReadArea);
+        thread.IsBackground = true;
         thread.Start();
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+
+        disposeCts.Cancel();
         resetEvent.Set();
+        if (thread != Thread.CurrentThread)
+            thread.Join();
+
+        resetEvent.Dispose();
+        disposeCts.Dispose();
     }
 
     public void Update(int areaId)
@@ -145,6 +156,9 @@ public sealed class AreaDB : IDisposable
             }
 
             resetEvent.Reset();
+            if (token.IsCancellationRequested)
+                break;
+
             resetEvent.Wait();
         }
     }

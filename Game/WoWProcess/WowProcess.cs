@@ -10,7 +10,7 @@ using System.Threading;
 
 namespace Game;
 
-public sealed class WowProcess
+public sealed class WowProcess : IDisposable
 {
     private static readonly string[] defaultProcessNames = [
         "Wow",
@@ -24,7 +24,9 @@ public sealed class WowProcess
     ];
 
     private readonly Thread thread;
+    private readonly CancellationTokenSource cancellationSource;
     private readonly CancellationToken token;
+    private int disposed;
 
     public Version FileVersion { get; private set; }
 
@@ -51,6 +53,7 @@ public sealed class WowProcess
 
     private WowProcess(CancellationTokenSource cts, int pid = -1)
     {
+        cancellationSource = cts;
         token = cts.Token;
 
         Process? p = Get(pid)
@@ -90,6 +93,16 @@ public sealed class WowProcess
 
             token.WaitHandle.WaitOne(5000);
         }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0)
+            return;
+
+        cancellationSource.Cancel();
+        if (thread != Thread.CurrentThread)
+            thread.Join(1000);
     }
 
     public static Process? Get(int processId = -1)

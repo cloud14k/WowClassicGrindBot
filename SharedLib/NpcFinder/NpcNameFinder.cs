@@ -169,7 +169,20 @@ public sealed partial class NpcNameFinder
         ReadOnlySpan<LineSegment> lineSegments =
             lineSegmentProvider.GetLineSegments(Area, minLength, minEndLength);
 
-        Npcs = DetermineNpcs(lineSegments);
+        Npcs = DetermineNpcs(
+            lineSegments,
+            out int determineCount,
+            out int moveEmptyLength);
+
+        logger.LogInformation(
+            "[NpcNameFinder] lineSegments.Count={LineSegmentsCount} | " +
+            "DetermineNpcs.count={DetermineCount} | " +
+            "MoveEmptyToEnd.length={MoveEmptyLength} | " +
+            "Npcs.Count={NpcCount}",
+            lineSegments.Length,
+            determineCount,
+            moveEmptyLength,
+            Npcs.Count);
 
         TargetCount = Npcs.Count(TargetsCount);
         AddCount = Npcs.Count(IsAdd);
@@ -193,7 +206,10 @@ public sealed partial class NpcNameFinder
     }
 
     [SkipLocalsInit]
-    private ArraySegment<NpcPosition> DetermineNpcs(ReadOnlySpan<LineSegment> data)
+    private ArraySegment<NpcPosition> DetermineNpcs(
+        ReadOnlySpan<LineSegment> data,
+        out int determineCount,
+        out int moveEmptyLength)
     {
         int count = 0;
 
@@ -293,6 +309,9 @@ public sealed partial class NpcNameFinder
 
         int length = MoveEmptyToEnd(npcs, count, NpcPosition.Empty);
         Array.Sort(npcs, 0, length, npcPosComparer);
+
+        determineCount = count;
+        moveEmptyLength = length;
 
         pool.Return(npcs);
 

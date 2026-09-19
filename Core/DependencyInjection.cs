@@ -279,9 +279,6 @@ public static class DependencyInjection
             return new PPatherService(serviceLogger, dataConfig, worldMapAreaDB, bakeOptions, queryOptions);
         });
 
-        s.AddSingleton<IAddonDataProvider>(x =>
-            GetAddonDataProvider(x.GetRequiredService<IServiceProvider>(), log));
-
         s.AddSingleton<MinimapNodeFinder>();
 
         s.AddSingleton<SessionStat>();
@@ -289,16 +286,7 @@ public static class DependencyInjection
         s.AddSingleton<LevelTracker>();
         s.AddSingleton<TimeToKill>();
 
-        s.AddSingleton<AreaDB>();
-        s.AddSingleton<WorldMapAreaDB>();
-        s.AddSingleton<ItemDB>();
-        s.AddSingleton<CreatureDB>();
-        s.AddSingleton<FactionTemplateDB>();
-        s.AddSingleton<NpcSpawnDB>();
-        s.AddSingleton<SpellDB>();
-        s.AddSingleton<IconDB>();
-        s.AddSingleton<TalentDB>();
-        s.AddSingleton<MailboxDB>();
+        s.AddCoreReaderServices(log);
 
         // Route generation. Root-scoped so the preview page can generate with no bot
         // session running, and so AddStartupIoC can forward one shared instance into the
@@ -315,6 +303,88 @@ public static class DependencyInjection
         s.AddSingleton<IBotController, BotController>();
         s.AddSingleton<IMailSettingsService, MailSettingsService>();
 
+        return s;
+    }
+
+    /// <summary>
+    /// Registers the production screen and addon reader chain without registering
+    /// BotController, GOAP, navigation, combat, or input behavior.
+    ///
+    /// This is the shared environment used by diagnostic tools that need to prove
+    /// the same game-reading prerequisites as the normal bot.
+    /// </summary>
+    public static IServiceCollection AddCoreReaderEnvironment(
+        this IServiceCollection s, ILogger log)
+    {
+        s.AddCoreBase(log);
+        s.AddCoreReaderServices(log);
+        return s;
+    }
+
+    /// <summary>
+    /// Extends the production reader environment with the pathing services needed by
+    /// diagnostics that drive the real Navigation component, without registering the
+    /// bot controller or any GOAP behavior.
+    /// </summary>
+    public static IServiceCollection AddCoreNavigationEnvironment(
+        this IServiceCollection s, ILogger log)
+    {
+        s.AddCoreReaderEnvironment(log);
+
+        s.AddSingleton<IScreenCapture>(x =>
+            GetScreenCapture(x.GetRequiredService<IServiceProvider>(), log));
+
+        s.AddSingleton<IPathVizualizer>(x =>
+            GetPathVizualizer(x.GetRequiredService<IServiceProvider>(), log));
+
+        s.AddSingleton<IPPather>(x =>
+            GetPather(x.GetRequiredService<IServiceProvider>(), log));
+
+        s.AddSingleton<PPatherService>(x =>
+        {
+            var loggerFactory = x.GetRequiredService<ILoggerFactory>();
+            var serviceLogger = loggerFactory.CreateLogger<PPatherService>();
+            var dataConfig = x.GetRequiredService<DataConfig>();
+            var worldMapAreaDB = x.GetRequiredService<WorldMapAreaDB>();
+            var bakeOptions = x.GetRequiredService<IOptions<NavmeshBakeOptions>>();
+            var queryOptions = x.GetRequiredService<IOptions<NavmeshQueryOptions>>();
+            return new PPatherService(serviceLogger, dataConfig, worldMapAreaDB, bakeOptions, queryOptions);
+        });
+
+        s.AddSingleton<MinimapNodeFinder>();
+
+        s.AddSingleton<SessionStat>();
+        s.AddSingleton<IGrindSessionDAO, LocalGrindSessionDAO>();
+        s.AddSingleton<LevelTracker>();
+        s.AddSingleton<TimeToKill>();
+
+        s.AddSingleton<IRouteGenPlayer, RouteGenPlayer>();
+        s.AddSingleton<CreatureRequirementFactory>();
+        s.AddSingleton<RouteGenerator>();
+        s.AddSingleton<ActionBarSlotValidator>();
+        s.AddSingleton<AddonConfigurator>();
+
+        return s;
+    }
+
+    private static IServiceCollection AddCoreReaderServices(
+        this IServiceCollection s, ILogger log)
+    {
+        s.AddSingleton<IAddonDataProvider>(x =>
+            GetAddonDataProvider(x.GetRequiredService<IServiceProvider>(), log));
+
+        s.AddSingleton<AreaDB>();
+        s.AddSingleton<WorldMapAreaDB>();
+        s.AddSingleton<ItemDB>();
+        s.AddSingleton<CreatureDB>();
+        s.AddSingleton<FactionTemplateDB>();
+        s.AddSingleton<NpcSpawnDB>();
+        s.AddSingleton<SpellDB>();
+        s.AddSingleton<IconDB>();
+        s.AddSingleton<TalentDB>();
+        s.AddSingleton<MailboxDB>();
+
+        s.AddAddonComponents();
         return s;
     }
 

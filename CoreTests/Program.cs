@@ -45,11 +45,14 @@ internal sealed class Program
         ["pather"] = Test_PPather,
         ["navmesh"] = Test_NavmeshCoords,
         ["routegen"] = Test_RouteGeneration,
+        ["moveto"] = args => Test_MoveTo.Run(logger, loggerFactory, UseDxgi, args),
+        ["target"] = args => Test_Target.Run(logger, loggerFactory, UseDxgi, args),
+        ["state"] = args => Test_State.Run(logger, loggerFactory, UseDxgi, args),
     };
 
     /// <summary>Suites that need no WoW process - see the attach decision in Main.</summary>
     private static readonly HashSet<string> offlineSuites =
-        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen" };
+        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "state" };
 
     public static void Main(string[] args)
     {
@@ -110,6 +113,26 @@ internal sealed class Program
             return;
         }
 
+        // MoveTo is a live integration test. It creates its own production reader and
+        // navigation graph so the normal mock process below cannot be used accidentally.
+        if (remaining.Count > 0 && remaining[0].Equals("moveto", StringComparison.OrdinalIgnoreCase))
+        {
+            Test_MoveTo.Run(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
+        // Target is a live integration test. It uses the production NPC finder,
+        // TargetFinder, and NpcNameTargeting against the running game client.
+        if (remaining.Count > 0 && remaining[0].Equals("target", StringComparison.OrdinalIgnoreCase))
+        {
+            Test_Target.Run(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
         // Suites that read only from Json/ and the baked navmesh. Attaching to the game
         // would be the only thing that could fail, so do not attach at all - otherwise
         // every offline suite needs WoW running to say anything.
@@ -146,7 +169,6 @@ internal sealed class Program
         }
 
         Log.CloseAndFlush();
-        Environment.Exit(0);
     }
 
     private static void Test_NPCNameFinder(string[] args)
