@@ -100,7 +100,9 @@ function DataToColor:InitActionBarTextureQueue()
         end
     end
 
-    DataToColor.actionBarTextureQueue:push(DataToColor.QUEUE_COUNT_MARKER + count)
+    for _ = 1, DataToColor.QUEUE_HEADER_REPEAT_COUNT do
+        DataToColor.actionBarTextureQueue:push(DataToColor.QUEUE_COUNT_MARKER + count)
+    end
     for index, slot in pairs(IndexToSlot) do
         local textureId = textureCache[slot] or 0
         if textureId > 0 then

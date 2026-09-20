@@ -19,13 +19,10 @@ internal static class AddonRefreshHelper
     // client. Do not interrupt that rebuild with an early second flush.
     public const int DefaultTimeoutMs = 30_000;
     public const int UpdateIntervalMs = 2;
-    // The first attempt is the normal transaction. A second transaction is
-    // allowed only after the binding queue has emitted a header and then made
-    // no progress for the stall window. This is recovery from a captured-frame
-    // / addon queue stall, not an overlapping early retry.
-    private const int MaxRefreshAttempts = 2;
-    private const int BindingQueueStallTimeoutMs = 2500;
-    private const int FlushAckTimeoutMs = 2500;
+    // A refresh is one transaction: one reader reset and one CUSTOM_FLUSH.
+    // Missing a queue item is reported as a refresh failure; issuing another
+    // flush would clear the batch that may already be in flight.
+    private const int MaxRefreshAttempts = 1;
 
     public static bool RefreshAddonAndWaitForReaders(
         IWowScreen screen,
@@ -44,19 +41,31 @@ internal static class AddonRefreshHelper
         int refreshAttempts = 0;
         int lastReceivedCount = -1;
         int lastBindingRaw = int.MinValue;
-        long lastBindingProgressMs = 0;
-        long lastFlushMs = 0;
+
+        if (IsReady(addonReader, keyBindingsReader))
+        {
+            Console.WriteLine("Refresh already complete; skipping CUSTOM_FLUSH");
+            stats = CreateStats(timer, updateCount, addonReader);
+            error = string.Empty;
+            return true;
+        }
 
         while (timer.ElapsedMilliseconds < timeoutMs &&
             !token.IsCancellationRequested &&
             refreshAttempts < MaxRefreshAttempts)
         {
             refreshAttempts++;
-            // AddonReader.BeginRefresh() pauses its own reader graph, but the
-            // ManualResetEventSlim remains signalled until the next rebuild
-            // completes. Reset it here so this helper waits for this refresh,
-            // not for a previous session's DataReady state.
-            StartRefreshTransaction(addonReader, flushInput, timer, ref lastFlushMs);
+            Console.WriteLine("Refresh start");
+            // BeginRefresh resets the reader graph and DataReady. The
+            // following Shift+PageDown invokes the official CUSTOM_FLUSH.
+            StartRefreshTransaction(addonReader, flushInput);
+            Console.WriteLine("Flush requested");
+
+            bool flushAcknowledgedLogged = false;
+            bool initPhaseFinishedLogged = false;
+            bool bindingHeaderLogged = false;
+            bool spellBookReadyLogged = false;
+            bool textureReadyLogged = false;
 
             while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
             {
@@ -65,46 +74,59 @@ internal static class AddonRefreshHelper
                 updateCount++;
                 onUpdate?.Invoke(updateCount);
 
-                if (keyBindingsReader.ExpectedCount >= 0 &&
-                    (keyBindingsReader.ReceivedCount != lastReceivedCount ||
-                     addonReader.BindingQueueRaw != lastBindingRaw))
+                if (!flushAcknowledgedLogged && addonReader.ExpectedRefreshResetCount > 0)
                 {
-                    lastReceivedCount = keyBindingsReader.ReceivedCount;
-                    lastBindingRaw = addonReader.BindingQueueRaw;
-                    lastBindingProgressMs = timer.ElapsedMilliseconds;
+                    flushAcknowledgedLogged = true;
+                    Console.WriteLine("Expected GlobalTime reset observed");
+                    Console.WriteLine("Flush acknowledged");
                 }
 
-                if (addonReader.DataReady.IsSet && keyBindingsReader.IsInitialized)
+                if (!initPhaseFinishedLogged && addonReader.GlobalTime.Value >= AddonTicks.INIT_PHASE)
                 {
+                    initPhaseFinishedLogged = true;
+                    Console.WriteLine("Init phase finished");
+                }
+
+                if (!bindingHeaderLogged && keyBindingsReader.ExpectedCount >= 0)
+                {
+                    bindingHeaderLogged = true;
+                    Console.WriteLine($"Binding header received: expected {keyBindingsReader.ExpectedCount}");
+                }
+
+                if (keyBindingsReader.ReceivedCount != lastReceivedCount ||
+                    addonReader.BindingQueueRaw != lastBindingRaw)
+                {
+                    if (keyBindingsReader.ExpectedCount >= 0 &&
+                        (keyBindingsReader.ReceivedCount == 1 ||
+                         keyBindingsReader.ReceivedCount == keyBindingsReader.ExpectedCount))
+                    {
+                        Console.WriteLine(
+                            $"Binding {keyBindingsReader.ReceivedCount}/{keyBindingsReader.ExpectedCount}");
+                    }
+
+                    lastReceivedCount = keyBindingsReader.ReceivedCount;
+                    lastBindingRaw = addonReader.BindingQueueRaw;
+                }
+
+                if (!spellBookReadyLogged && addonReader.SpellBookInitialized)
+                {
+                    spellBookReadyLogged = true;
+                    Console.WriteLine("SpellBook ready");
+                }
+
+                if (!textureReadyLogged && addonReader.TextureInitialized)
+                {
+                    textureReadyLogged = true;
+                    Console.WriteLine("Texture ready");
+                }
+
+                if (IsReady(addonReader, keyBindingsReader))
+                {
+                    Console.WriteLine("DataReady=true");
+                    Console.WriteLine("Refresh complete");
                     stats = CreateStats(timer, updateCount, addonReader);
                     error = string.Empty;
                     return true;
-                }
-
-                bool bindingQueueStalled =
-                    refreshAttempts < MaxRefreshAttempts &&
-                    keyBindingsReader.ExpectedCount > 0 &&
-                    keyBindingsReader.ReceivedCount < keyBindingsReader.ExpectedCount &&
-                    timer.ElapsedMilliseconds - lastBindingProgressMs >= BindingQueueStallTimeoutMs;
-
-                bool flushWasNotAcknowledged =
-                    refreshAttempts < MaxRefreshAttempts &&
-                    keyBindingsReader.ExpectedCount < 0 &&
-                    addonReader.BindingQueueRaw == 0 &&
-                    timer.ElapsedMilliseconds - lastFlushMs >= FlushAckTimeoutMs;
-
-                if (bindingQueueStalled || flushWasNotAcknowledged)
-                {
-                    // The current transaction has conclusively stopped making
-                    // progress. Finish it before beginning one explicit
-                    // recovery transaction; this keeps the expected Lua reset
-                    // from being mistaken for an unexpected addon reset.
-                    StartRefreshTransaction(addonReader, flushInput, timer, ref lastFlushMs);
-                    refreshAttempts++;
-                    lastReceivedCount = -1;
-                    lastBindingRaw = int.MinValue;
-                    lastBindingProgressMs = timer.ElapsedMilliseconds;
-                    continue;
                 }
 
                 token.WaitHandle.WaitOne(UpdateIntervalMs);
@@ -131,9 +153,7 @@ internal static class AddonRefreshHelper
 
     private static void StartRefreshTransaction(
         AddonReader addonReader,
-        WowProcessInput flushInput,
-        Stopwatch timer,
-        ref long lastFlushMs)
+        WowProcessInput flushInput)
     {
         // PostMessage input is delivered to the WoW window, but protected
         // bindings can still be ignored while another window owns focus.
@@ -142,8 +162,15 @@ internal static class AddonRefreshHelper
         flushInput.SetForegroundWindow();
         addonReader.BeginRefresh();
         flushInput.PressFlushKey();
-        lastFlushMs = timer.ElapsedMilliseconds;
     }
+
+    public static bool IsReady(
+        AddonReader addonReader,
+        KeyBindingsReader keyBindingsReader) =>
+        addonReader.DataReady.IsSet &&
+        keyBindingsReader.IsInitialized &&
+        addonReader.SpellBookInitialized &&
+        addonReader.TextureInitialized;
 
     private static AddonRefreshStats CreateStats(
         Stopwatch timer,

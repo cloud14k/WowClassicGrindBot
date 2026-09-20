@@ -12,6 +12,10 @@ local DataToColor = unpack(Load)
 -- the same value. Collections.lua loads before the queue users, so expose the
 -- default here; DataToColor.lua reassigns the same value from FRAME_CHANGE_RATE.
 DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME = 5
+-- A captured frame can advance GlobalTime by several addon ticks. Repeat
+-- counted-queue headers so the reader cannot miss the batch start while the
+-- addon is leaving the flush init phase.
+DataToColor.QUEUE_HEADER_REPEAT_COUNT = 8
 
 local GetTime = GetTime
 local next = next

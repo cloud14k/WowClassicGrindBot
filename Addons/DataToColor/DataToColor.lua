@@ -830,7 +830,9 @@ function DataToColor:InitSpellBookQueue()
         spellBookHighestSent[id] = true
     end
 
-    DataToColor.spellBookQueue:push(QUEUE_COUNT_MARKER + count)
+    for _ = 1, DataToColor.QUEUE_HEADER_REPEAT_COUNT do
+        DataToColor.spellBookQueue:push(QUEUE_COUNT_MARKER + count)
+    end
     for _, id in pairs(S.playerSpellBookIdHighest) do
         DataToColor.spellBookQueue:push(id)
     end
@@ -914,7 +916,9 @@ function DataToColor:InitTalentQueue()
     -- already had: a respec picks different talents, and the hashes of the old ones
     -- are never sent again, so nothing else would ever retire them. Sent even when
     -- the count is zero - unlearning every talent has to clear the set too.
-    DataToColor.talentQueue:push(QUEUE_COUNT_MARKER + count)
+    for _ = 1, DataToColor.QUEUE_HEADER_REPEAT_COUNT do
+        DataToColor.talentQueue:push(QUEUE_COUNT_MARKER + count)
+    end
 
     for i = 1, count do
         DataToColor.talentQueue:push(talentHashes[i])

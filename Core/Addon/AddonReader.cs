@@ -123,7 +123,6 @@ public sealed partial class AddonReader : IAddonReader
                 }
 
                 int previousExpected = previousGlobalTime;
-                previousGlobalTime = GlobalTime.Value;
                 if (!expectedResetObserved)
                 {
                     expectedResetObserved = true;
@@ -131,21 +130,24 @@ public sealed partial class AddonReader : IAddonReader
                     LogExpectedRefreshReset(logger, previousExpected, GlobalTime.Value);
                 }
 
-                // BeginRefresh already reset every reader. The zero/init-phase
-                // value emitted by the just-requested /dcflush is expected and
-                // must not clear the queue readers a second time.
+                // BeginRefresh already reset every reader. The low/rollback
+                // value emitted by the requested /dcflush is expected. Do not
+                // reset again, and do not skip this frame: if the capture starts
+                // after INIT_PHASE, this may be the first frame containing the
+                // queue header.
+            }
+            else
+            {
+                int previousUnexpected = previousGlobalTime;
+                previousGlobalTime = GlobalTime.Value;
+                ResetReaders(
+                    rolledBack
+                        ? AddonResetReason.GlobalTimeRollback
+                        : AddonResetReason.GlobalTimeInitPhase,
+                    previousUnexpected,
+                    GlobalTime.Value);
                 return;
             }
-
-            int previousUnexpected = previousGlobalTime;
-            previousGlobalTime = GlobalTime.Value;
-            ResetReaders(
-                rolledBack
-                    ? AddonResetReason.GlobalTimeRollback
-                    : AddonResetReason.GlobalTimeInitPhase,
-                previousUnexpected,
-                GlobalTime.Value);
-            return;
         }
 
         previousGlobalTime = GlobalTime.Value;

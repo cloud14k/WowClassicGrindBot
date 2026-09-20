@@ -73,7 +73,7 @@ internal static class Test_StateBindings
             Console.WriteLine($"Slot: {BindingSlot}");
             PrintStatus(keyBindingsReader, provider.GetInt(BindingSlot), "Initial");
 
-            Console.WriteLine("Requesting official DataToColor refresh: AddonReader.FullReset() + CUSTOM_FLUSH (Shift+PageDown)");
+            Console.WriteLine("Requesting official DataToColor refresh: AddonReader.BeginRefresh() + CUSTOM_FLUSH (Shift+PageDown)");
             int previousRaw = provider.GetInt(BindingSlot);
             bool refreshReady = AddonRefreshHelper.RefreshAddonAndWaitForReaders(
                 screen,

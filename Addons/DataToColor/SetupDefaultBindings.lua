@@ -217,7 +217,9 @@ function DataToColor:InitBindingQueue()
         end
     end
 
-    DataToColor.bindingQueue:push(DataToColor.QUEUE_COUNT_MARKER + count)
+    for _ = 1, DataToColor.QUEUE_HEADER_REPEAT_COUNT do
+        DataToColor.bindingQueue:push(DataToColor.QUEUE_COUNT_MARKER + count)
+    end
     for bindingId, _ in pairs(bindingCache) do
         local encoded = bindingCache[bindingId]
         if encoded > 0 then

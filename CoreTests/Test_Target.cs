@@ -101,21 +101,8 @@ internal static class Test_Target
                 return;
             }
 
-            if (!WaitForPlayerData(
-                    screen,
-                    addonReader,
-                    playerReader,
-                    environment.Cancellation.Token,
-                    out string playerDataError))
-            {
-                Fail(playerDataError);
-                return;
-            }
-
             // Do not construct ConfigurableInput until this completes: its
             // constructor snapshots InteractMouseOver into WowProcessInput.
-            logger.LogInformation(
-                "Refreshing official DataToColor queues before ClassConfiguration.Initialise");
             bool readersReady = AddonRefreshHelper.RefreshAddonAndWaitForReaders(
                 screen,
                 addonReader,
@@ -143,6 +130,17 @@ internal static class Test_Target
             if (!readersReady)
             {
                 Fail(keyBindingsError);
+                return;
+            }
+
+            if (!WaitForPlayerData(
+                    screen,
+                    addonReader,
+                    playerReader,
+                    environment.Cancellation.Token,
+                    out string playerDataError))
+            {
+                Fail(playerDataError);
                 return;
             }
 
