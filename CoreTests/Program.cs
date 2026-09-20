@@ -49,6 +49,8 @@ internal sealed class Program
         ["moveto"] = args => Test_MoveTo.Run(logger, loggerFactory, UseDxgi, args),
         ["target"] = args => Test_Target.Run(logger, loggerFactory, UseDxgi, args),
         ["pull"] = args => Test_Pull.Run(logger, loggerFactory, UseDxgi, args),
+        ["combat"] = args => Test_Combat.Run(logger, loggerFactory, UseDxgi, args),
+        ["grind"] = args => Test_Grind.Run(logger, loggerFactory, UseDxgi, args),
         ["state"] = args => Test_State.Run(logger, loggerFactory, UseDxgi, args),
     };
 
@@ -140,6 +142,26 @@ internal sealed class Program
         if (remaining.Count > 0 && remaining[0].Equals("pull", StringComparison.OrdinalIgnoreCase))
         {
             Test_Pull.Run(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
+        // Combat is a live integration test. It uses the production GoapAgent,
+        // PullTargetGoal, CombatGoal, CastingHandler, and ConfigurableInput.
+        if (remaining.Count > 0 && remaining[0].Equals("combat", StringComparison.OrdinalIgnoreCase))
+        {
+            Test_Combat.Run(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
+        // Grind is a live integration test. It keeps one production session
+        // for every requested round and stops immediately on the first failure.
+        if (remaining.Count > 0 && remaining[0].Equals("grind", StringComparison.OrdinalIgnoreCase))
+        {
+            Test_Grind.Run(logger, loggerFactory, UseDxgi,
                 remaining.GetRange(1, remaining.Count - 1).ToArray());
             Log.CloseAndFlush();
             return;

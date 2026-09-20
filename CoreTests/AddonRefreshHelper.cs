@@ -19,6 +19,7 @@ internal static class AddonRefreshHelper
     // client. Do not interrupt that rebuild with an early second flush.
     public const int DefaultTimeoutMs = 30_000;
     public const int UpdateIntervalMs = 2;
+    private const int BaselineTimeoutMs = 5_000;
     // A refresh is one transaction: one reader reset and one CUSTOM_FLUSH.
     // Missing a queue item is reported as a refresh failure; issuing another
     // flush would clear the batch that may already be in flight.
@@ -50,6 +51,24 @@ internal static class AddonRefreshHelper
             return true;
         }
 
+        if (!TryEstablishGlobalTimeBaseline(
+                screen,
+                addonReader,
+                token,
+                BaselineTimeoutMs,
+                ref updateCount,
+                onUpdate,
+                out string baselineError))
+        {
+            stats = CreateStats(timer, updateCount, addonReader);
+            error = $"REFRESH FAIL: Could not establish GlobalTime baseline ({baselineError})";
+            Console.WriteLine(error);
+            return false;
+        }
+
+        Console.WriteLine($"Refresh baseline GlobalTime={addonReader.GlobalTime.Value}");
+        Console.WriteLine("Baseline established");
+
         while (timer.ElapsedMilliseconds < timeoutMs &&
             !token.IsCancellationRequested &&
             refreshAttempts < MaxRefreshAttempts)
@@ -58,7 +77,7 @@ internal static class AddonRefreshHelper
             Console.WriteLine("Refresh start");
             // BeginRefresh resets the reader graph and DataReady. The
             // following Shift+PageDown invokes the official CUSTOM_FLUSH.
-            StartRefreshTransaction(addonReader, flushInput);
+            Thread flushThread = StartRefreshTransaction(addonReader, flushInput);
             Console.WriteLine("Flush requested");
 
             bool flushAcknowledgedLogged = false;
@@ -67,69 +86,83 @@ internal static class AddonRefreshHelper
             bool spellBookReadyLogged = false;
             bool textureReadyLogged = false;
 
-            while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
+            try
             {
-                screen.Update();
-                addonReader.Update();
-                updateCount++;
-                onUpdate?.Invoke(updateCount);
-
-                if (!flushAcknowledgedLogged && addonReader.ExpectedRefreshResetCount > 0)
+                while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
                 {
-                    flushAcknowledgedLogged = true;
-                    Console.WriteLine("Expected GlobalTime reset observed");
-                    Console.WriteLine("Flush acknowledged");
-                }
+                    // PressFlushKey has a humanized hold duration. Consume
+                    // frames while it is in flight so the first post-flush
+                    // header cannot be skipped by the screen capture buffer.
+                    screen.Update();
+                    addonReader.Update();
+                    updateCount++;
+                    onUpdate?.Invoke(updateCount);
 
-                if (!initPhaseFinishedLogged && addonReader.GlobalTime.Value >= AddonTicks.INIT_PHASE)
-                {
-                    initPhaseFinishedLogged = true;
-                    Console.WriteLine("Init phase finished");
-                }
-
-                if (!bindingHeaderLogged && keyBindingsReader.ExpectedCount >= 0)
-                {
-                    bindingHeaderLogged = true;
-                    Console.WriteLine($"Binding header received: expected {keyBindingsReader.ExpectedCount}");
-                }
-
-                if (keyBindingsReader.ReceivedCount != lastReceivedCount ||
-                    addonReader.BindingQueueRaw != lastBindingRaw)
-                {
-                    if (keyBindingsReader.ExpectedCount >= 0 &&
-                        (keyBindingsReader.ReceivedCount == 1 ||
-                         keyBindingsReader.ReceivedCount == keyBindingsReader.ExpectedCount))
+                    if (!flushAcknowledgedLogged && addonReader.ExpectedRefreshResetCount > 0)
                     {
-                        Console.WriteLine(
-                            $"Binding {keyBindingsReader.ReceivedCount}/{keyBindingsReader.ExpectedCount}");
+                        flushAcknowledgedLogged = true;
+                        Console.WriteLine("Expected GlobalTime reset observed");
+                        Console.WriteLine("Flush acknowledged");
                     }
 
-                    lastReceivedCount = keyBindingsReader.ReceivedCount;
-                    lastBindingRaw = addonReader.BindingQueueRaw;
-                }
+                    if (!initPhaseFinishedLogged &&
+                        flushAcknowledgedLogged &&
+                        addonReader.GlobalTime.Value >= AddonTicks.INIT_PHASE)
+                    {
+                        initPhaseFinishedLogged = true;
+                        Console.WriteLine("Init phase finished");
+                    }
 
-                if (!spellBookReadyLogged && addonReader.SpellBookInitialized)
-                {
-                    spellBookReadyLogged = true;
-                    Console.WriteLine("SpellBook ready");
-                }
+                    if (!bindingHeaderLogged && keyBindingsReader.ExpectedCount >= 0)
+                    {
+                        bindingHeaderLogged = true;
+                        Console.WriteLine($"Binding header received: expected {keyBindingsReader.ExpectedCount}");
+                    }
 
-                if (!textureReadyLogged && addonReader.TextureInitialized)
-                {
-                    textureReadyLogged = true;
-                    Console.WriteLine("Texture ready");
-                }
+                    if (keyBindingsReader.ReceivedCount != lastReceivedCount ||
+                        addonReader.BindingQueueRaw != lastBindingRaw)
+                    {
+                        if (keyBindingsReader.ExpectedCount >= 0 &&
+                            (keyBindingsReader.ReceivedCount == 1 ||
+                             keyBindingsReader.ReceivedCount == keyBindingsReader.ExpectedCount))
+                        {
+                            Console.WriteLine(
+                                $"Binding {keyBindingsReader.ReceivedCount}/{keyBindingsReader.ExpectedCount}");
+                        }
 
-                if (IsReady(addonReader, keyBindingsReader))
-                {
-                    Console.WriteLine("DataReady=true");
-                    Console.WriteLine("Refresh complete");
-                    stats = CreateStats(timer, updateCount, addonReader);
-                    error = string.Empty;
-                    return true;
-                }
+                        lastReceivedCount = keyBindingsReader.ReceivedCount;
+                        lastBindingRaw = addonReader.BindingQueueRaw;
+                    }
 
-                token.WaitHandle.WaitOne(UpdateIntervalMs);
+                    if (!spellBookReadyLogged && addonReader.SpellBookInitialized)
+                    {
+                        spellBookReadyLogged = true;
+                        Console.WriteLine("SpellBook ready");
+                    }
+
+                    if (!textureReadyLogged && addonReader.TextureInitialized)
+                    {
+                        textureReadyLogged = true;
+                        Console.WriteLine("Texture ready");
+                    }
+
+                    if (IsReady(addonReader, keyBindingsReader))
+                    {
+                        Console.WriteLine("DataReady=true");
+                        Console.WriteLine("Refresh complete");
+                        stats = CreateStats(timer, updateCount, addonReader);
+                        error = string.Empty;
+                        return true;
+                    }
+
+                    token.WaitHandle.WaitOne(UpdateIntervalMs);
+                }
+            }
+            finally
+            {
+                // The input press is short, but do not let a failed refresh
+                // leave a background input operation behind.
+                flushThread.Join(2000);
             }
         }
 
@@ -151,7 +184,43 @@ internal static class AddonRefreshHelper
         return false;
     }
 
-    private static void StartRefreshTransaction(
+    private static bool TryEstablishGlobalTimeBaseline(
+        IWowScreen screen,
+        AddonReader addonReader,
+        CancellationToken token,
+        int timeoutMs,
+        ref int updateCount,
+        Action<int> onUpdate,
+        out string error)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+        int lastGlobalTime = addonReader.GlobalTime.Value;
+
+        while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
+        {
+            screen.Update();
+            addonReader.Update();
+            updateCount++;
+            onUpdate?.Invoke(updateCount);
+
+            int globalTime = addonReader.GlobalTime.Value;
+            if (globalTime > AddonTicks.INIT_PHASE)
+            {
+                error = string.Empty;
+                return true;
+            }
+
+            lastGlobalTime = globalTime;
+            token.WaitHandle.WaitOne(UpdateIntervalMs);
+        }
+
+        error =
+            $"GlobalTime={lastGlobalTime}, required > {AddonTicks.INIT_PHASE}, " +
+            $"updates={updateCount}";
+        return false;
+    }
+
+    private static Thread StartRefreshTransaction(
         AddonReader addonReader,
         WowProcessInput flushInput)
     {
@@ -161,7 +230,14 @@ internal static class AddonRefreshHelper
         // delivery deterministic for this live diagnostic.
         flushInput.SetForegroundWindow();
         addonReader.BeginRefresh();
-        flushInput.PressFlushKey();
+        Thread flushThread = new(
+            flushInput.PressFlushKey)
+        {
+            IsBackground = true,
+            Name = "CoreTests.AddonRefresh.Flush"
+        };
+        flushThread.Start();
+        return flushThread;
     }
 
     public static bool IsReady(

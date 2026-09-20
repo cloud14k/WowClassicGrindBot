@@ -247,3 +247,13 @@ indexing (no game data required):
 ```powershell
 .\run.ps1 navmesh
 ```
+
+### grind - Production Grind Cycles
+
+Runs one or more real production target -> pull -> combat -> death -> loot
+cycles in a single `ProductionTestSession` and stops on the first failure.
+
+```powershell
+.\run.ps1 grind 1
+.\run.ps1 grind 3
+```
