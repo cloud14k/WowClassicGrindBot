@@ -13,6 +13,7 @@ using SharedLib.NpcFinder;
 using SixLabors.ImageSharp;
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 
@@ -26,6 +27,7 @@ namespace CoreTests;
 internal static class Test_Target
 {
     private const int PreflightTimeoutMs = 5000;
+    private const int KeyBindingsTimeoutMs = 30_000;
     private const int ScanTimeoutMs = 5000;
     private const int TargetTimeoutMs = 10_000;
     private const int TargetConfirmationTimeoutMs = 2000;
@@ -74,6 +76,8 @@ internal static class Test_Target
             IServiceProvider root = environment.Services;
             screen = root.GetRequiredService<IWowScreen>();
             AddonReader addonReader = root.GetRequiredService<AddonReader>();
+            KeyBindingsReader keyBindingsReader = root.GetRequiredService<KeyBindingsReader>();
+            WowProcessInput flushInput = root.GetRequiredService<WowProcessInput>();
             npcNameFinder = root.GetRequiredService<NpcNameFinder>();
             AddonBits bits = root.GetRequiredService<AddonBits>();
             PlayerReader playerReader = root.GetRequiredService<PlayerReader>();
@@ -109,10 +113,41 @@ internal static class Test_Target
                 return;
             }
 
+            // Match HeadlessServer.InitState: reset the reader graph first, then
+            // use the production CUSTOM_FLUSH binding to ask DataToColor to emit
+            // the normal queues again. Do not construct ConfigurableInput here;
+            // its constructor snapshots InteractMouseOver into WowProcessInput.
+            if (!keyBindingsReader.IsInitialized)
+            {
+                logger.LogInformation(
+                    "KeyBindingsReader is not initialized; requesting the official DataToColor queue refresh with CUSTOM_FLUSH");
+                addonReader.FullReset();
+                flushInput.PressFlushKey();
+            }
+
+            if (!WaitForKeyBindings(
+                    screen,
+                    addonReader,
+                    keyBindingsReader,
+                    environment.Cancellation.Token,
+                    KeyBindingsTimeoutMs,
+                    out string keyBindingsError))
+            {
+                Fail(keyBindingsError);
+                return;
+            }
+
             // Use the same session graph as the bot for TargetFinder,
             // NpcNameTargeting, ConfigurableInput, and the production blacklist.
             ServiceCollection registrations = new();
             ClassConfiguration classConfig = new() { Mode = Mode.Grind };
+
+            // Match BotController.InitialiseFromFile: resolve all KeyActions only
+            // after the addon has delivered the complete in-game binding queue, and
+            // before GoalFactory can construct ConfigurableInput. ConfigurableInput
+            // copies InteractMouseOver into WowProcessInput in its constructor.
+            classConfig.Initialise(root, new Dictionary<int, string>());
+
             registrations.AddScoped<ClassConfiguration>(_ => classConfig);
             targetServices = (ServiceProvider)GoalFactory.Create(
                 registrations,
@@ -124,7 +159,29 @@ internal static class Test_Target
             targetFinder = session.GetRequiredService<TargetFinder>();
             npcNameTargeting = session.GetRequiredService<NpcNameTargeting>();
             input = session.GetRequiredService<ConfigurableInput>();
+            WowProcessInput wowProcessInput = session.GetRequiredService<WowProcessInput>();
             targetCancellation = session.GetRequiredService<CancellationTokenSource<GoapAgent>>();
+
+            logger.LogInformation(
+                "Target input initialization: " +
+                "KeyBindingsReader.IsInitialized={IsInitialized}; " +
+                "TargetNearestTarget.BindingID={TargetBindingID}; " +
+                "TargetNearestTarget.ConsoleKey={TargetKey}; " +
+                "TargetNearestTarget.Modifier={TargetModifier}; " +
+                "InteractMouseOver.BindingID={InteractBindingID}; " +
+                "InteractMouseOver.ConsoleKey={InteractKey}; " +
+                "InteractMouseOver.Modifier={InteractModifier}; " +
+                "WowProcessInput.InteractMouseover={InputInteractKey}; " +
+                "WowProcessInput.InteractMouseoverModifier={InputInteractModifier}",
+                keyBindingsReader.IsInitialized,
+                classConfig.TargetNearestTarget.BindingID,
+                classConfig.TargetNearestTarget.ConsoleKey,
+                classConfig.TargetNearestTarget.Modifier,
+                classConfig.InteractMouseOver.BindingID,
+                classConfig.InteractMouseOver.ConsoleKey,
+                classConfig.InteractMouseOver.Modifier,
+                wowProcessInput.InteractMouseover,
+                wowProcessInput.InteractMouseoverModifier);
 
             // TargetFinder.WaitForUpdate relies on the normal screenshot thread. The
             // tester supplies only that production reader/finder tick; it does not
@@ -180,6 +237,8 @@ internal static class Test_Target
                 Console.WriteLine($"NpcNameFinder Found: {npcNameFinder.NpcCount}");
                 Console.WriteLine($"TargetFinder.Search: {searchResult}");
                 Console.WriteLine($"Has Target: {bits.Target()}");
+                Console.WriteLine($"Target Not Dead: {bits.Target_NotDead()}");
+                Console.WriteLine($"Target Hostile: {bits.Target_Hostile()}");
             }
         }
         catch (Exception ex)
@@ -306,15 +365,18 @@ internal static class Test_Target
         int timeoutMs)
     {
         Stopwatch timer = Stopwatch.StartNew();
-        while (!bits.Target() &&
+        while (!HasValidTarget(bits) &&
             !token.IsCancellationRequested &&
             timer.ElapsedMilliseconds < timeoutMs)
         {
             token.WaitHandle.WaitOne(UpdateIntervalMs);
         }
 
-        return bits.Target();
+        return HasValidTarget(bits);
     }
+
+    private static bool HasValidTarget(AddonBits bits) =>
+        bits.Target() && bits.Target_NotDead() && bits.Target_Hostile();
 
     private static bool WaitForPlayerData(
         IWowScreen screen,
@@ -344,7 +406,41 @@ internal static class Test_Target
 
         error =
             $"Live player data was not ready after {PreflightTimeoutMs} ms " +
-            $"(DataReady={addonReader.DataReady.IsSet}, UIMapId={playerReader.UIMapId.Value}).";
+            $"(DataReady={addonReader.DataReady.IsSet}, " +
+            $"UIMapId={playerReader.UIMapId.Value}).";
+        return false;
+    }
+
+    private static bool WaitForKeyBindings(
+        IWowScreen screen,
+        AddonReader addonReader,
+        KeyBindingsReader keyBindingsReader,
+        CancellationToken token,
+        int timeoutMs,
+        out string error)
+    {
+        Stopwatch timer = Stopwatch.StartNew();
+
+        while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
+        {
+            screen.Update();
+            addonReader.Update();
+
+            if (keyBindingsReader.IsInitialized)
+            {
+                error = string.Empty;
+                return true;
+            }
+
+            token.WaitHandle.WaitOne(UpdateIntervalMs);
+        }
+
+        error =
+            $"Key bindings were not initialized after {timeoutMs} ms " +
+            $"(DataReady={addonReader.DataReady.IsSet}, " +
+            $"KeyBindingsInitialized={keyBindingsReader.IsInitialized}, " +
+            $"ExpectedCount={keyBindingsReader.ExpectedCount}, " +
+            $"ReceivedCount={keyBindingsReader.ReceivedCount}).";
         return false;
     }
 

@@ -9,7 +9,7 @@ using System.Runtime.CompilerServices;
 
 namespace SharedLib.NpcFinder;
 
-public sealed class CpuLineSegmentProvider : IConfigurableLineSegmentProvider
+public sealed class CpuLineSegmentProvider : IConfigurableLineSegmentProvider, IDisposable
 {
     private const int RESOLUTION = 16;
 
@@ -36,12 +36,15 @@ public sealed class CpuLineSegmentProvider : IConfigurableLineSegmentProvider
     public ReadOnlySpan<LineSegment> GetLineSegments(
         Rectangle area, float minLength, float minEndLength)
     {
+        // NpcNameFinder consumes the previous span synchronously before asking
+        // for the next frame. Return the old buffer only at that boundary.
+        ReleaseSegments();
+
         int rowSize = (area.Right - area.Left) / RESOLUTION;
         int height = (area.Bottom - area.Top) / RESOLUTION;
         int totalSize = rowSize * height;
 
-        var pooler = ArrayPool<LineSegment>.Shared;
-        segments = pooler.Rent(totalSize);
+        segments = ArrayPool<LineSegment>.Shared.Rent(totalSize);
 
         Rectangle rectangle = new(area.X, area.Y, area.Width, area.Height);
         Buffer2D<Bgra32> pixelBuffer = imageProvider.ScreenImage.Frames[0].PixelBuffer;
@@ -60,8 +63,21 @@ public sealed class CpuLineSegmentProvider : IConfigurableLineSegmentProvider
                 break;
         }
 
-        pooler.Return(segments);
         return new(segments, 0, Math.Min(segments.Length, counter.count));
+    }
+
+    public void Dispose()
+    {
+        ReleaseSegments();
+    }
+
+    private void ReleaseSegments()
+    {
+        if (segments is null)
+            return;
+
+        ArrayPool<LineSegment>.Shared.Return(segments);
+        segments = null;
     }
 
     private void DispatchFuzzy(

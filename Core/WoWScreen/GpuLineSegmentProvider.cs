@@ -82,6 +82,10 @@ public sealed class GpuLineSegmentProvider : IConfigurableLineSegmentProvider, I
     public ReadOnlySpan<LineSegment> GetLineSegments(
         Rectangle area, float minLength, float minEndLength)
     {
+        // NpcNameFinder consumes the previous span synchronously before asking
+        // for the next frame. Return the old buffer only at that boundary.
+        ReleaseSegments();
+
         if (permanentFallback || gpuResources == null || !gpuResources.IsInitialized)
         {
             return cpuFallback.GetLineSegments(area, minLength, minEndLength);
@@ -138,8 +142,7 @@ public sealed class GpuLineSegmentProvider : IConfigurableLineSegmentProvider, I
         gpuResources.Dispatch(areaWidth, numRows);
 
         // 5. Read results
-        var pooler = ArrayPool<LineSegment>.Shared;
-        segments = pooler.Rent(MAX_SEGMENTS);
+        segments = ArrayPool<LineSegment>.Shared.Rent(MAX_SEGMENTS);
 
         int count = gpuResources.ReadResults(segments);
 
@@ -174,7 +177,6 @@ public sealed class GpuLineSegmentProvider : IConfigurableLineSegmentProvider, I
             count = merged + 1;
         }
 
-        pooler.Return(segments);
         return new ReadOnlySpan<LineSegment>(segments, 0, count);
     }
 
@@ -332,6 +334,17 @@ public sealed class GpuLineSegmentProvider : IConfigurableLineSegmentProvider, I
 
     public void Dispose()
     {
+        ReleaseSegments();
         gpuResources?.Dispose();
+        cpuFallback.Dispose();
+    }
+
+    private void ReleaseSegments()
+    {
+        if (segments is null)
+            return;
+
+        ArrayPool<LineSegment>.Shared.Return(segments);
+        segments = null;
     }
 }

@@ -216,11 +216,15 @@ public sealed partial class NpcNameFinder
         var pool = ArrayPool<NpcPosition>.Shared;
         NpcPosition[] npcs = pool.Rent(data.Length);
 
+        try
+        {
+
         float offset1 = ScaleHeight(HeightOffset1);
         float offset2 = ScaleHeight(HeightOffset2);
 
         const int MAX_GROUP = 64;
         Span<bool> inGroup = stackalloc bool[data.Length];
+        inGroup.Clear();
         Span<LineSegment> group = stackalloc LineSegment[MAX_GROUP];
 
         for (int i = 0; i < data.Length; i++)
@@ -313,9 +317,17 @@ public sealed partial class NpcNameFinder
         determineCount = count;
         moveEmptyLength = length;
 
-        pool.Return(npcs);
-
-        return new ArraySegment<NpcPosition>(npcs, 0, Math.Max(0, length - 1));
+        // Npcs remains publicly readable after this method returns. Copy the
+        // compacted candidates into owned storage before returning the scratch
+        // buffer to ArrayPool.
+        NpcPosition[] result = new NpcPosition[length];
+        npcs.AsSpan(0, length).CopyTo(result);
+        return new ArraySegment<NpcPosition>(result, 0, length);
+        }
+        finally
+        {
+            pool.Return(npcs);
+        }
     }
 
     [SkipLocalsInit]

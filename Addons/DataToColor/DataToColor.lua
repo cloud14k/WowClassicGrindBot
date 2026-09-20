@@ -540,6 +540,12 @@ function DataToColor:Reset()
 
     globalTick = 0
 
+    -- A reset starts a fresh queue batch after the initial phase. Ensure the
+    -- binding header is not suppressed by the persistent pixel cache.
+    if DataToColor.InvalidateFrameCache then
+        DataToColor:InvalidateFrameCache(106)
+    end
+
     bagCache = {}
 
     DataToColor.actionBarCooldownQueue = DataToColor.struct:new(ACTION_BAR_ITERATION_FRAME_CHANGE_RATE)
@@ -611,6 +617,13 @@ function DataToColor:FushState()
 
     DataToColor:PopulateSpellBookInfo()
     DataToColor:InitUpdateQueues()
+
+    -- Re-emit the queue header after a flush. The pixel writer suppresses
+    -- unchanged values, so without invalidating this slot a repeated binding
+    -- batch can lose QUEUE_COUNT_MARKER and the reader cannot initialize.
+    if DataToColor.InvalidateFrameCache then
+        DataToColor:InvalidateFrameCache(106)
+    end
 
     DataToColor:Print('Flush State')
 end
@@ -1562,6 +1575,12 @@ function DataToColor:CreateFrames()
     end
 
     backgroundframe:SetScript("OnUpdate", updateFrames)
+
+    -- Queue flushes rebuild their batches while the frame cache survives.
+    -- Expose a narrow invalidation hook so queue headers are emitted again.
+    function DataToColor:InvalidateFrameCache(slot)
+        valueCache[slot] = -1
+    end
 
     local function DumpCallCount(maxRow)
         print("Frame        count  val --- globalTick: " .. globalTick)

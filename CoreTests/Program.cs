@@ -45,6 +45,7 @@ internal sealed class Program
         ["pather"] = Test_PPather,
         ["navmesh"] = Test_NavmeshCoords,
         ["routegen"] = Test_RouteGeneration,
+        ["npc-regression"] = args => Test_NpcNameFinderRegression.Run(logger),
         ["moveto"] = args => Test_MoveTo.Run(logger, loggerFactory, UseDxgi, args),
         ["target"] = args => Test_Target.Run(logger, loggerFactory, UseDxgi, args),
         ["state"] = args => Test_State.Run(logger, loggerFactory, UseDxgi, args),
@@ -52,7 +53,7 @@ internal sealed class Program
 
     /// <summary>Suites that need no WoW process - see the attach decision in Main.</summary>
     private static readonly HashSet<string> offlineSuites =
-        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "state" };
+        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "npc-regression", "state" };
 
     public static void Main(string[] args)
     {
