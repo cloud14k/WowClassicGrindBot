@@ -63,7 +63,8 @@ for i = 109, 120 do
 end
 
 -- Queue for sending texture changes via pixels
-DataToColor.actionBarTextureQueue = DataToColor.TimedQueue:new(5, nil)
+DataToColor.actionBarTextureQueue = DataToColor.TimedQueue:new(
+    5, nil, DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME)
 
 -- Cache of last known textures (slot -> textureId)
 local textureCache = {}

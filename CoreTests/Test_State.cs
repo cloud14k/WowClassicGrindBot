@@ -29,8 +29,39 @@ internal static class Test_State
         bool useDxgi,
         string[] args)
     {
+        if (args.Length > 0 &&
+            (args[0].Equals("help", StringComparison.OrdinalIgnoreCase) ||
+             args[0].Equals("-h", StringComparison.OrdinalIgnoreCase) ||
+             args[0].Equals("--help", StringComparison.OrdinalIgnoreCase)))
+        {
+            PrintUsage();
+            Environment.ExitCode = 0;
+            return;
+        }
+
+        if (args.Length > 0 &&
+            args[0].Equals("bindings", StringComparison.OrdinalIgnoreCase))
+        {
+            if (args.Length > 1)
+            {
+                Console.WriteLine("Usage: state bindings");
+                Environment.ExitCode = 1;
+                return;
+            }
+
+            Test_StateBindings.Run(logger, loggerFactory, useDxgi);
+            return;
+        }
+
         bool watch = args.Length > 0 &&
             args[0].Equals("watch", StringComparison.OrdinalIgnoreCase);
+
+        if (args.Length > 1 || (args.Length > 0 && !watch))
+        {
+            PrintUsage();
+            Environment.ExitCode = 1;
+            return;
+        }
 
         Environment.ExitCode = 1;
         Console.WriteLine("=== WoW State Preflight ===");
@@ -496,6 +527,14 @@ internal static class Test_State
 
     private static bool IsValidPlayerRace(UnitRace value) =>
         value != UnitRace.None && Enum.IsDefined(value);
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine("State commands:");
+        Console.WriteLine("  state              Read the current WoW state once");
+        Console.WriteLine("  state watch        Watch the current WoW state");
+        Console.WriteLine("  state bindings     Diagnose DataToColor slot 106 binding transport");
+    }
 
     private static void Pass(string item, string details) =>
         Console.WriteLine($"{item}: PASS ({details})");

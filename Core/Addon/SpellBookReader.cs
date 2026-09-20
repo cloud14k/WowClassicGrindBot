@@ -13,6 +13,7 @@ public sealed class SpellBookReader : IReader
 
     private readonly HashSet<int> spells = [];
     private readonly HashSet<string> spellNames = new(StringComparer.OrdinalIgnoreCase);
+    private readonly QueueValueTracker queueValues = new();
     private int[] spellIdsSnapshot = [];
 
     private int expectedCount = -1;
@@ -65,7 +66,8 @@ public sealed class SpellBookReader : IReader
     public void Update(IAddonDataProvider reader)
     {
         int spellId = reader.GetInt(cSpellId);
-        if (spellId == 0) return;
+        if (!queueValues.TryConsume(spellId))
+            return;
 
         if (spellId >= AddonTicks.QUEUE_COUNT_MARKER)
         {
@@ -101,6 +103,7 @@ public sealed class SpellBookReader : IReader
         spellNames.Clear();
         spellIdsSnapshot = [];
         snapshotDirty = false;
+        queueValues.Reset();
         expectedCount = -1;
         receivedCount = 0;
         AllRanksReceived = false;

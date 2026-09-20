@@ -8,6 +8,11 @@
 local Load = select(2, ...)
 local DataToColor = unpack(Load)
 
+-- Counted pixel queues need an idle separator when two adjacent items encode to
+-- the same value. Collections.lua loads before the queue users, so expose the
+-- default here; DataToColor.lua reassigns the same value from FRAME_CHANGE_RATE.
+DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME = 5
+
 local GetTime = GetTime
 local next = next
 local pairs = pairs
@@ -21,13 +26,15 @@ local TimedQueue = {}
 DataToColor.TimedQueue = TimedQueue
 
 -- Constructor for a new TimedQueue
-function TimedQueue:new(tickLifetime, defaultValue)
+function TimedQueue:new(tickLifetime, defaultValue, separatorLifetime)
     local o = {
         head = {},              -- The current batch of items to process
         tail = {},              -- The next batch of items
         index = 1,              -- The current position in the head
         headLength = 0,         -- The number of items in the head
         tickLifetime = tickLifetime, -- How many ticks an item stays as the current value
+        separatorLifetime = separatorLifetime or 0, -- Idle ticks between equal items
+        separatorRemaining = 0,
         lastValue = defaultValue, -- The last value shifted from the queue
         lastChangedTick = 0,    -- The tick when the last value was changed
         defaultValue = defaultValue -- The value to return when the queue is empty
@@ -40,8 +47,32 @@ end
 -- Shifts an item from the queue if the lifetime has expired.
 -- Otherwise, returns the last shifted item.
 function TimedQueue:shift(globalTick)
+    -- A repeated encoded value is a valid second queue item, not another
+    -- observation of the first one. Emit the idle value for a full hold window
+    -- so the pixel reader can see the item boundary without another data cell.
+    if self.separatorRemaining > 0 then
+        self.separatorRemaining = self.separatorRemaining - 1
+        return self.defaultValue
+    end
+
     -- Check if it's time to get a new item
     if math.abs(globalTick - self.lastChangedTick) >= self.tickLifetime or self.lastValue == self.defaultValue then
+        local nextValue
+        if self.index <= self.headLength then
+            nextValue = self.head[self.index]
+        else
+            nextValue = self.tail[1]
+        end
+
+        if self.separatorLifetime > 0 and
+            self.lastValue ~= self.defaultValue and
+            nextValue == self.lastValue then
+            self.separatorRemaining = self.separatorLifetime
+            self.lastValue = self.defaultValue
+            self.lastChangedTick = globalTick
+            return self.defaultValue
+        end
+
         -- If we've processed all items in the head, swap with the tail
         if self.index > self.headLength then
             self.head, self.tail = self.tail, self.head
@@ -80,6 +111,7 @@ function TimedQueue:clear()
     self.headLength = 0
     self.lastValue = self.defaultValue
     self.lastChangedTick = 0
+    self.separatorRemaining = 0
 end
 
 -- Peeks at the next item to be shifted without actually shifting it.

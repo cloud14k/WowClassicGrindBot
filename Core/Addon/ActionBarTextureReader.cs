@@ -10,14 +10,19 @@ public sealed partial class ActionBarTextureReader : IReader
     private const int TEXTURE_SLOT = 107;
 
     private readonly ILogger<ActionBarTextureReader> logger;
+    private readonly QueueValueTracker queueValues = new();
     private readonly Dictionary<int, int> slotTextures = [];
 
     private int expectedCount = -1;
     private int receivedCount;
+    private int decodedCount;
+    private int decodeFailureCount;
 
     public int Count => slotTextures.Count;
     public int ExpectedCount => expectedCount;
     public int ReceivedCount => receivedCount;
+    public int DecodedCount => decodedCount;
+    public int DecodeFailureCount => decodeFailureCount;
     public bool IsInitialized => expectedCount >= 0 && receivedCount >= expectedCount;
 
     public IReadOnlyDictionary<int, int> SlotTextures => slotTextures;
@@ -40,12 +45,15 @@ public sealed partial class ActionBarTextureReader : IReader
     public void Update(IAddonDataProvider reader)
     {
         int encodedValue = reader.GetInt(TEXTURE_SLOT);
-        if (encodedValue == 0) return;
+        if (!queueValues.TryConsume(encodedValue))
+            return;
 
         if (encodedValue >= AddonTicks.QUEUE_COUNT_MARKER)
         {
             expectedCount = encodedValue - AddonTicks.QUEUE_COUNT_MARKER;
             receivedCount = 0;
+            decodedCount = 0;
+            decodeFailureCount = 0;
             return;
         }
 
@@ -53,7 +61,12 @@ public sealed partial class ActionBarTextureReader : IReader
 
         var decoded = DecodeTexture(encodedValue);
         if (!decoded.HasValue)
+        {
+            decodeFailureCount++;
             return;
+        }
+
+        decodedCount++;
 
         int slot = decoded.Value.slot;
         int textureId = decoded.Value.textureId;
@@ -83,8 +96,11 @@ public sealed partial class ActionBarTextureReader : IReader
     public void Reset()
     {
         slotTextures.Clear();
+        queueValues.Reset();
         expectedCount = -1;
         receivedCount = 0;
+        decodedCount = 0;
+        decodeFailureCount = 0;
     }
 
     /// <summary>

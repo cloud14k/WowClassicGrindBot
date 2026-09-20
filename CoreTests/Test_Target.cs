@@ -27,7 +27,6 @@ namespace CoreTests;
 internal static class Test_Target
 {
     private const int PreflightTimeoutMs = 5000;
-    private const int KeyBindingsTimeoutMs = 30_000;
     private const int ScanTimeoutMs = 5000;
     private const int TargetTimeoutMs = 10_000;
     private const int TargetConfirmationTimeoutMs = 2000;
@@ -113,25 +112,35 @@ internal static class Test_Target
                 return;
             }
 
-            // Match HeadlessServer.InitState: reset the reader graph first, then
-            // use the production CUSTOM_FLUSH binding to ask DataToColor to emit
-            // the normal queues again. Do not construct ConfigurableInput here;
-            // its constructor snapshots InteractMouseOver into WowProcessInput.
-            if (!keyBindingsReader.IsInitialized)
-            {
-                logger.LogInformation(
-                    "KeyBindingsReader is not initialized; requesting the official DataToColor queue refresh with CUSTOM_FLUSH");
-                addonReader.FullReset();
-                flushInput.PressFlushKey();
-            }
+            // Do not construct ConfigurableInput until this completes: its
+            // constructor snapshots InteractMouseOver into WowProcessInput.
+            logger.LogInformation(
+                "Refreshing official DataToColor queues before ClassConfiguration.Initialise");
+            bool readersReady = AddonRefreshHelper.RefreshAddonAndWaitForReaders(
+                screen,
+                addonReader,
+                flushInput,
+                keyBindingsReader,
+                environment.Cancellation.Token,
+                AddonRefreshHelper.DefaultTimeoutMs,
+                null,
+                out AddonRefreshStats refreshStats,
+                out string keyBindingsError);
 
-            if (!WaitForKeyBindings(
-                    screen,
-                    addonReader,
-                    keyBindingsReader,
-                    environment.Cancellation.Token,
-                    KeyBindingsTimeoutMs,
-                    out string keyBindingsError))
+            logger.LogInformation(
+                "Addon refresh wait: Ready={Ready}; Addon updates during wait: {UpdateCount}; " +
+                "Frequency={UpdatesPerSecond:F1}/s; DataReady={DataReady}; " +
+                "KeyBindingsInitialized={KeyBindingsInitialized}; ExpectedCount={ExpectedCount}; " +
+                "ReceivedCount={ReceivedCount}",
+                readersReady,
+                refreshStats.UpdateCount,
+                refreshStats.UpdatesPerSecond,
+                addonReader.DataReady.IsSet,
+                keyBindingsReader.IsInitialized,
+                keyBindingsReader.ExpectedCount,
+                keyBindingsReader.ReceivedCount);
+
+            if (!readersReady)
             {
                 Fail(keyBindingsError);
                 return;
@@ -408,39 +417,6 @@ internal static class Test_Target
             $"Live player data was not ready after {PreflightTimeoutMs} ms " +
             $"(DataReady={addonReader.DataReady.IsSet}, " +
             $"UIMapId={playerReader.UIMapId.Value}).";
-        return false;
-    }
-
-    private static bool WaitForKeyBindings(
-        IWowScreen screen,
-        AddonReader addonReader,
-        KeyBindingsReader keyBindingsReader,
-        CancellationToken token,
-        int timeoutMs,
-        out string error)
-    {
-        Stopwatch timer = Stopwatch.StartNew();
-
-        while (timer.ElapsedMilliseconds < timeoutMs && !token.IsCancellationRequested)
-        {
-            screen.Update();
-            addonReader.Update();
-
-            if (keyBindingsReader.IsInitialized)
-            {
-                error = string.Empty;
-                return true;
-            }
-
-            token.WaitHandle.WaitOne(UpdateIntervalMs);
-        }
-
-        error =
-            $"Key bindings were not initialized after {timeoutMs} ms " +
-            $"(DataReady={addonReader.DataReady.IsSet}, " +
-            $"KeyBindingsInitialized={keyBindingsReader.IsInitialized}, " +
-            $"ExpectedCount={keyBindingsReader.ExpectedCount}, " +
-            $"ReceivedCount={keyBindingsReader.ReceivedCount}).";
         return false;
     }
 

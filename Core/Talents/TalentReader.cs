@@ -11,6 +11,7 @@ public sealed class TalentReader : IReader
 
     private readonly PlayerReader playerReader;
     private readonly TalentDB talentDB;
+    private readonly QueueValueTracker queueValues = new();
     public int Count { get; private set; }
 
     public Dictionary<int, Talent> Talents { get; } = new();
@@ -40,7 +41,8 @@ public sealed class TalentReader : IReader
     public void Update(IAddonDataProvider reader)
     {
         int hash = reader.GetInt(cTalent);
-        if (hash == 0) return;
+        if (!queueValues.TryConsume(hash))
+            return;
 
         // Batch header. What follows is the complete talent set, which is what makes
         // a respec resolvable: it picks different talents and the hashes of the
@@ -133,6 +135,7 @@ public sealed class TalentReader : IReader
         expectedCount = -1;
         receivedCount = 0;
 
+        queueValues.Reset();
         pendingCount = 0;
         pendingTalents.Clear();
         pendingSpells.Clear();

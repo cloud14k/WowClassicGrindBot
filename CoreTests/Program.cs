@@ -48,6 +48,7 @@ internal sealed class Program
         ["npc-regression"] = args => Test_NpcNameFinderRegression.Run(logger),
         ["moveto"] = args => Test_MoveTo.Run(logger, loggerFactory, UseDxgi, args),
         ["target"] = args => Test_Target.Run(logger, loggerFactory, UseDxgi, args),
+        ["pull"] = args => Test_Pull.Run(logger, loggerFactory, UseDxgi, args),
         ["state"] = args => Test_State.Run(logger, loggerFactory, UseDxgi, args),
     };
 
@@ -134,6 +135,16 @@ internal sealed class Program
             return;
         }
 
+        // Pull is a live integration test. It uses the production TargetFinder,
+        // PullTargetGoal, CastingHandler, ConfigurableInput, and combat state.
+        if (remaining.Count > 0 && remaining[0].Equals("pull", StringComparison.OrdinalIgnoreCase))
+        {
+            Test_Pull.Run(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
         // Suites that read only from Json/ and the baked navmesh. Attaching to the game
         // would be the only thing that could fail, so do not attach at all - otherwise
         // every offline suite needs WoW running to say anything.
@@ -165,6 +176,7 @@ internal sealed class Program
         else
         {
             Log.Logger.Information("Available suites: {Suites}", string.Join(", ", suites.Keys));
+            Log.Logger.Information("State commands: state | state watch | state bindings");
             Log.Logger.Information("Global flags: --log-times, --no-gpu, --no-log-update, --dxgi, --delay <ms>");
             Log.Logger.Information("Example: dotnet run -c Release -- --log-times npc enemy neutral 10000");
         }

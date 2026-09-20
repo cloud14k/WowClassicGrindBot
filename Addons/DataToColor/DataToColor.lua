@@ -182,6 +182,7 @@ DataToColor.DATA_CONFIG = {
 
 local FRAME_CHANGE_RATE = 5
 local initPhase = 2 * FRAME_CHANGE_RATE
+DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME = FRAME_CHANGE_RATE
 
 -- Queue count header marker (must match AddonTicks.QUEUE_COUNT_MARKER in C#)
 -- First item in a queue batch encodes QUEUE_COUNT_MARKER + expectedCount
@@ -260,9 +261,12 @@ DataToColor.equipmentQueue = DataToColor.TimedQueue:new(ITEM_ITERATION_FRAME_CHA
 DataToColor.bagQueue = DataToColor.TimedQueue:new(ITEM_ITERATION_FRAME_CHANGE_RATE, nil)
 DataToColor.inventoryQueue = DataToColor.TimedQueue:new(ITEM_ITERATION_FRAME_CHANGE_RATE, nil)
 DataToColor.gossipQueue = DataToColor.TimedQueue:new(GOSSIP_ITERATION_FRAME_CHANGE_RATE, 0)
-DataToColor.spellBookQueue = DataToColor.TimedQueue:new(SPELLBOOK_ITERATION_FRAME_CHANGE_RATE, nil)
-DataToColor.talentQueue = DataToColor.TimedQueue:new(TALENT_ITERATION_FRAME_CHANGE_RATE, nil)
-DataToColor.trainerQueue = DataToColor.TimedQueue:new(GOSSIP_ITERATION_FRAME_CHANGE_RATE, nil)
+DataToColor.spellBookQueue = DataToColor.TimedQueue:new(
+    SPELLBOOK_ITERATION_FRAME_CHANGE_RATE, nil, DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME)
+DataToColor.talentQueue = DataToColor.TimedQueue:new(
+    TALENT_ITERATION_FRAME_CHANGE_RATE, nil, DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME)
+DataToColor.trainerQueue = DataToColor.TimedQueue:new(
+    GOSSIP_ITERATION_FRAME_CHANGE_RATE, nil, DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME)
 
 DataToColor.actionBarCostQueue = DataToColor.struct:new(ACTION_BAR_ITERATION_FRAME_CHANGE_RATE)
 DataToColor.actionBarCooldownQueue = DataToColor.struct:new(ACTION_BAR_ITERATION_FRAME_CHANGE_RATE)

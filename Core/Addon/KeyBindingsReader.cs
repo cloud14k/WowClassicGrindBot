@@ -12,15 +12,20 @@ public sealed partial class KeyBindingsReader : IReader
     private const int BINDING_SLOT = 106;
 
     private readonly ILogger<KeyBindingsReader> logger;
+    private readonly QueueValueTracker queueValues = new();
     private readonly Dictionary<BindingID, (ConsoleKey Key, ModifierKey Modifier)> bindings = [];
     private readonly Dictionary<BindingID, (ConsoleKey Key, ModifierKey Modifier)> secondaryBindings = [];
 
     private int expectedCount = -1;
     private int receivedCount;
+    private int decodedCount;
+    private int decodeFailureCount;
 
     public int Count => bindings.Count;
     public int ExpectedCount => expectedCount;
     public int ReceivedCount => receivedCount;
+    public int DecodedCount => decodedCount;
+    public int DecodeFailureCount => decodeFailureCount;
     public bool IsInitialized => expectedCount >= 0 && receivedCount >= expectedCount;
 
     public IReadOnlyDictionary<BindingID, (ConsoleKey Key, ModifierKey Modifier)> Bindings => bindings;
@@ -39,20 +44,34 @@ public sealed partial class KeyBindingsReader : IReader
     public void Update(IAddonDataProvider reader)
     {
         int encodedValue = reader.GetInt(BINDING_SLOT);
-        if (encodedValue == 0) return;
+        if (!queueValues.TryConsume(encodedValue))
+            return;
 
         if (encodedValue >= AddonTicks.QUEUE_COUNT_MARKER)
         {
             expectedCount = encodedValue - AddonTicks.QUEUE_COUNT_MARKER;
             receivedCount = 0;
+            decodedCount = 0;
+            decodeFailureCount = 0;
             return;
         }
+
+        // Values before a batch header belong to no valid binding batch. Do not
+        // let stale queue data make ReceivedCount look initialized or consume a
+        // slot before the header for the current refresh arrives.
+        if (expectedCount < 0)
+            return;
 
         receivedCount++;
 
         var decoded = KeyReader.DecodeBinding(encodedValue);
         if (!decoded.HasValue)
+        {
+            decodeFailureCount++;
             return;
+        }
+
+        decodedCount++;
 
         bool changed = false;
         var bindingId = decoded.Value.bindingId;
@@ -116,8 +135,11 @@ public sealed partial class KeyBindingsReader : IReader
         secondaryBindings.Clear();
         KeyReader.GameBindings.Clear();
         KeyReader.GameBindingsSecondary.Clear();
+        queueValues.Reset();
         expectedCount = -1;
         receivedCount = 0;
+        decodedCount = 0;
+        decodeFailureCount = 0;
     }
 
     /// <summary>

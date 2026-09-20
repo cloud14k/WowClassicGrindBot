@@ -143,7 +143,8 @@ local BindingIndex = {
 }
 
 -- Queue for sending binding data via pixels
-DataToColor.bindingQueue = DataToColor.TimedQueue:new(5, nil)
+DataToColor.bindingQueue = DataToColor.TimedQueue:new(
+    5, nil, DataToColor.QUEUE_SEPARATOR_TICK_LIFETIME)
 
 -- Cache of last known bindings (bindingId -> encoded value)
 local bindingCache = {}

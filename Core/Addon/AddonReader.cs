@@ -31,6 +31,8 @@ public sealed partial class AddonReader : IAddonReader
     private readonly ActionBarTextureReader textureReader;
 
     private bool awaitingReinitialization;
+    private bool refreshInProgress;
+    private bool expectedResetObserved;
     private long reinitStartTime;
 
     public event Action? AddonDataChanged;
@@ -38,6 +40,15 @@ public sealed partial class AddonReader : IAddonReader
     public ManualResetEventSlim DataReady { get; }
 
     public RecordInt GlobalTime { get; }
+
+    public int FullResetCount { get; private set; }
+    public int ExpectedRefreshResetCount { get; private set; }
+    public AddonResetReason? LastResetReason { get; private set; }
+    public bool SpellBookInitialized => spellBookReader.IsInitialized;
+    public bool TextureInitialized => textureReader.IsInitialized;
+    public int BindingQueueRaw => reader.GetInt(106);
+    public int SpellBookQueueRaw => reader.GetInt(71);
+    public int TextureQueueRaw => reader.GetInt(107);
 
     private int previousGlobalTime;
 
@@ -89,10 +100,51 @@ public sealed partial class AddonReader : IAddonReader
 
         AvgUpdateLatency = GetElapsedTime(lastUpdate).TotalMilliseconds;
 
-        if (GlobalTime.Value < AddonTicks.INIT_PHASE || GlobalTime.Value < previousGlobalTime)
+        bool inInitPhase = GlobalTime.Value < AddonTicks.INIT_PHASE;
+        bool rolledBack = GlobalTime.Value < previousGlobalTime;
+        if (inInitPhase || rolledBack)
         {
+            if (refreshInProgress)
+            {
+                // Only the first low/rollback sample belongs to the flush we
+                // explicitly requested. A later rollback means the addon
+                // restarted again during the refresh and must still take the
+                // normal production reset path.
+                if (expectedResetObserved && rolledBack)
+                {
+                    int previousUnexpectedRollback = previousGlobalTime;
+                    previousGlobalTime = GlobalTime.Value;
+                    refreshInProgress = false;
+                    ResetReaders(
+                        AddonResetReason.GlobalTimeRollback,
+                        previousUnexpectedRollback,
+                        GlobalTime.Value);
+                    return;
+                }
+
+                int previousExpected = previousGlobalTime;
+                previousGlobalTime = GlobalTime.Value;
+                if (!expectedResetObserved)
+                {
+                    expectedResetObserved = true;
+                    ExpectedRefreshResetCount++;
+                    LogExpectedRefreshReset(logger, previousExpected, GlobalTime.Value);
+                }
+
+                // BeginRefresh already reset every reader. The zero/init-phase
+                // value emitted by the just-requested /dcflush is expected and
+                // must not clear the queue readers a second time.
+                return;
+            }
+
+            int previousUnexpected = previousGlobalTime;
             previousGlobalTime = GlobalTime.Value;
-            FullReset();
+            ResetReaders(
+                rolledBack
+                    ? AddonResetReason.GlobalTimeRollback
+                    : AddonResetReason.GlobalTimeInitPhase,
+                previousUnexpected,
+                GlobalTime.Value);
             return;
         }
 
@@ -133,6 +185,8 @@ public sealed partial class AddonReader : IAddonReader
                 textureReader.IsInitialized)
             {
                 awaitingReinitialization = false;
+                refreshInProgress = false;
+                expectedResetObserved = false;
                 float elapsed = (float)GetElapsedTime(reinitStartTime).TotalSeconds;
                 LogReinitComplete(logger, elapsed);
             }
@@ -152,15 +206,36 @@ public sealed partial class AddonReader : IAddonReader
 
     public void FullReset()
     {
+        ResetReaders(AddonResetReason.Other, previousGlobalTime, GlobalTime.Value);
+    }
+
+    /// <summary>
+    /// Starts the one official refresh transaction used by live diagnostics.
+    /// The following low/init GlobalTime value is produced by the requested
+    /// Lua /dcflush, so AddonReader.Update must observe it without resetting
+    /// the readers a second time.
+    /// </summary>
+    public void BeginRefresh()
+    {
+        refreshInProgress = true;
+        expectedResetObserved = false;
+        ResetReaders(AddonResetReason.ManualRefresh, previousGlobalTime, GlobalTime.Value);
+    }
+
+    private void ResetReaders(AddonResetReason reason, int previous, int current)
+    {
         ReadOnlySpan<IReader> span = readers.AsSpan();
         for (int i = 0; i < span.Length; i++)
         {
             span[i].Reset();
         }
 
+        DataReady.Reset();
         awaitingReinitialization = true;
         reinitStartTime = GetTimestamp();
-        LogFullReset(logger);
+        FullResetCount++;
+        LastResetReason = reason;
+        LogFullReset(logger, reason, previous, current);
 
         SessionReset();
     }
@@ -173,8 +248,18 @@ public sealed partial class AddonReader : IAddonReader
     [LoggerMessage(
         EventId = 100,
         Level = LogLevel.Information,
-        Message = "FullReset: pausing bot until readers reinitialize")]
-    static partial void LogFullReset(ILogger logger);
+        Message = "FullReset Reason={reason} Previous={previous} Current={current}: pausing bot until readers reinitialize")]
+    static partial void LogFullReset(
+        ILogger logger,
+        AddonResetReason reason,
+        int previous,
+        int current);
+
+    [LoggerMessage(
+        EventId = 102,
+        Level = LogLevel.Information,
+        Message = "Expected refresh GlobalTime reset observed Previous={previous} Current={current}")]
+    static partial void LogExpectedRefreshReset(ILogger logger, int previous, int current);
 
     [LoggerMessage(
         EventId = 101,

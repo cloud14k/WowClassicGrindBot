@@ -22,6 +22,7 @@ public sealed class TrainerReader : IReader
 
     private readonly List<int> pending = [];
     private readonly List<int> bought = [];
+    private readonly QueueValueTracker queueValues = new();
 
     private int expectedCount = -1;
     private int receivedCount;
@@ -41,7 +42,7 @@ public sealed class TrainerReader : IReader
     public void Update(IAddonDataProvider reader)
     {
         int value = reader.GetInt(cTrainer);
-        if (value == 0)
+        if (!queueValues.TryConsume(value))
             return;
 
         if (value == TRAINER_NO_MATCH)
@@ -75,11 +76,6 @@ public sealed class TrainerReader : IReader
         if (expectedCount < 0)
             return;
 
-        // The same value can be captured on two consecutive frames; counting it twice
-        // would satisfy the header early and drop the ids that had not arrived yet.
-        if (pending.Contains(value))
-            return;
-
         receivedCount++;
         pending.Add(value);
 
@@ -111,6 +107,7 @@ public sealed class TrainerReader : IReader
 
         expectedCount = -1;
         receivedCount = 0;
+        queueValues.Reset();
 
         NoMatch = false;
         NoMoney = false;
