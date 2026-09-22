@@ -402,12 +402,12 @@ local UtilityActions = {
   {
     actionName = "config",
     key = "SHIFT-PAGEUP",
-    macrotext = "/dc",
+    macrotext = "/tw14k",
   },
   {
     actionName = "flush",
     key = "SHIFT-PAGEDOWN",
-    macrotext = "/dcflush",
+    macrotext = "/tw14kflush",
   },
 }
 

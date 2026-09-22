@@ -60,7 +60,7 @@ public sealed partial class AddonConfigurator
             // special character not allowed
             // also numbers not allowed
             Config.Title = RegexTitle().Replace(Config.Title, string.Empty);
-            Config.Title = new string(Config.Title.Where(char.IsLetter).ToArray());
+            Config.Title = new string(Config.Title.Where(char.IsLetterOrDigit).ToArray());
             Config.Title =
                 Config.Title.Trim()
                 .Replace(" ", "");
@@ -71,7 +71,9 @@ public sealed partial class AddonConfigurator
                 return false;
             }
 
-            Config.Command = Config.Title.Trim().ToLower();
+            Config.Command = Config.Title.Equals("Twinkle14k", StringComparison.OrdinalIgnoreCase)
+                ? "tw14k"
+                : Config.Title.Trim().ToLower();
         }
         else
         {
@@ -157,9 +159,58 @@ public sealed partial class AddonConfigurator
     private void MakeUnique()
     {
         BulkRename(FinalAddonPath, DefaultAddonName, Config.Title);
+        SelectActiveToc();
         EditToc();
         EditMainLua();
         EditModulesLua();
+    }
+
+    /// <summary>
+    /// WoW loads the TOC whose file name matches the addon directory. The source
+    /// contains separate TOCs for modern Classic clients, but copying and renaming
+    /// the legacy base TOC would leave (for example) alaFrame.toc at Interface
+    /// 40300 on a Classic Era 1.15 client. In that case the addon directory exists
+    /// and the version check passes, but WoW never loads the addon frames.
+    /// </summary>
+    private void SelectActiveToc()
+    {
+        string selectedName = IsModernClassicClient()
+            ? $"{Config.Title}_Classic.toc"
+            : $"{Config.Title}.toc";
+
+        string selectedPath = Path.Join(FinalAddonPath, selectedName);
+        string activePath = Path.Join(FinalAddonPath, $"{Config.Title}.toc");
+
+        if (!File.Exists(selectedPath))
+        {
+            throw new FileNotFoundException(
+                $"The addon TOC for client {process.FileVersion} was not found.",
+                selectedPath);
+        }
+
+        if (!string.Equals(selectedPath, activePath, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Copy(selectedPath, activePath, overwrite: true);
+        }
+
+        logger.LogInformation(
+            "Selected addon TOC {Toc} for client {ClientVersion}",
+            selectedName, process.FileVersion);
+    }
+
+    private bool IsModernClassicClient()
+    {
+        Version version = process.FileVersion;
+
+        return version switch
+        {
+            { Major: 1, Minor: >= 13 } => true,
+            { Major: 2, Minor: >= 5 } => true,
+            { Major: 3, Minor: >= 4 } => true,
+            { Major: 4, Minor: >= 4 } => true,
+            { Major: 5, Minor: >= 5 } => true,
+            _ => false,
+        };
     }
 
     private static void BulkRename(string folderPath, string match, string replacement)
@@ -200,6 +251,7 @@ public sealed partial class AddonConfigurator
             string text =
                 File.ReadAllText(tocPath)
                 .Replace(DefaultAddonName, Config.Title)
+                .Replace("Twinkle14k", Config.Title)
                 .Replace("## Author: FreeHongKongMMO", "## Author: " + Config.Author);
 
             File.WriteAllText(tocPath, text);
@@ -212,8 +264,9 @@ public sealed partial class AddonConfigurator
         string text =
             File.ReadAllText(mainLuaPath)
             .Replace(DefaultAddonName, Config.Title)
-            .Replace("dc", Config.Command)
-            .Replace("DC", Config.Command);
+            .Replace("Twinkle14k", Config.Title)
+            .Replace("tw14k", Config.Command)
+            .Replace("TW14K", Config.Command);
 
         Regex cellSizeRegex = RegexCellSize();
         text = text.Replace(cellSizeRegex, "SIZE", Config.CellSize);
@@ -231,8 +284,9 @@ public sealed partial class AddonConfigurator
                 string path = f.FullName;
                 string text = File.ReadAllText(path);
                 text = text.Replace(DefaultAddonName, Config.Title);
-                // Replace slash commands (e.g., /dc -> /addonname, /dcflush -> /addonnameflush)
-                text = text.Replace("/dc", "/" + Config.Command);
+                text = text.Replace("Twinkle14k", Config.Title);
+                // Replace slash commands (e.g., /tw14k -> /addonname, /tw14kflush -> /addonnameflush)
+                text = text.Replace("/tw14k", "/" + Config.Command);
 
                 File.WriteAllText(path, text);
             }

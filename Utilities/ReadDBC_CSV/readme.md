@@ -1,6 +1,6 @@
 # ReadDBC_CSV
 
-A CLI tool to extract WoW DBC data from [wago.tools](https://wago.tools) and generate JSON files for WowClassicGrindBot.
+A CLI tool to extract WoW DBC data from [wago.tools](https://wago.tools) and generate JSON files for Twinkle14k.
 
 ## Usage
 

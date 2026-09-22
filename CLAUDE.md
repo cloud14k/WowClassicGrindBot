@@ -17,7 +17,7 @@ Multi-project .NET 10 solution (MasterOfPuppets.sln) with Blazor Server frontend
 ```bash
 dotnet build MasterOfPuppets.sln
 dotnet test
-dotnet run --project BlazorServer
+dotnet run --project BaoServer
 dotnet run --project Benchmarks -c Release
 ```
 
@@ -40,7 +40,7 @@ Existing `.editorconfig` defines style rules. Key conventions:
 Directories marked ✎ have their own `CLAUDE.md` with the gotchas that live there - read it
 before working in one.
 
-- `BlazorServer/` ✎ - Main entry point: bot + web UI on :5000
+- `BaoServer/` ✎ - Main entry point: bot + web UI on :5000
 - `HeadlessServer/` ✎ - Same bot, CLI only; benchmarks chdir here
 - `Core/` ✎ - Core business logic (GOAP, goals, requirements, input)
 - `Game/` ✎ - WoW process, input (stateful - read before touching), screen contracts

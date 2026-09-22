@@ -1,5 +1,5 @@
 ## Interface: 20500
-## Title: DataToColor
+## Title: Twinkle14k
 ## Author: FreeHongKongMMO
 ## Notes: Displays data as colors (Classic TBC)
 ## Version: 1.13.2

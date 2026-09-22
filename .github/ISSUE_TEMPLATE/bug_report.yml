@@ -69,7 +69,7 @@ body:
 - type: textarea
   attributes:
     label: Logs
-    description: If applicable, attach `\BlazorServer\*.log` or `\HeadlessServer\*.log` files to reduce the investigation time.
+    description: If applicable, attach `\BaoServer\*.log` or `\HeadlessServer\*.log` files to reduce the investigation time.
     placeholder: Please attach the **Full** log in order to avoid confusion.
   validations:
     required: false

@@ -1,2 +1,2 @@
-mklink /J "..\BlazorServer\bin\Release\Json" "..\Json"
+mklink /J "..\BaoServer\bin\Release\Json" "..\Json"
 PAUSE

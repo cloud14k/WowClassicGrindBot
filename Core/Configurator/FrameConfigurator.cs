@@ -380,12 +380,13 @@ public sealed partial class FrameConfigurator : IDisposable
             for (int x = 0; x < maxX; x++)
             {
                 DataFrameMeta meta = FrameConfig.GetMeta(row[x]);
-                // This addon publishes a fixed metadata signature. Do not
-                // accept arbitrary UI colours as metadata, otherwise a normal
-                // top-bar pixel can start a failed configuration retry loop.
+                // Keep the fixed layout markers while accepting the configured
+                // cell size (1-9). Cell size is an addon configuration value,
+                // not part of the C# reader's fixed protocol.
                 if (meta == DataFrameMeta.Empty ||
                     meta.Spacing != 1 ||
-                    meta.Sizes != 4 ||
+                    meta.Sizes < 1 ||
+                    meta.Sizes > 9 ||
                     meta.Rows != 1 ||
                     meta.Count != 119)
                 {
@@ -463,7 +464,7 @@ public sealed partial class FrameConfigurator : IDisposable
 
     private void ToggleInGameConfiguration()
     {
-        // Press SHIFT-PAGEUP to trigger CUSTOM_CONFIG (/dc)
+        // Press SHIFT-PAGEUP to trigger the addon's configured CUSTOM_CONFIG command.
         input.PressRandomWithModifier(ConsoleKey.PageUp, ModifierKey.Shift, 50);
     }
 

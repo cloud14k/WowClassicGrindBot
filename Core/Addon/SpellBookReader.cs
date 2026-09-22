@@ -29,7 +29,7 @@ public sealed class SpellBookReader : IReader
     /// True once the highest rank of every spell has arrived. Deliberately not tied to
     /// the lower ranks that follow: AddonReader withholds DataReady until this flips, so
     /// waiting for the full set would pause the agent for hundreds of extra ticks after
-    /// every /dcflush and on every SPELLS_CHANGED resend.
+    /// every /tw14kflush and on every SPELLS_CHANGED resend.
     /// </summary>
     public bool IsInitialized => expectedCount >= 0 && receivedCount >= expectedCount;
 

@@ -2,7 +2,7 @@
   <img src="images/starme.png" alt="Star this Repo"/>
 </p>
 
-# Master Of Puppets
+# Twinkle14k
 
 > **Tip:** This document is large — use `Ctrl+F` (or `Cmd+F` on Mac) to search for topics.
 
@@ -67,8 +67,8 @@ For experienced users, here's the minimal setup:
    ```
    Only needed if you intend to **bake** tiles yourself or run `SpotAStar`:
    [game archives](docs/legacy-pathing-setup.md) in `Json\MPQ\`.
-4. **Build**: Run `BlazorServer\build.bat` or open solution in Visual Studio
-5. **Configure**: Start WoW, run `BlazorServer\run.bat`, configure addon in browser
+4. **Build**: Run `BaoServer\build.bat` or open solution in Visual Studio
+5. **Configure**: Start WoW, run `BaoServer\run.bat`, configure addon in browser
 6. **Play**: Load a class profile, press Start
 
 For detailed instructions, continue reading below.
@@ -80,7 +80,7 @@ For detailed instructions, continue reading below.
 The system is composed of two main layers that communicate through pixel color encoding — no memory tampering or DLL injection.
 
 - **Lua Addon** (`Addons/DataToColor/`) — Runs inside the game client. Reads game state (player, target, buffs, equipment, action bars, etc.) and encodes it into pixel colors on hidden UI frames. Originally based on [Happy-Pixels](https://github.com/FreeHongKongMMO/Happy-Pixels), heavily rewritten for performance with event-driven caching.
-- **C# Backend** (13 .NET 10 projects) — Reads the encoded pixels via screen capture, decodes game state, makes decisions, and sends input back to the game via simulated keyboard/mouse messages. Runs as a web application ([BlazorServer](./BlazorServer/)), a CLI tool ([HeadlessServer](./HeadlessServer/)), or a standalone pathfinding service ([PathingAPI](./PathingAPI/)). See [`docs/architecture.md`](docs/architecture.md) for the full project breakdown.
+- **C# Backend** (13 .NET 10 projects) — Reads the encoded pixels via screen capture, decodes game state, makes decisions, and sends input back to the game via simulated keyboard/mouse messages. Runs as a web application ([BlazorServer](./BaoServer/)), a CLI tool ([HeadlessServer](./HeadlessServer/)), or a standalone pathfinding service ([PathingAPI](./PathingAPI/)). See [`docs/architecture.md`](docs/architecture.md) for the full project breakdown.
 - **DotRecast fork** (`external/DotRecast`, git submodule) — [`Xian55/DotRecast @ wow-mods`](https://github.com/Xian55/DotRecast/tree/wow-mods), the navmesh library the whole navigation system is built on. Recast's usual workload is "bake offline on a build server, ship the result"; here a 34,000-yard world is baked **on the user's own machine, on first visit to an area, while the game client runs on the same box**, which is what the fork exists to make viable. Clone with `--recurse-submodules`.
 
 The fork carries two kinds of change: `RcVec3f` is aliased to `System.Numerics.Vector3`
@@ -90,7 +90,7 @@ campaign narrowed the hot data structures (`areas` to `byte[]`, `RcCompactSpan` 
 **byte-identical** — a per-tile SHA-256 over a 6-tile corpus — so none of it can change
 where the bot walks.
 
-📖 **[Why WowClassicGrindBot forks DotRecast](https://github.com/Xian55/DotRecast/wiki/Why-WowClassicGrindBot-forks-DotRecast)**
+📖 **[Why Twinkle14k forks DotRecast](https://github.com/Xian55/DotRecast/wiki/Why-WowClassicGrindBot-forks-DotRecast)**
 — the write-up of what was changed and why, with the numbers. Worth reading if you use
 DotRecast yourself: the findings are about DotRecast, not about this bot, and several
 apply to any C# Recast workload. It covers where the C# port pays a penalty against the
@@ -519,7 +519,7 @@ cd C:\WowClassicGrindBot
 dotnet build -c Release
 ```
 
-or look at the `BlazorServer\build.bat`, or look at the `HeadlessServer\build.bat` files.
+or look at the `BaoServer\build.bat`, or look at the `HeadlessServer\build.bat` files.
 
 ![Build](images/build.png)
 
@@ -535,11 +535,11 @@ ships with the repo and is selected automatically. Setup steps are in
 
 The app reads the game state using small blocks of color shown at the top of the screen by an Addon. This needs to be configured.
 
-1. Look at `C:\WowClassicGrindBot\BlazorServer` and run `run.bat`.
+1. Look at `C:\WowClassicGrindBot\BaoServer` and run `run.bat`.
 
 1. The **WoW client** must be already running, and make sure to logged with your character.
 
-1. Execute the `C:\WowClassicGrindBot\BlazorServer\run.bat`. This will start the bot and a browser. 
+1. Execute the `C:\WowClassicGrindBot\BaoServer\run.bat`. This will start the bot and a browser.
 
 1. If you get `"Unable to find the Wow process is it running ?"` in the console window then it can't find game executable.
 
@@ -563,7 +563,7 @@ The app reads the game state using small blocks of color shown at the top of the
 
 ### Command-line Configuration Overrides
 
-`run.bat` forwards all arguments to `dotnet run`, so any setting from `BlazorServer/appsettings.json` can be overridden using `--Section:Property=Value` syntax.
+`run.bat` forwards all arguments to `dotnet run`, so any setting from `BaoServer/appsettings.json` can be overridden using `--Section:Property=Value` syntax.
 
 **Example:**
 
@@ -588,7 +588,7 @@ run.bat --Reader:Type=WGC --Pathing:Mode=Local --Reader:UseGpu=true
 | `Overlay` | `ShowSkinning` | bool | `false` | `true`, `false` | Show skinning overlay |
 | `Overlay` | `ShowTargetVsAdd` | bool | `false` | `true`, `false` | Show target vs add overlay |
 
-These properties can also be edited directly in `BlazorServer/appsettings.json`.
+These properties can also be edited directly in `BaoServer/appsettings.json`.
 
 ## BlazorServer Dashboard
 
@@ -792,7 +792,7 @@ If you prefer to set up bindings manually or the auto-setup didn't work, you can
 | `/<prefix>bindings` | Sets up default action bar keybindings (F1-F12, Numpad) |
 | `/<prefix>actions` | Creates and binds the custom secure action buttons |
 
-**Note**: Replace `<prefix>` with your addon's command prefix (e.g., `/dcbindings` if your prefix is `dc`). The prefix is derived from the addon title you configured during setup.
+**Note**: Replace `<prefix>` with your addon's command prefix (e.g., `/tw14kbindings` if your prefix is `tw14k`). The prefix is derived from the addon title you configured during setup.
 
 These commands save bindings to your current binding set (account-wide or character-specific).
 
@@ -816,7 +816,7 @@ The application will automatically detect whatever keys you have bound to your a
 
 ### Quick Setup with Default Bindings
 
-If you want to use the recommended default bindings, run `/dcbindings` in-game. This will set up:
+If you want to use the recommended default bindings, run `/tw14kbindings` in-game. This will set up:
 - Bottom Right bar (slots 49-60): `Numpad1` through `Numpad0`
 - Bottom Left bar (slots 61-72): `F1` through `F12`
 
@@ -865,7 +865,7 @@ If the bindings were not set up automatically (e.g., you were in combat), run:
 /<prefix>actions
 ```
 
-Replace `<prefix>` with your addon's command prefix (e.g., `/dcactions` if your prefix is `dc`).
+Replace `<prefix>` with your addon's command prefix (e.g., `/tw14kactions` if your prefix is `tw14k`).
 
 This creates the secure buttons and binds them to the default keys. The bindings are saved to your current binding set (account-wide or character-specific).
 
@@ -4024,7 +4024,7 @@ dotnet run --configuration Release
 ```
 
 ```ps
-cd c:\WowClassicGrindBot\BlazorServer
+cd c:\WowClassicGrindBot\BaoServer
 dotnet run --configuration Release
 ```
 
@@ -4116,7 +4116,7 @@ Melee weapon enchant:
 
 **Q: "Addon blocked" or keybindings not working**
 - You cannot set keybindings while in combat - log out and back in
-- Run `/<prefix>actions` to manually create secure buttons (e.g., `/dcactions`)
+- Run `/<prefix>actions` to manually create secure buttons (e.g., `/tw14kactions`)
 - Check that you're not running conflicting addons
 
 **Q: Pixel reading errors / wrong colors detected**
@@ -4201,8 +4201,8 @@ The application now **automatically reads your in-game keybindings** instead of 
 
 If bindings are not working after migration:
 1. Make sure you are not in combat when logging in (bindings cannot be set in combat)
-2. Run `/<prefix>actions` to manually create and bind the custom actions (e.g., `/dcactions`)
-3. Run `/<prefix>bindings` to set up default action bar bindings (e.g., `/dcbindings`)
+2. Run `/<prefix>actions` to manually create and bind the custom actions (e.g., `/tw14kactions`)
+3. Run `/<prefix>bindings` to set up default action bar bindings (e.g., `/tw14kbindings`)
 4. Check the Frontend "Key Bindings" page to see what bindings the addon detected
 
 **Note**: The command prefix (e.g., `dc`) is derived from your addon title. If you named your addon "daq" during setup, use `/daqactions`, `/daqbindings`, etc.

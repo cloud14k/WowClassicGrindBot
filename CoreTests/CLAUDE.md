@@ -234,7 +234,7 @@ On one Ammen Vale loop: svg 127 KB, png 738 KB, webp 99 KB.
 font (Consolas, Courier New, DejaVu Sans Mono, Segoe UI, then any); with none installed the
 route still renders and only the labels are dropped.
 
-**It reads `BlazorServer/appsettings.json` for the navmesh options.** Those feed the tile
+**It reads `BaoServer/appsettings.json` for the navmesh options.** Those feed the tile
 cache settings hash, which names the cache directory: on defaults it looks in a directory
 nothing was baked into and reports "no baked navmesh" for a continent that is in fact baked.
 `MinWorldZ.Expansion01 = -700` is exactly that case - Azeroth resolves, Outland does not.

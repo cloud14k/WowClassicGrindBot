@@ -22,14 +22,14 @@ fcpu:SetScript('OnUpdate', OnUpdate)
 local toggleMode, debugTimer, cpuImpactMessage = false, 0, 'Consumed %sms per frame. Each frame took %sms to render.'
 function DataToColor:GetCPUImpact()
 	if not GetCVarBool('scriptProfile') then
-		DataToColor:Print('For `/dccpu` to work, you need to enable script profiling via: `/console scriptProfile 1` then reload. Disable after testing by setting it back to 0.')
+		DataToColor:Print('For `/tw14kcpu` to work, you need to enable script profiling via: `/console scriptProfile 1` then reload. Disable after testing by setting it back to 0.')
 		return
 	end
 
 	if not toggleMode then
 		ResetCPUUsage()
 		toggleMode, num_frames, debugTimer = true, 0, debugprofilestop()
-		DataToColor:Print('CPU Impact being calculated, type /dccpu to get results when you are ready.')
+		DataToColor:Print('CPU Impact being calculated, type /tw14kcpu to get results when you are ready.')
 		fcpu:Show()
 	else
 		fcpu:Hide()

@@ -124,7 +124,7 @@ $env:PPATHER_AGENT_RADIUS = "0.5"
 $env:PPATHER_WALKABLE_SLOPE = "48"
 $env:PPATHER_PATH_EDGE_MARGIN = "1.5"
 $env:PPATHER_SPLINE_FOLLOWER = "1"
-dotnet run --project BlazorServer -c Release
+dotnet run --project BaoServer -c Release
 ```
 
 After — either edit `appsettings.json`, or as env vars:
@@ -133,11 +133,11 @@ $env:Navmesh__Bake__AgentRadius = "0.5"
 $env:Navmesh__Bake__WalkableSlope = "48"
 $env:Navmesh__Query__EdgeMargin = "1.5"
 $env:SplineFollower__Enabled = "true"
-dotnet run --project BlazorServer -c Release
+dotnet run --project BaoServer -c Release
 ```
 
 …or entirely on the command line:
 ```powershell
-dotnet run --project BlazorServer -c Release -- `
+dotnet run --project BaoServer -c Release -- `
   --Navmesh:Bake:AgentRadius=0.5 --Navmesh:Query:EdgeMargin=1.5 --SplineFollower:Enabled=true
 ```

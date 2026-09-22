@@ -49,7 +49,7 @@ will gut it. Check the capability, not the engine type.
 ## Pathing backends
 
 `GetPather` picks one at startup by **probing, not by config alone**. `Pathing:Mode`
-ships as `Local` on both hosts (`BlazorServer/appsettings.json`, and `RunOptions`'
+ships as `Local` on both hosts (`BaoServer/appsettings.json`, and `RunOptions`'
 `Default` for HeadlessServer) = in-process `PPatherService` with
 `Pathing:Engine=Navmesh`, which needs no game archives — see `PPather/CLAUDE.md`.
 

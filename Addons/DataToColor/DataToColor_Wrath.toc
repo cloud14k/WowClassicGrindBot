@@ -1,5 +1,5 @@
 ## Interface: 34300
-## Title: DataToColor
+## Title: Twinkle14k
 ## Author: FreeHongKongMMO
 ## Notes: Displays data as colors (Classic Wrath)
 ## Version: 1.13.2

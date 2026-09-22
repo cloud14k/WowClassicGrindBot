@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <nullable>enable</nullable>
+    <AssemblyName>espidf</AssemblyName>
     <UserSecretsId>84fcf2b0-dc89-4b31-b09b-fdd65679d1d2</UserSecretsId>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>

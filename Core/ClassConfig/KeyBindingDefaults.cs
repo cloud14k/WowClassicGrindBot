@@ -65,8 +65,8 @@ public static class KeyBindingDefaults
         // Using ALT-DELETE/ALT-INSERT - modifiers come from runtime game bindings
         { BindingID.CUSTOM_STOPATTACK,   new(BindingID.CUSTOM_STOPATTACK,   "Delete",   ConsoleKey.Delete,   "DELETE",   46) },
         { BindingID.CUSTOM_CLEARTARGET,  new(BindingID.CUSTOM_CLEARTARGET,  "Insert",   ConsoleKey.Insert,   "INSERT",   45) },
-        // CUSTOM_CONFIG: /dc (SHIFT-PAGEUP) - opens addon config
-        // CUSTOM_FLUSH: /dcflush (SHIFT-PAGEDOWN) - flushes addon state
+        // CUSTOM_CONFIG (SHIFT-PAGEUP) opens the configured addon config command.
+        // CUSTOM_FLUSH (SHIFT-PAGEDOWN) flushes the configured addon state command.
         { BindingID.CUSTOM_CONFIG,       new(BindingID.CUSTOM_CONFIG,       "PageUp",   ConsoleKey.PageUp,   "PAGEUP",   33) },
         { BindingID.CUSTOM_FLUSH,        new(BindingID.CUSTOM_FLUSH,        "PageDown", ConsoleKey.PageDown, "PAGEDOWN", 34) },
 

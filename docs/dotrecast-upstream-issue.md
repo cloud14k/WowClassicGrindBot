@@ -30,7 +30,7 @@ result — and it leans hard on `RcRecast` bake throughput and on allocation
 behaviour, since the GC competes with the foreground app for the same cores.
 
 Worth stating plainly so you can judge relevance: the project is
-[WowClassicGrindBot](https://github.com/Xian55/WowClassicGrindBot), a World of
+[Twinkle14k](https://github.com/Xian55/WowClassicGrindBot), a World of
 Warcraft automation tool. If that's not something you want associated with the
 project, that's entirely fair — the measurements below stand on their own and
 you're welcome to use them without any attribution or connection.

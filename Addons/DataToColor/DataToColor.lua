@@ -393,17 +393,12 @@ DataToColor.customTrigger1 = {}
 DataToColor.sessionKillCount = 0
 
 function DataToColor:RegisterSlashCommands()
-    DataToColor:RegisterChatCommand('wowclassicgrindbot', 'StartSetup')
-    DataToColor:RegisterChatCommand('dc', 'StartSetup')
-    DataToColor:RegisterChatCommand('dccpu', 'GetCPUImpact')
-    DataToColor:RegisterChatCommand('dcflush', 'FushState')
-    DataToColor:RegisterChatCommand('dcbindings', 'SetDefaultBindings')
-    DataToColor:RegisterChatCommand('dcactions', 'CreateSecureButtons')
-    -- Keep the configured default title prefix available as an alias. The
-    -- generated frontend may call these names after addon installation.
-    DataToColor:RegisterChatCommand('wowclassicgrindbotbindings', 'SetDefaultBindings')
-    DataToColor:RegisterChatCommand('wowclassicgrindbotactions', 'CreateSecureButtons')
-    DataToColor:RegisterChatCommand('dccache', 'ToggleBitCache')
+    DataToColor:RegisterChatCommand('tw14k', 'StartSetup')
+    DataToColor:RegisterChatCommand('tw14kcpu', 'GetCPUImpact')
+    DataToColor:RegisterChatCommand('tw14kflush', 'FushState')
+    DataToColor:RegisterChatCommand('tw14kbindings', 'SetDefaultBindings')
+    DataToColor:RegisterChatCommand('tw14kactions', 'CreateSecureButtons')
+    DataToColor:RegisterChatCommand('tw14kcache', 'ToggleBitCache')
 end
 
 function DataToColor:ToggleBitCache()
@@ -425,7 +420,7 @@ function DataToColor:StartSetup()
 end
 
 function DataToColor:Print(...)
-    DEFAULT_CHAT_FRAME:AddMessage(strjoin('', '|cff00b3ff', 'DataToColor:|r ', ...))
+    DEFAULT_CHAT_FRAME:AddMessage(strjoin('', '|cff00b3ff', 'Twinkle14k:|r ', ...))
 end
 
 function DataToColor:error(msg)
@@ -819,7 +814,7 @@ function DataToColor:InitSpellBookQueue()
 
     -- First block: the highest rank of each spell, headed by its count. This is what the
     -- bot gates DataReady on, so it stays exactly as small and as fast as it was - the
-    -- lower ranks below are not worth stalling the agent for after a /dcflush.
+    -- lower ranks below are not worth stalling the agent for after a /tw14kflush.
     local count = 0
     for id in pairs(spellBookHighestSent) do
         spellBookHighestSent[id] = nil
@@ -1616,7 +1611,7 @@ function DataToColor:CreateFrames()
 
     --C_Timer.After(10, DumpCallCount)
 
-    DataToColor:RegisterChatCommand('dcdump', DumpCallCount)
+    DataToColor:RegisterChatCommand('tw14kdump', DumpCallCount)
 end
 
 function DataToColor:delete(items)

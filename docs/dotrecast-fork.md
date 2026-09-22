@@ -1,4 +1,4 @@
-# Why WowClassicGrindBot forks DotRecast
+# Why Twinkle14k forks DotRecast
 
 The bot needs a navmesh for a 34,000-yard-wide world, baked on the player's own
 machine, on first visit to an area, while the game client is running on the same

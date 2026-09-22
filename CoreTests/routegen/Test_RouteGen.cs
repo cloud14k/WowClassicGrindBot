@@ -142,7 +142,7 @@ internal sealed class Test_RouteGen : IDisposable
         NavmeshBakeOptions bake = new();
         NavmeshQueryOptions query = new();
 
-        string path = Path.Combine(RepoRoot, "BlazorServer", "appsettings.json");
+        string path = Path.Combine(RepoRoot, "BaoServer", "appsettings.json");
 
         if (!File.Exists(path))
         {

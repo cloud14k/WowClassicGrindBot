@@ -36,7 +36,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 function Resolve-JsonRoot {
     $candidates = @()
     if ($DataConfig) { $candidates += $DataConfig }
-    $candidates += (Join-Path $repoRoot "BlazorServer\data_config.json")
+    $candidates += (Join-Path $repoRoot "BaoServer\data_config.json")
     $candidates += (Join-Path $repoRoot "data_config.json")
     foreach ($cfgFile in $candidates) {
         if (Test-Path $cfgFile) {

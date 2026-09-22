@@ -233,7 +233,7 @@ public sealed partial class WowProcessInput : IMouseInput
     }
 
     /// <summary>
-    /// Presses SHIFT-PAGEDOWN to trigger CUSTOM_FLUSH (/dcflush) in the addon.
+    /// Presses SHIFT-PAGEDOWN to trigger CUSTOM_FLUSH (/tw14kflush) in the addon.
     /// </summary>
     public void PressFlushKey()
     {

@@ -1,4 +1,4 @@
-## Interface: 20501
+## Interface: 11500, 20500, 20501, 30400, 40400, 50500
 ## Title: BindPad
 ## Version: c0.2
 ## Author: Tageshi, jukx

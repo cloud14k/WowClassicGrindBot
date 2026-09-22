@@ -1,5 +1,5 @@
 ## Interface: 11300, 11400, 11500, 20500, 30400, 40400, 50500
-## Title: DataToColor
+## Title: Twinkle14k
 ## Author: FreeHongKongMMO
 ## Notes: Displays data as colors (Classic)
 ## Version: 1.13.2

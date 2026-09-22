@@ -12,7 +12,7 @@ World\\Minimaps\\<MapDir>\\. Two client generations, both handled:
 
 Which one is used is detected from the client (presence of md5translate.trs),
 not configured. This stitches the blocks of each continent into the tile
-pyramid the PathingAPI/BlazorServer Leaflet map expects:
+pyramid the PathingAPI/BaoServer Leaflet map expects:
 
     Json/leaflet/<era>/<Continent>/z{z}x{x}y{y}.webp
 

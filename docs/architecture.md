@@ -11,7 +11,7 @@ Further detail about the early architecture can be found in [Blog post](http://w
 MasterOfPuppets.sln
 │
 ├── Hosts ─────────────────────────────────────────────────────────
-│   ├── BlazorServer/       ASP.NET Core Blazor Server — primary web UI
+│   ├── BaoServer/          ASP.NET Core Blazor Server — primary web UI
 │   ├── HeadlessServer/     Console app — CLI automation, no UI
 │   └── PathingAPI/         ASP.NET Core Web API — standalone pathfinding microservice
 │

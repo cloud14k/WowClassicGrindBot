@@ -16,7 +16,7 @@ function Get-ProjectRoot {
 function Get-PatherPid {
     param(
         [int]$TargetPid = 0,
-        [string]$Target = 'any'   # any | PathingAPI | Benchmarks | BlazorServer
+        [string]$Target = 'any'   # any | PathingAPI | Benchmarks | espidf
     )
 
     if ($TargetPid -gt 0) { return $TargetPid }
@@ -32,8 +32,8 @@ function Get-PatherPid {
     $names = switch ($Target) {
         'PathingAPI'   { @('PathingAPI') }
         'Benchmarks'   { @('Benchmarks') }
-        'BlazorServer' { @('BlazorServer') }
-        default        { @('PathingAPI', 'Benchmarks', 'BlazorServer') }
+        'espidf'       { @('espidf') }
+        default        { @('PathingAPI', 'Benchmarks', 'espidf') }
     }
 
     $found = @()

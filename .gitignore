@@ -297,9 +297,9 @@ Json/leaflet/*.zip
 **/addon_config.json
 **/data_config.json
 
-BlazorServer/frame_config.json
-BlazorServer/addon_config.json
-BlazorServer/data_config.json
+BaoServer/frame_config.json
+BaoServer/addon_config.json
+BaoServer/data_config.json
 
 HeadlessServer/frame_config.json
 HeadlessServer/addon_config.json

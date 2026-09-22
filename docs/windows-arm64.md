@@ -15,13 +15,13 @@ The bot runs inside a **Windows 11 ARM64** guest (for example a Parallels/VMware
    cmake --build build --config Release
    ```
    Verify it is an ARM64 binary (`dumpbin /headers StormLib_arm64.dll` → `machine (AA64)`).
-2. Build/run as usual (`dotnet run --project BlazorServer -c Release`). The bot drives a natively ARM64 WoW client (`WowClassic-arm64.exe`) — it reads the screen and sends input, so guest/client architecture do not need to match.
+2. Build/run as usual (`dotnet run --project BaoServer -c Release`). The bot drives a natively ARM64 WoW client (`WowClassic-arm64.exe`) — it reads the screen and sends input, so guest/client architecture do not need to match.
 
 **x64 emulation fallback** (if you cannot build the ARM64 `StormLib` yet):
 * Install the **x64** .NET 10 Desktop + ASP.NET Core runtimes (they run under the built-in x64 emulation).
 * Run x64 explicitly so the existing `StormLib_x64.dll` is used:
   ```
-  dotnet run --project BlazorServer -c Release --arch x64
+  dotnet run --project BaoServer -c Release --arch x64
   ```
 * Do **not** hard-code `<PlatformTarget>x64</PlatformTarget>` in the `.csproj` — that would override the native ARM64 path for everyone.
 

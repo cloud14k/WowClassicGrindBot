@@ -131,7 +131,7 @@ public sealed partial class AddonReader : IAddonReader
                 }
 
                 // BeginRefresh already reset every reader. The low/rollback
-                // value emitted by the requested /dcflush is expected. Do not
+                // value emitted by the requested addon flush command is expected. Do not
                 // reset again, and do not skip this frame: if the capture starts
                 // after INIT_PHASE, this may be the first frame containing the
                 // queue header.
@@ -214,7 +214,7 @@ public sealed partial class AddonReader : IAddonReader
     /// <summary>
     /// Starts the one official refresh transaction used by live diagnostics.
     /// The following low/init GlobalTime value is produced by the requested
-    /// Lua /dcflush, so AddonReader.Update must observe it without resetting
+    /// Lua addon flush command, so AddonReader.Update must observe it without resetting
     /// the readers a second time.
     /// </summary>
     public void BeginRefresh()

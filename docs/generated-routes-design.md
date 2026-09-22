@@ -519,7 +519,7 @@ Two consequences that do need handling:
    `"Type:Humanoid"` in `PathSettings.Requirements` does the same — the two tables must not
    leak into each other.
 3. Add a `Generate` entry to a scratch copy of `Json/class/_/Warrior_1-10--------------.json`
-   and run `dotnet run --project BlazorServer`. The Blazor route view renders `MapRoute()` →
+   and run `dotnet run --project BaoServer`. The Blazor route view renders `MapRoute()` →
    `OriginalMapPath`, so the generated loop is visible on the Leaflet map with no UI change.
    Confirm it sits on the Northshire wolf/kobold spawns and not inside the abbey.
 4. Fix `Seed`, run twice, diff the logged waypoint arrays — byte-identical in `Loop` mode,

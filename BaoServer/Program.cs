@@ -114,11 +114,11 @@ public static class Program
 
         services.AddStartupConfigurations(configuration);
 
-        services.AddWoWProcess(log);
+        bool gameEnvironmentReady = services.AddWoWProcess(log);
 
         services.AddCoreBase(log);
 
-        if (AddonConfig.Exists() && FrameConfig.Exists())
+        if (gameEnvironmentReady)
         {
             services.AddCoreNormal(log);
         }

@@ -1,5 +1,5 @@
 ## Interface: 40300
-## Title: DataToColor
+## Title: Twinkle14k
 ## Author: FreeHongKongMMO
 ## Notes: Displays data as colors (Legacy Cataclysm 4.3.0)
 ## Version: 1.13.2

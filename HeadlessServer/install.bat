@@ -2,7 +2,7 @@
 
 cd /D "%~dp0"
 set Headless=%~dp0
-set Blazor=..\BlazorServer
+set Blazor=..\BaoServer
 
 set dataf=data_config.json
 set addonf=addon_config.json

@@ -3,7 +3,7 @@
 Everything here was found while building class trainer support, and left unfixed on
 purpose. Each entry records the evidence, the mechanism and the intended fix, so it can
 be picked up without re-deriving it. Log excerpts are from
-`BlazorServer/out20260803*.log` (Wrath 3.4.3, addon 1.12.0).
+`BaoServer/out20260803*.log` (Wrath 3.4.3, addon 1.12.0).
 
 Ordered by consequence.
 
