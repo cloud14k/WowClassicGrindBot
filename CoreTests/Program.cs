@@ -52,11 +52,12 @@ internal sealed class Program
         ["combat"] = args => Test_Combat.Run(logger, loggerFactory, UseDxgi, args),
         ["grind"] = args => Test_Grind.Run(logger, loggerFactory, UseDxgi, args),
         ["state"] = args => Test_State.Run(logger, loggerFactory, UseDxgi, args),
+        ["keybindings"] = _ => Test_KeyBindings.Run(logger, loggerFactory),
     };
 
     /// <summary>Suites that need no WoW process - see the attach decision in Main.</summary>
     private static readonly HashSet<string> offlineSuites =
-        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "npc-regression", "state" };
+        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "npc-regression", "state", "keybindings" };
 
     public static void Main(string[] args)
     {

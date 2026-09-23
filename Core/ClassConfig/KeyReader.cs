@@ -49,48 +49,6 @@ public static class KeyReader
     public static EquipmentReader? EquipmentReader { get; set; }
 
     /// <summary>
-    /// Default WoW keybindings mapping BindingID to ConsoleKey.
-    /// These represent the expected in-game bindings for non-actionbar keys.
-    /// </summary>
-    public static Dictionary<BindingID, ConsoleKey> DefaultBindings { get; } = new()
-    {
-        // Movement
-        { BindingID.MOVEFORWARD, ConsoleKey.W },
-        { BindingID.MOVEBACKWARD, ConsoleKey.S },
-        { BindingID.STRAFELEFT, ConsoleKey.Q },
-        { BindingID.STRAFERIGHT, ConsoleKey.E },
-        { BindingID.TURNLEFT, ConsoleKey.A },
-        { BindingID.TURNRIGHT, ConsoleKey.D },
-        { BindingID.JUMP, ConsoleKey.Spacebar },
-        { BindingID.SITORSTAND, ConsoleKey.X },
-
-        // Targeting
-        { BindingID.TARGETNEARESTENEMY, ConsoleKey.Tab },
-        { BindingID.TARGETLASTTARGET, ConsoleKey.G },
-        { BindingID.ASSISTTARGET, ConsoleKey.F },
-        { BindingID.TARGETPET, ConsoleKey.Multiply },
-        // ALT-PAGEUP: TARGETFOCUS (TBC+) or TARGETPARTYMEMBER1 (Vanilla) - version dependent
-
-        // Combat
-        { BindingID.PETATTACK, ConsoleKey.Subtract },
-
-        // Interaction (ALT-HOME and ALT-END - modifiers come from runtime)
-        { BindingID.INTERACTTARGET, ConsoleKey.Home },
-        { BindingID.INTERACTMOUSEOVER, ConsoleKey.End },
-
-        // Follow
-        { BindingID.FOLLOWTARGET, ConsoleKey.PageDown },
-
-        // Custom Actions (secure buttons)
-        // Using ALT-DELETE/ALT-INSERT - modifiers come from runtime game bindings
-        { BindingID.CUSTOM_STOPATTACK, ConsoleKey.Delete },
-        { BindingID.CUSTOM_CLEARTARGET, ConsoleKey.Insert },
-        // Using SHIFT-PAGEUP/SHIFT-PAGEDOWN - modifiers come from runtime game bindings
-        { BindingID.CUSTOM_CONFIG, ConsoleKey.PageUp },
-        { BindingID.CUSTOM_FLUSH, ConsoleKey.PageDown },
-    };
-
-    /// <summary>
     /// Maps ConsoleKey to WoW key string for SetBinding Lua calls.
     /// Includes all keys (action bar keys + special keys like letters, arrows, etc.)
     /// </summary>
@@ -427,7 +385,7 @@ public static class KeyReader
         if (defaultBinding.HasValue)
         {
             key.ConsoleKey = defaultBinding.Value.ConsoleKey;
-            key.Modifier = ModifierKey.None; // Defaults don't have modifiers
+            key.Modifier = defaultBinding.Value.Modifier;
             if (defaultBinding.Value.Slot.HasValue)
                 key.Slot = defaultBinding.Value.Slot.Value;
             return true;
@@ -459,7 +417,7 @@ public static class KeyReader
         if (defaultBinding.HasValue)
         {
             key.ConsoleKey = defaultBinding.Value.ConsoleKey;
-            key.Modifier = ModifierKey.None; // Defaults don't have modifiers
+            key.Modifier = defaultBinding.Value.Modifier;
             return true;
         }
 
@@ -556,10 +514,12 @@ public static class KeyReader
         if (keyAction.BindingID == BindingID.None)
             return false;
 
-        if (!DefaultBindings.TryGetValue(keyAction.BindingID, out ConsoleKey defaultKey))
+        var defaultBinding = KeyBindingDefaults.GetByBindingID(keyAction.BindingID);
+        if (!defaultBinding.HasValue)
             return false;
 
-        return keyAction.ConsoleKey != defaultKey;
+        return keyAction.ConsoleKey != defaultBinding.Value.ConsoleKey ||
+            keyAction.Modifier != defaultBinding.Value.Modifier;
     }
 
     /// <summary>
@@ -593,7 +553,8 @@ public static class KeyReader
             return null;
 
         string bindingId = keyAction.BindingID.ToString();
-        return $"SetBinding(\"{wowKey}\", \"{bindingId}\")";
+        string modifierPrefix = keyAction.Modifier.ToPrefix().ToUpperInvariant();
+        return $"SetBinding(\"{modifierPrefix}{wowKey}\", \"{bindingId}\")";
     }
 
     /// <summary>
@@ -835,20 +796,57 @@ public static class KeyReader
     public static Dictionary<BindingID, (ConsoleKey Key, ModifierKey Modifier)> GameBindingsSecondary { get; } = [];
 
     /// <summary>
+    /// Raised when an extracted game binding is added, changed, or removed.
+    /// Active profile actions use this to replace their startup fallback.
+    /// </summary>
+    public static event Action<BindingID>? GameBindingChanged;
+
+    internal static void NotifyGameBindingChanged(BindingID bindingId) =>
+        GameBindingChanged?.Invoke(bindingId);
+
+    /// <summary>
     /// Processes an encoded binding value and stores it.
     /// Call this when receiving binding data from the addon.
     /// </summary>
     public static void ProcessBindingFromAddon(int encodedValue)
     {
         var decoded = DecodeBinding(encodedValue);
-        if (decoded.HasValue)
-        {
-            if (decoded.Value.key1 != ConsoleKey.NoName)
-                GameBindings[decoded.Value.bindingId] = (decoded.Value.key1, decoded.Value.mod1);
+        if (!decoded.HasValue)
+            return;
 
-            if (decoded.Value.key2 != ConsoleKey.NoName)
-                GameBindingsSecondary[decoded.Value.bindingId] = (decoded.Value.key2, decoded.Value.mod2);
+        bool changed = false;
+        BindingID bindingId = decoded.Value.bindingId;
+
+        if (decoded.Value.key1 != ConsoleKey.NoName)
+        {
+            var newBinding = (decoded.Value.key1, decoded.Value.mod1);
+            if (!GameBindings.TryGetValue(bindingId, out var current) || current != newBinding)
+            {
+                GameBindings[bindingId] = newBinding;
+                changed = true;
+            }
         }
+        else if (GameBindings.Remove(bindingId))
+        {
+            changed = true;
+        }
+
+        if (decoded.Value.key2 != ConsoleKey.NoName)
+        {
+            var newBinding = (decoded.Value.key2, decoded.Value.mod2);
+            if (!GameBindingsSecondary.TryGetValue(bindingId, out var current) || current != newBinding)
+            {
+                GameBindingsSecondary[bindingId] = newBinding;
+                changed = true;
+            }
+        }
+        else if (GameBindingsSecondary.Remove(bindingId))
+        {
+            changed = true;
+        }
+
+        if (changed)
+            NotifyGameBindingChanged(bindingId);
     }
 
     /// <summary>

@@ -76,7 +76,13 @@
         {
             SetupInfo setup = GetSetupInfo(binding);
             var (chinese, english, description) = Describe(binding);
-            rows.Add(new CommonKeyRow(chinese, english, setup.Key, binding.WoWKey, binding.BindingID.ToString(), description, setup.ManagedBy, setup.Status));
+            string csharpDefault = FormatWoWBinding(binding);
+            string status = setup.ManagedBy == "—"
+                ? "Read only / 只读取"
+                : string.Equals(setup.Key, csharpDefault, StringComparison.OrdinalIgnoreCase)
+                    ? setup.RequiresBindPad ? "Match / 一致 · BindPad required" : "Match / 一致"
+                    : $"⚠ Lua {setup.Key}; C# {csharpDefault}";
+            rows.Add(new CommonKeyRow(chinese, english, setup.Key, csharpDefault, binding.BindingID.ToString(), description, setup.ManagedBy, status));
         }
 
         rows.Add(new CommonKeyRow("焦点目标", "Target Focus", "ALT-PAGEUP", "—", nameof(BindingID.TARGETFOCUS), "选择焦点目标；Vanilla 客户端使用队伍目标 1。 / Targets focus; Vanilla uses party member 1.", "Essential", "按客户端版本二选一 / Version dependent"));
@@ -88,32 +94,36 @@
     private static SetupInfo GetSetupInfo(KeyBinding binding)
     {
         BindingID id = binding.BindingID;
+        string defaultKey = FormatWoWBinding(binding);
         if (id is BindingID.MOVEFORWARD or BindingID.MOVEBACKWARD or BindingID.TURNLEFT or BindingID.TURNRIGHT or
             BindingID.STRAFELEFT or BindingID.STRAFERIGHT or BindingID.JUMP or BindingID.SITORSTAND ||
             binding.Slot is > 0 and <= 12)
-            return new SetupInfo(binding.WoWKey, "Core", "Match / 本次设置为 C# 默认");
+            return new SetupInfo(defaultKey, "Core");
 
         if (binding.Slot is >= 49 and <= 58 or >= 61 and <= 72)
-            return new SetupInfo(binding.WoWKey, "Action Bar", "Match / 一致");
+            return new SetupInfo(defaultKey, "Action Bar");
 
         return id switch
         {
-            BindingID.TARGETNEARESTENEMY => new("TAB", "Essential", "Match / 一致"),
-            BindingID.TARGETLASTTARGET => new("G", "Essential", "Match / 一致"),
-            BindingID.ASSISTTARGET => new("F", "Essential", "Match / 一致"),
-            BindingID.TARGETPET => new("NUMPADMULTIPLY", "Essential", "Match / 一致"),
-            BindingID.PETATTACK => new("NUMPADMINUS", "Essential", "Match / 一致"),
-            BindingID.STARTATTACK => new("ALT-NUMPADPLUS", "Essential", "⚠ Lua adds ALT; C# fallback is bare NUMPADPLUS"),
-            BindingID.INTERACTTARGET => new("ALT-HOME", "Essential", "⚠ Lua adds ALT; C# fallback is bare HOME"),
-            BindingID.INTERACTMOUSEOVER => new("ALT-END", "Essential", "⚠ Lua adds ALT; C# fallback is bare END"),
-            BindingID.FOLLOWTARGET => new("ALT-PAGEDOWN", "Essential", "⚠ Lua adds ALT; C# fallback is bare PAGEDOWN"),
-            BindingID.CUSTOM_STOPATTACK => new("ALT-DELETE", "Utility", "⚠ Requires BindPad; Lua adds ALT to the C# fallback"),
-            BindingID.CUSTOM_CLEARTARGET => new("ALT-INSERT", "Utility", "⚠ Requires BindPad; Lua adds ALT to the C# fallback"),
-            BindingID.CUSTOM_CONFIG => new("SHIFT-PAGEUP", "Utility", "⚠ Requires BindPad; Lua adds SHIFT to the C# fallback"),
-            BindingID.CUSTOM_FLUSH => new("SHIFT-PAGEDOWN", "Utility", "⚠ Requires BindPad; Lua adds SHIFT to the C# fallback"),
-            _ => new SetupInfo(binding.WoWKey, "—", "No explicit Lua setup / 未由插件显式设置")
+            BindingID.TARGETNEARESTENEMY => new("TAB", "Essential"),
+            BindingID.TARGETLASTTARGET => new("G", "Essential"),
+            BindingID.ASSISTTARGET => new("F", "Essential"),
+            BindingID.TARGETPET => new("NUMPADMULTIPLY", "Essential"),
+            BindingID.PETATTACK => new("NUMPADMINUS", "Essential"),
+            BindingID.STARTATTACK => new("ALT-NUMPADPLUS", "Essential"),
+            BindingID.INTERACTTARGET => new("ALT-HOME", "Essential"),
+            BindingID.INTERACTMOUSEOVER => new("ALT-END", "Essential"),
+            BindingID.FOLLOWTARGET => new("ALT-PAGEDOWN", "Essential"),
+            BindingID.CUSTOM_STOPATTACK => new("ALT-DELETE", "Utility", RequiresBindPad: true),
+            BindingID.CUSTOM_CLEARTARGET => new("ALT-INSERT", "Utility", RequiresBindPad: true),
+            BindingID.CUSTOM_CONFIG => new("SHIFT-PAGEUP", "Utility", RequiresBindPad: true),
+            BindingID.CUSTOM_FLUSH => new("SHIFT-PAGEDOWN", "Utility", RequiresBindPad: true),
+            _ => new SetupInfo("—", "—")
         };
     }
+
+    private static string FormatWoWBinding(KeyBinding binding) =>
+        binding.Modifier.ToPrefix().ToUpperInvariant() + binding.WoWKey;
 
     private static (string Chinese, string English, string Description) Describe(KeyBinding binding)
     {
@@ -150,6 +160,6 @@
 
     private static string StatusClass(string status) => status.StartsWith("⚠", StringComparison.Ordinal) ? "bg-warning text-dark" : "bg-success";
 
-    private sealed record SetupInfo(string Key, string ManagedBy, string Status);
+    private sealed record SetupInfo(string Key, string ManagedBy, bool RequiresBindPad = false);
     private sealed record CommonKeyRow(string Chinese, string English, string Key, string CSharpDefault, string BindingId, string Description, string ManagedBy, string Status);
 }

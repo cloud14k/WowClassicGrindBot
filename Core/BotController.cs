@@ -45,6 +45,7 @@ public sealed partial class BotController : IBotController, IDisposable
     private readonly ActionBarSlotValidator slotValidator;
     private readonly ActionBarTextureReader textureReader;
     private readonly ActionBarMacroReader macroReader;
+    private readonly WowProcessInput wowProcessInput;
 
     private readonly NpcNameOverlay? npcNameOverlay;
 
@@ -91,7 +92,8 @@ public sealed partial class BotController : IBotController, IDisposable
         IOptions<StartupConfigNpcOverlay> overlayOptions,
         ActionBarSlotValidator slotValidator,
         ActionBarTextureReader textureReader,
-        ActionBarMacroReader macroReader)
+        ActionBarMacroReader macroReader,
+        WowProcessInput wowProcessInput)
     {
         this.serviceProvider = serviceProvider;
 
@@ -108,6 +110,7 @@ public sealed partial class BotController : IBotController, IDisposable
         this.slotValidator = slotValidator;
         this.textureReader = textureReader;
         this.macroReader = macroReader;
+        this.wowProcessInput = wowProcessInput;
 
         this.minimapNodeFinder = minimapNodeFinder;
 
@@ -121,6 +124,9 @@ public sealed partial class BotController : IBotController, IDisposable
                 overlayOptions.Value.ShowTargeting,
                 overlayOptions.Value.ShowSkinning,
                 overlayOptions.Value.ShowTargetVsAdd);
+
+        // Subscribe before starting the addon thread, which can receive bindings immediately.
+        KeyReader.GameBindingChanged += OnGameBindingChanged;
 
         addonThread = new(AddonThread);
         addonThread.Priority = ThreadPriority.AboveNormal;
@@ -413,6 +419,34 @@ public sealed partial class BotController : IBotController, IDisposable
         SetBotActive(!IsBotActive);
     }
 
+    private void OnGameBindingChanged(BindingID bindingId)
+    {
+        ClassConfiguration? config = ClassConfig;
+        if (config == null)
+            return;
+
+        try
+        {
+            int refreshed = config.RefreshKeyBindingsFor(bindingId, logger);
+
+            // WowProcessInput caches this action when the session is created, so keep
+            // that cache in step with the live KeyAction when the addon reports a change.
+            if (bindingId == BindingID.INTERACTMOUSEOVER)
+            {
+                wowProcessInput.InteractMouseover = config.InteractMouseOver.ConsoleKey;
+                wowProcessInput.InteractMouseoverModifier = config.InteractMouseOver.Modifier;
+                wowProcessInput.InteractMouseoverPress = config.InteractMouseOver.PressDuration;
+            }
+
+            if (refreshed > 0 && logger.IsEnabled(LogLevel.Debug))
+                logger.LogDebug("Refreshed {ActionCount} actions for game binding {BindingID}", refreshed, bindingId);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Unable to refresh actions for game binding {BindingID}", bindingId);
+        }
+    }
+
     /// <summary>Sets the agent state explicitly, avoiding stale UI state toggling the wrong direction.</summary>
     public void SetBotActive(bool active)
     {
@@ -532,6 +566,7 @@ public sealed partial class BotController : IBotController, IDisposable
 
     public void Dispose()
     {
+        KeyReader.GameBindingChanged -= OnGameBindingChanged;
         cts.Cancel();
 
         npcNameOverlay?.Dispose();

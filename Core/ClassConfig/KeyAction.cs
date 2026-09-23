@@ -189,6 +189,9 @@ public sealed partial class KeyAction
 
     public int ConsoleKeyFormHash { private set; get; }
 
+    internal void RefreshConsoleKeyFormHash() =>
+        ConsoleKeyFormHash = ((int)FormValue * 1000) + (int)ConsoleKey;
+
     private DateTime LastClicked = DateTime.UtcNow.AddDays(-1);
 
     private static int LastKey;
@@ -260,7 +263,7 @@ public sealed partial class KeyAction
             LogFormRequired(logger, Name, FormValue);
         }
 
-        ConsoleKeyFormHash = ((int)FormValue * 1000) + (int)ConsoleKey;
+        RefreshConsoleKeyFormHash();
 
         if (!string.IsNullOrEmpty(Requirement))
         {

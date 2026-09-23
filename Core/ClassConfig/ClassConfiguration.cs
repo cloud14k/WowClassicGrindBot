@@ -537,6 +537,63 @@ public sealed partial class ClassConfiguration
         return GetByType<T>().ToList();
     }
 
+    /// <summary>
+    /// Re-resolves only actions affected by a changed in-game binding. This is called
+    /// from the addon binding-change event so startup fallbacks can be replaced without
+    /// scanning or resolving every profile action each frame.
+    /// </summary>
+    public int RefreshKeyBindingsFor(BindingID bindingId, ILogger logger)
+    {
+        if (bindingId == BindingID.None)
+            return 0;
+
+        int refreshed = 0;
+        HashSet<KeyAction> seen = [];
+
+        foreach (KeyAction action in AllKeyActions())
+        {
+            if (!seen.Add(action))
+                continue;
+
+            bool usesBinding = action.BindingID == bindingId ||
+                action.Slot > 0 && KeyReader.SlotToBindingID(action.Slot) == bindingId;
+            if (!usesBinding)
+                continue;
+
+            try
+            {
+                if (KeyReader.ReadKey(logger, action))
+                {
+                    action.RefreshConsoleKeyFormHash();
+                    refreshed++;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Unable to refresh key binding {BindingID} for action {ActionName}",
+                    bindingId, action.Name);
+            }
+        }
+
+        return refreshed;
+    }
+
+    private IEnumerable<KeyAction> AllKeyActions()
+    {
+        foreach (var (_, action) in GetByType<KeyAction>())
+            yield return action;
+
+        foreach (var (_, actions) in GetByType<KeyActions>())
+        {
+            foreach (KeyAction action in actions.Sequence)
+                yield return action;
+        }
+
+        foreach (KeyAction action in GatherFindKeyConfig)
+            yield return action;
+    }
+
     [LoggerMessage(
         EventId = 0010,
         Level = LogLevel.Information,

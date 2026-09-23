@@ -84,7 +84,6 @@ public sealed partial class KeyBindingsReader : IReader
                 existingBinding.Modifier != newBinding.mod1)
             {
                 bindings[bindingId] = newBinding;
-                KeyReader.GameBindings[bindingId] = newBinding;
                 changed = true;
                 if (logger.IsEnabled(LogLevel.Trace))
                 {
@@ -95,7 +94,6 @@ public sealed partial class KeyBindingsReader : IReader
         }
         else if (bindings.Remove(bindingId))
         {
-            KeyReader.GameBindings.Remove(bindingId);
             changed = true;
             LogBindingRemoved(logger, bindingId);
         }
@@ -108,7 +106,6 @@ public sealed partial class KeyBindingsReader : IReader
                 existingBinding.Modifier != newBinding.mod2)
             {
                 secondaryBindings[bindingId] = newBinding;
-                KeyReader.GameBindingsSecondary[bindingId] = newBinding;
                 changed = true;
                 if (logger.IsEnabled(LogLevel.Trace))
                 {
@@ -119,9 +116,12 @@ public sealed partial class KeyBindingsReader : IReader
         }
         else if (secondaryBindings.Remove(bindingId))
         {
-            KeyReader.GameBindingsSecondary.Remove(bindingId);
             changed = true;
         }
+
+        // Keep the shared game binding source and refresh subscribers on the same
+        // path used by other addon binding ingestion callers.
+        KeyReader.ProcessBindingFromAddon(encodedValue);
 
         if (changed)
         {
@@ -131,6 +131,11 @@ public sealed partial class KeyBindingsReader : IReader
 
     public void Reset()
     {
+        HashSet<BindingID> resetBindingIds = new(bindings.Keys);
+        resetBindingIds.UnionWith(secondaryBindings.Keys);
+        resetBindingIds.UnionWith(KeyReader.GameBindings.Keys);
+        resetBindingIds.UnionWith(KeyReader.GameBindingsSecondary.Keys);
+
         bindings.Clear();
         secondaryBindings.Clear();
         KeyReader.GameBindings.Clear();
@@ -140,6 +145,12 @@ public sealed partial class KeyBindingsReader : IReader
         receivedCount = 0;
         decodedCount = 0;
         decodeFailureCount = 0;
+
+        foreach (BindingID bindingId in resetBindingIds)
+        {
+            KeyReader.NotifyGameBindingChanged(bindingId);
+            BindingChanged?.Invoke(bindingId);
+        }
     }
 
     /// <summary>

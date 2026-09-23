@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 
+using SharedLib;
+
 namespace Core;
 
 /// <summary>
@@ -12,13 +14,15 @@ namespace Core;
 /// <param name="WoWKey">WoW API key string ("SPACE", "1", "NUMPAD1", "F1")</param>
 /// <param name="KeyId">Numeric ID for pixel encoding</param>
 /// <param name="Slot">Action bar slot (1-72), null for non-action bar bindings</param>
+/// <param name="Modifier">Modifier key used with the main key, if any</param>
 public readonly record struct KeyBinding(
     BindingID BindingID,
     string KeyName,
     ConsoleKey ConsoleKey,
     string WoWKey,
     int KeyId,
-    int? Slot = null);
+    int? Slot = null,
+    ModifierKey Modifier = ModifierKey.None);
 
 /// <summary>
 /// Centralized default key bindings. Single source of truth.
@@ -48,27 +52,26 @@ public static class KeyBindingDefaults
         // ALT-PAGEUP: TARGETFOCUS (TBC+) or TARGETPARTYMEMBER1 (Vanilla) - version dependent, modifiers come from runtime
 
         // ===== Combat =====
-        { BindingID.STARTATTACK, new(BindingID.STARTATTACK, "Add",      ConsoleKey.Add,      "NUMPADPLUS",  107) },
+        { BindingID.STARTATTACK, new(BindingID.STARTATTACK, "Add",      ConsoleKey.Add,      "NUMPADPLUS",  107, Modifier: ModifierKey.Alt) },
         { BindingID.PETATTACK,   new(BindingID.PETATTACK,   "Subtract", ConsoleKey.Subtract, "NUMPADMINUS", 109) },
 
-        // ===== Interaction (ALT-HOME/ALT-END - modifiers come from runtime) =====
-        { BindingID.INTERACTTARGET,    new(BindingID.INTERACTTARGET,    "Home",     ConsoleKey.Home,     "HOME",     36) },
-        { BindingID.INTERACTMOUSEOVER, new(BindingID.INTERACTMOUSEOVER, "End",      ConsoleKey.End,      "END",      35) },
+        // ===== Interaction =====
+        { BindingID.INTERACTTARGET,    new(BindingID.INTERACTTARGET,    "Home",     ConsoleKey.Home,     "HOME",     36, Modifier: ModifierKey.Alt) },
+        { BindingID.INTERACTMOUSEOVER, new(BindingID.INTERACTMOUSEOVER, "End",      ConsoleKey.End,      "END",      35, Modifier: ModifierKey.Alt) },
 
         // ===== Follow =====
-        { BindingID.FOLLOWTARGET, new(BindingID.FOLLOWTARGET, "PageDown", ConsoleKey.PageDown, "PAGEDOWN", 34) },
+        { BindingID.FOLLOWTARGET, new(BindingID.FOLLOWTARGET, "PageDown", ConsoleKey.PageDown, "PAGEDOWN", 34, Modifier: ModifierKey.Alt) },
 
         // ===== Custom Actions (secure buttons - no macro slots used) =====
         // These replace WoW's limited built-in commands with macro-powered versions
         // CUSTOM_STOPATTACK: /stopattack + /stopcasting + /petfollow (better than built-in STOPATTACK)
         // CUSTOM_CLEARTARGET: /cleartarget (no built-in binding exists)
-        // Using ALT-DELETE/ALT-INSERT - modifiers come from runtime game bindings
-        { BindingID.CUSTOM_STOPATTACK,   new(BindingID.CUSTOM_STOPATTACK,   "Delete",   ConsoleKey.Delete,   "DELETE",   46) },
-        { BindingID.CUSTOM_CLEARTARGET,  new(BindingID.CUSTOM_CLEARTARGET,  "Insert",   ConsoleKey.Insert,   "INSERT",   45) },
+        { BindingID.CUSTOM_STOPATTACK,   new(BindingID.CUSTOM_STOPATTACK,   "Delete",   ConsoleKey.Delete,   "DELETE",   46, Modifier: ModifierKey.Alt) },
+        { BindingID.CUSTOM_CLEARTARGET,  new(BindingID.CUSTOM_CLEARTARGET,  "Insert",   ConsoleKey.Insert,   "INSERT",   45, Modifier: ModifierKey.Alt) },
         // CUSTOM_CONFIG (SHIFT-PAGEUP) opens the configured addon config command.
         // CUSTOM_FLUSH (SHIFT-PAGEDOWN) flushes the configured addon state command.
-        { BindingID.CUSTOM_CONFIG,       new(BindingID.CUSTOM_CONFIG,       "PageUp",   ConsoleKey.PageUp,   "PAGEUP",   33) },
-        { BindingID.CUSTOM_FLUSH,        new(BindingID.CUSTOM_FLUSH,        "PageDown", ConsoleKey.PageDown, "PAGEDOWN", 34) },
+        { BindingID.CUSTOM_CONFIG,       new(BindingID.CUSTOM_CONFIG,       "PageUp",   ConsoleKey.PageUp,   "PAGEUP",   33, Modifier: ModifierKey.Shift) },
+        { BindingID.CUSTOM_FLUSH,        new(BindingID.CUSTOM_FLUSH,        "PageDown", ConsoleKey.PageDown, "PAGEDOWN", 34, Modifier: ModifierKey.Shift) },
 
         // ===== Main Action Bar: slots 1-12 =====
         { BindingID.ACTIONBUTTON1,  new(BindingID.ACTIONBUTTON1,  "1", ConsoleKey.D1,       "1", 49,  Slot: 1) },
