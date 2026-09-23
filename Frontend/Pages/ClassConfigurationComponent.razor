@@ -1,9 +1,29 @@
 ﻿@inject IBotController botController
 @inject IAddonReader addonReader
+@inject NavigationManager navigationManager
 
 @implements IDisposable
 
-<div class="container">
+@if (classConfig is null)
+{
+    <div class="container"><div class="alert alert-info">Please load a class profile first. / 请先加载职业配置。</div></div>
+}
+else
+{
+<div class="container" id="class-profile">
+    <div class="card mt-1"><div class="card-header d-flex justify-content-between align-items-center">
+        <div class="btn-group" role="group">
+            <button class="btn btn-sm @(activeTab == ProfileTab.Configuration ? "btn-primary" : "btn-outline-secondary")" @onclick="() => activeTab = ProfileTab.Configuration">Configuration / 配置</button>
+            <button class="btn btn-sm @(activeTab == ProfileTab.Skills ? "btn-primary" : "btn-outline-secondary")" @onclick="() => activeTab = ProfileTab.Skills" id="skills">Skills &amp; Action Bar / 技能与动作栏</button>
+        </div>
+        <span class="text-muted">Current Class Profile / 当前职业配置: <code>@System.IO.Path.GetFileName(botController.SelectedClassFilename)</code></span>
+    </div></div>
+    @if (activeTab == ProfileTab.Skills)
+    {
+        <ClassSkillsComponent ClassConfig="classConfig" ProfileFilename="@botController.SelectedClassFilename" />
+    }
+    else
+    {
     <Card>
         <CardHeader>
             Class Configuration
@@ -108,11 +128,15 @@
             </table>
         </CardBody>
     </Card>
+    }
 </div>
+}
 
 @code {
 
     private ClassConfiguration classConfig = null!;
+    private ProfileTab activeTab;
+    private enum ProfileTab { Configuration, Skills }
 
     private HashSet<string> editables = new()
     {
@@ -149,6 +173,8 @@
     protected override void OnInitialized()
     {
         RefreshData();
+        if (navigationManager.Uri.Contains("tab=skills", StringComparison.OrdinalIgnoreCase))
+            activeTab = ProfileTab.Skills;
 
         botController.ProfileLoaded += OnProfileLoaded;
         addonReader.AddonDataChanged += OnAddonDataChanged;
@@ -173,6 +199,7 @@
     private void OnProfileLoaded()
     {
         RefreshData();
+        base.InvokeAsync(StateHasChanged);
     }
 
     private void RefreshData()

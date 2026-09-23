@@ -1,5 +1,44 @@
 @page "/KeyBindings"
+@inject NavigationManager navigationManager
 
 <div class="container-fluid">
-    <KeyboardLayoutComponent />
+    <div class="card mt-1">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <div class="btn-group" role="group" aria-label="Key binding views">
+                <button class="btn btn-sm @(activeTab == KeyBindingsTab.Bindings ? "btn-primary" : "btn-outline-secondary")" @onclick="() => activeTab = KeyBindingsTab.Bindings">Bindings / 当前绑定</button>
+                <button class="btn btn-sm @(activeTab == KeyBindingsTab.Common ? "btn-primary" : "btn-outline-secondary")" @onclick="() => activeTab = KeyBindingsTab.Common">Common Keys / 公共按键</button>
+            </div>
+            <div class="d-flex align-items-center">
+                <span class="text-muted me-2">Current Profile / 当前职业配置</span>
+                @if (botController.ClassConfig is not null && !string.IsNullOrWhiteSpace(botController.SelectedClassFilename))
+                {
+                    <code class="me-2">@System.IO.Path.GetFileName(botController.SelectedClassFilename)</code>
+                    <button class="btn btn-sm btn-outline-primary" @onclick="ViewSkills">View Skills / 查看技能</button>
+                }
+                else
+                {
+                    <span class="text-muted me-2">Not Selected / 未选择</span>
+                    <button class="btn btn-sm btn-outline-primary" disabled>View Skills / 查看技能</button>
+                }
+            </div>
+        </div>
+    </div>
+    @if (activeTab == KeyBindingsTab.Bindings)
+    {
+        <KeyboardLayoutComponent />
+    }
+    else
+    {
+        <CommonKeyBindings />
+    }
 </div>
+
+@code {
+    [Microsoft.AspNetCore.Components.Inject] private IBotController botController { get; set; } = null!;
+
+    private KeyBindingsTab activeTab;
+
+    private void ViewSkills() => navigationManager.NavigateTo("/ClassConfigPage?tab=skills");
+
+    private enum KeyBindingsTab { Bindings, Common }
+}

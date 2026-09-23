@@ -1,0 +1,148 @@
+@using System.IO
+@using System.Linq
+@using Frontend.Pages
+@inject ActionBarSlotValidator actionBarSlotValidator
+@inject ActionBarTextureReader actionBarTextureReader
+
+@implements IDisposable
+
+<div class="card mt-1">
+    <div class="card-header">
+        <div>Current Class Profile / 当前职业配置</div>
+        <div><strong>@GetClassName(ProfileFilename)</strong> <code class="ms-2">@Path.GetFileName(ProfileFilename)</code></div>
+    </div>
+    <div class="card-body">
+        <h5>Skill &amp; Action Bar Requirements / 技能与动作栏要求</h5>
+        @if (!string.IsNullOrWhiteSpace(loadError))
+        {
+            <div class="alert alert-warning">@loadError</div>
+        }
+        <div class="table-responsive">
+            <table class="table table-sm table-dark table-bordered align-middle mb-0">
+                <thead><tr><th>Key</th><th>中文</th><th>English</th><th>Group</th><th>Slot</th><th>Requirements</th><th>Status</th></tr></thead>
+                <tbody>
+                    @foreach (var row in skills)
+                    {
+                        <tr><td><code>@row.Key</code></td><td>@SkillDisplayNameProvider.ChineseName(row.Name)</td><td>@row.Name</td><td>@row.Groups</td>
+                            <td>@(row.Slot > 0 ? $"Slot {row.Slot}" : "-")</td><td>@row.Requirements</td>
+                            <td><span class="@StatusClass(row.Status)">@StatusText(row.Status)</span></td></tr>
+                    }
+                    @if (skills.Count == 0 && string.IsNullOrEmpty(loadError))
+                    {
+                        <tr><td colspan="7" class="text-muted">No class skills found in the loaded profile. / 当前配置中没有技能。</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ClassConfiguration ClassConfig { get; set; } = null!;
+    [Parameter] public string ProfileFilename { get; set; } = string.Empty;
+    private List<SkillRow> skills = [];
+    private string loadError = string.Empty;
+
+    protected override void OnInitialized() => actionBarTextureReader.TextureChanged += OnTextureChanged;
+
+    public void Dispose() => actionBarTextureReader.TextureChanged -= OnTextureChanged;
+
+    protected override void OnParametersSet() => BuildRows();
+
+    private void OnTextureChanged(int slot, int textureId) => InvokeAsync(() =>
+    {
+        BuildRows();
+        StateHasChanged();
+    });
+
+    private void BuildRows()
+    {
+        skills = [];
+        loadError = string.Empty;
+        if (ClassConfig is null) return;
+        var merged = new Dictionary<string, SkillRow>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            // GetIssues builds the validator's configured form-to-action-bar mapping before
+            // per-action detail checks, so stance/form actions use the same slot resolution.
+            _ = actionBarSlotValidator.GetIssues(ClassConfig);
+            foreach (var (group, actions) in ClassConfig.GetByType<KeyActions>())
+            {
+                if (actions?.Sequence is null) continue;
+                foreach (var action in actions.Sequence)
+                {
+                    if (action is null) continue;
+                    try
+                    {
+                        string name = action.Name ?? string.Empty;
+                        string key = !string.IsNullOrWhiteSpace(action.Key) ? action.Key : action.ConsoleKey.ToString();
+                        string requirements = BuildRequirements(action);
+                        string identity = $"{name}\u001f{key}\u001f{action.Slot}\u001f{requirements}";
+                        if (merged.TryGetValue(identity, out var existing))
+                        {
+                            if (!existing.Groups.Split(", ", StringSplitOptions.RemoveEmptyEntries).Contains(group, StringComparer.OrdinalIgnoreCase))
+                                existing.Groups += ", " + group;
+                            continue;
+                        }
+
+                        SlotValidationStatus status = actionBarSlotValidator.ValidateWithDetails(action).Status;
+                        merged.Add(identity, new SkillRow(key, name, group, action.Slot, requirements, status));
+                    }
+                    catch (Exception ex)
+                    {
+                        loadError = "Some profile skills could not be displayed: " + ex.Message;
+                    }
+                }
+            }
+            skills = merged.Values.OrderBy(x => x.Slot == 0 ? int.MaxValue : x.Slot).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch (Exception ex)
+        {
+            loadError = "Unable to read skills from the loaded profile: " + ex.Message;
+            skills = merged.Values.ToList();
+        }
+    }
+
+    private static string BuildRequirements(KeyAction action)
+    {
+        var values = new List<string>();
+        if (!string.IsNullOrWhiteSpace(action.Requirement)) values.Add(action.Requirement);
+        if (action.Requirements is not null) values.AddRange(action.Requirements.Where(x => !string.IsNullOrWhiteSpace(x)));
+        return string.Join("; ", values.Distinct(StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static string GetClassName(string filename)
+    {
+        string name = Path.GetFileNameWithoutExtension(filename);
+        int separator = name.IndexOf('_');
+        return separator > 0 ? name[..separator] : name;
+    }
+
+    private static string StatusText(SlotValidationStatus status) => status switch
+    {
+        SlotValidationStatus.Valid => "✓ Correct",
+        SlotValidationStatus.Mismatch => "⚠ Wrong Skill",
+        SlotValidationStatus.EmptySlot => "✕ Empty",
+        SlotValidationStatus.UnknownTexture => "? Unknown Texture",
+        SlotValidationStatus.NotOnActionBar => "— Not on Action Bar",
+        _ => status.ToString()
+    };
+
+    private static string StatusClass(SlotValidationStatus status) => status switch
+    {
+        SlotValidationStatus.Valid or SlotValidationStatus.NotOnActionBar => "text-success",
+        SlotValidationStatus.Mismatch => "text-warning",
+        SlotValidationStatus.EmptySlot => "text-danger",
+        _ => "text-muted"
+    };
+
+    private sealed class SkillRow(string key, string name, string groups, int slot, string requirements, SlotValidationStatus status)
+    {
+        public string Key { get; } = key;
+        public string Name { get; } = name;
+        public string Groups { get; set; } = groups;
+        public int Slot { get; } = slot;
+        public string Requirements { get; } = requirements;
+        public SlotValidationStatus Status { get; } = status;
+    }
+}

@@ -397,7 +397,7 @@ function DataToColor:RegisterSlashCommands()
     DataToColor:RegisterChatCommand('tw14kcpu', 'GetCPUImpact')
     DataToColor:RegisterChatCommand('tw14kflush', 'FushState')
     DataToColor:RegisterChatCommand('tw14kbindings', 'SetDefaultBindings')
-    DataToColor:RegisterChatCommand('tw14kactions', 'CreateSecureButtons')
+    DataToColor:RegisterChatCommand('tw14kactions', 'SetupBotBindings')
     DataToColor:RegisterChatCommand('tw14kcache', 'ToggleBitCache')
 end
 

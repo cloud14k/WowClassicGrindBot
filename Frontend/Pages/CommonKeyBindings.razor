@@ -1,0 +1,155 @@
+@implements IDisposable
+@inject IJSRuntime JSRuntime
+@inject AddonConfigurator addonConfigurator
+
+<div class="card mt-1">
+    <div class="card-header">公共按键 / Common Key Bindings</div>
+    <div class="card-body">
+        <p class="mb-1">以下按键为 Bot 与 WoW 之间的固定公共按键协议，与当前选择的职业 Profile 无关。</p>
+        <p class="text-muted">These bindings are shared by all class profiles.</p>
+        <div class="mb-1 fw-bold">一键初始化命令 / Setup Command</div>
+        <div class="d-flex align-items-center flex-wrap gap-2 mb-3">
+            @if (HasSetupCommand)
+            {
+                <code class="fs-6">@SlashCommand</code>
+                <button class="btn btn-sm btn-outline-primary" @onclick="CopyCommand">Copy Command / 复制命令</button>
+                @if (copied)
+                {
+                    <span class="text-success">Copied / 已复制</span>
+                }
+            }
+            else
+            {
+                <span class="text-warning">Addon auth is not configured. / 插件命令前缀尚未配置。</span>
+                <button class="btn btn-sm btn-outline-primary" disabled>Copy Command / 复制命令</button>
+            }
+        </div>
+        <p class="mb-3">在 WoW 聊天框执行此命令，可自动应用 Bot 所需的固定公共按键。<br />Run this command in WoW chat to apply the required common Bot bindings.</p>
+        <div class="table-responsive">
+            <table class="table table-sm table-dark table-bordered align-middle mb-0">
+                <thead><tr><th>中文名称</th><th>English</th><th>Key / Lua</th><th>C# Default</th><th>Binding ID</th><th>Description / 说明</th><th>Managed by</th><th>Setup Status</th></tr></thead>
+                <tbody>
+                    @foreach (var row in rows)
+                    {
+                        <tr>
+                            <td>@row.Chinese</td><td>@row.English</td><td><code>@row.Key</code></td><td><code>@row.CSharpDefault</code></td>
+                            <td><code>@row.BindingId</code></td><td>@row.Description</td><td>@row.ManagedBy</td>
+                            <td><span class="badge @StatusClass(row.Status)">@row.Status</span></td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+@code {
+    private bool copied;
+    private string SlashCommand => HasSetupCommand ? "/" + addonConfigurator.Config.CommandActions : string.Empty;
+    private bool HasSetupCommand => !string.IsNullOrWhiteSpace(addonConfigurator.Config.CommandActions);
+    private static readonly IReadOnlyList<CommonKeyRow> rows = BuildRows();
+
+    protected override void OnInitialized() => addonConfigurator.OnChange += OnAddonConfigChanged;
+
+    public void Dispose() => addonConfigurator.OnChange -= OnAddonConfigChanged;
+
+    private void OnAddonConfigChanged() => InvokeAsync(StateHasChanged);
+
+    private async Task CopyCommand()
+    {
+        if (!HasSetupCommand) return;
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("navigator.clipboard.writeText", SlashCommand);
+            copied = true;
+        }
+        catch (JSException)
+        {
+            copied = false;
+        }
+    }
+
+    private static IReadOnlyList<CommonKeyRow> BuildRows()
+    {
+        var rows = new List<CommonKeyRow>();
+        foreach (var binding in KeyBindingDefaults.Bindings.Values.OrderBy(x => x.Slot ?? 0).ThenBy(x => x.BindingID))
+        {
+            SetupInfo setup = GetSetupInfo(binding);
+            var (chinese, english, description) = Describe(binding);
+            rows.Add(new CommonKeyRow(chinese, english, setup.Key, binding.WoWKey, binding.BindingID.ToString(), description, setup.ManagedBy, setup.Status));
+        }
+
+        rows.Add(new CommonKeyRow("焦点目标", "Target Focus", "ALT-PAGEUP", "—", nameof(BindingID.TARGETFOCUS), "选择焦点目标；Vanilla 客户端使用队伍目标 1。 / Targets focus; Vanilla uses party member 1.", "Essential", "按客户端版本二选一 / Version dependent"));
+        rows.Add(new CommonKeyRow("选择队伍目标 1", "Target Party Member 1", "ALT-PAGEUP", "—", nameof(BindingID.TARGETPARTYMEMBER1), "Vanilla 客户端的焦点目标替代绑定。 / Vanilla alternative to focus targeting.", "Essential", "按客户端版本二选一 / Version dependent"));
+        rows.Add(new CommonKeyRow("切换跑步 / 步行", "Toggle Run/Walk", "读取游戏绑定 / Read from WoW", "无固定默认 / None", nameof(BindingID.TOGGLERUN), "从当前游戏绑定读取；C# 没有固定默认键，初始化命令不会改写。 / Read from the current game binding; no C# fixed key is defined.", "Runtime", "动态读取，不重绑 / Read only"));
+        return rows;
+    }
+
+    private static SetupInfo GetSetupInfo(KeyBinding binding)
+    {
+        BindingID id = binding.BindingID;
+        if (id is BindingID.MOVEFORWARD or BindingID.MOVEBACKWARD or BindingID.TURNLEFT or BindingID.TURNRIGHT or
+            BindingID.STRAFELEFT or BindingID.STRAFERIGHT or BindingID.JUMP or BindingID.SITORSTAND ||
+            binding.Slot is > 0 and <= 12)
+            return new SetupInfo(binding.WoWKey, "Core", "Match / 本次设置为 C# 默认");
+
+        if (binding.Slot is >= 49 and <= 58 or >= 61 and <= 72)
+            return new SetupInfo(binding.WoWKey, "Action Bar", "Match / 一致");
+
+        return id switch
+        {
+            BindingID.TARGETNEARESTENEMY => new("TAB", "Essential", "Match / 一致"),
+            BindingID.TARGETLASTTARGET => new("G", "Essential", "Match / 一致"),
+            BindingID.ASSISTTARGET => new("F", "Essential", "Match / 一致"),
+            BindingID.TARGETPET => new("NUMPADMULTIPLY", "Essential", "Match / 一致"),
+            BindingID.PETATTACK => new("NUMPADMINUS", "Essential", "Match / 一致"),
+            BindingID.STARTATTACK => new("ALT-NUMPADPLUS", "Essential", "⚠ Lua adds ALT; C# fallback is bare NUMPADPLUS"),
+            BindingID.INTERACTTARGET => new("ALT-HOME", "Essential", "⚠ Lua adds ALT; C# fallback is bare HOME"),
+            BindingID.INTERACTMOUSEOVER => new("ALT-END", "Essential", "⚠ Lua adds ALT; C# fallback is bare END"),
+            BindingID.FOLLOWTARGET => new("ALT-PAGEDOWN", "Essential", "⚠ Lua adds ALT; C# fallback is bare PAGEDOWN"),
+            BindingID.CUSTOM_STOPATTACK => new("ALT-DELETE", "Utility", "⚠ Requires BindPad; Lua adds ALT to the C# fallback"),
+            BindingID.CUSTOM_CLEARTARGET => new("ALT-INSERT", "Utility", "⚠ Requires BindPad; Lua adds ALT to the C# fallback"),
+            BindingID.CUSTOM_CONFIG => new("SHIFT-PAGEUP", "Utility", "⚠ Requires BindPad; Lua adds SHIFT to the C# fallback"),
+            BindingID.CUSTOM_FLUSH => new("SHIFT-PAGEDOWN", "Utility", "⚠ Requires BindPad; Lua adds SHIFT to the C# fallback"),
+            _ => new SetupInfo(binding.WoWKey, "—", "No explicit Lua setup / 未由插件显式设置")
+        };
+    }
+
+    private static (string Chinese, string English, string Description) Describe(KeyBinding binding)
+    {
+        return binding.BindingID switch
+        {
+            BindingID.MOVEFORWARD => ("前进", "Move Forward", "向前移动 / Move forward"),
+            BindingID.MOVEBACKWARD => ("后退", "Move Backward", "向后移动 / Move backward"),
+            BindingID.TURNLEFT => ("左转", "Turn Left", "向左转向 / Turn left"),
+            BindingID.TURNRIGHT => ("右转", "Turn Right", "向右转向 / Turn right"),
+            BindingID.STRAFELEFT => ("向左平移", "Strafe Left", "向左侧移 / Strafe left"),
+            BindingID.STRAFERIGHT => ("向右平移", "Strafe Right", "向右侧移 / Strafe right"),
+            BindingID.JUMP => ("跳跃", "Jump", "跳跃 / Jump"),
+            BindingID.SITORSTAND => ("坐下 / 站立", "Sit or Stand", "切换坐下或站立 / Sit or stand"),
+            BindingID.TARGETNEARESTENEMY => ("选择最近敌人", "Target Nearest Enemy", "选择附近最近敌人 / Target nearest enemy"),
+            BindingID.TARGETLASTTARGET => ("上一个目标", "Target Last Target", "重新选择上一个目标 / Retarget the previous target"),
+            BindingID.ASSISTTARGET => ("协助目标", "Assist Target", "选择目标当前协助的单位 / Target your target's target"),
+            BindingID.TARGETPET => ("选择宠物", "Target Pet", "选择宠物 / Target your pet"),
+            BindingID.STARTATTACK => ("开始攻击", "Start Attack", "开始自动攻击 / Start auto attack"),
+            BindingID.PETATTACK => ("宠物攻击", "Pet Attack", "命令宠物攻击目标 / Command pet to attack"),
+            BindingID.INTERACTTARGET => ("与目标互动", "Interact Target", "与目标互动 / Interact with target"),
+            BindingID.INTERACTMOUSEOVER => ("与鼠标指向互动", "Interact Mouse Over", "与鼠标指向单位互动 / Interact with mouseover"),
+            BindingID.FOLLOWTARGET => ("跟随目标", "Follow Target", "跟随当前目标 / Follow target"),
+            BindingID.CUSTOM_STOPATTACK => ("停止攻击 / 施法", "Stop Attack / Cast", "插件安全动作：停止攻击与施法 / Secure action: stop attack and casting"),
+            BindingID.CUSTOM_CLEARTARGET => ("清除目标", "Clear Target", "插件安全动作：清除当前目标 / Secure action: clear target"),
+            BindingID.CUSTOM_CONFIG => ("插件配置", "Addon Config", "打开插件配置命令 / Run the add-on config command"),
+            BindingID.CUSTOM_FLUSH => ("刷新插件状态", "Flush Addon State", "刷新插件状态数据 / Flush add-on state"),
+            _ when binding.Slot is > 0 and <= 12 =>
+                ($"主动作栏 {binding.Slot}", $"Main Action Button {binding.Slot}", "动作栏槽位；技能由职业 Profile 放置 / Bar slot; spell placement comes from the class profile"),
+            _ when binding.Slot.HasValue =>
+                ($"扩展动作栏 {binding.Slot}", $"Additional Action Bar {binding.Slot}", "扩展动作栏槽位 / Additional action bar slot"),
+            _ => (binding.BindingID.ToString(), binding.BindingID.ToString(), "Bot 公共按键 / Bot common binding")
+        };
+    }
+
+    private static string StatusClass(string status) => status.StartsWith("⚠", StringComparison.Ordinal) ? "bg-warning text-dark" : "bg-success";
+
+    private sealed record SetupInfo(string Key, string ManagedBy, string Status);
+    private sealed record CommonKeyRow(string Chinese, string English, string Key, string CSharpDefault, string BindingId, string Description, string ManagedBy, string Status);
+}

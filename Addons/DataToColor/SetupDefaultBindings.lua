@@ -298,7 +298,64 @@ local function TryBind(key, command)
   return true
 end
 
-function DataToColor:SetDefaultBindings()
+local function FinalizeBindingSetup(wasChanged, bindingType)
+  if wasChanged then
+    local bindingSet = GetCurrentBindingSet()
+    SaveBindings(bindingSet)
+    local savedScope = bindingSet == 1 and "account-wide" or "character-specific"
+    DataToColor:Print((bindingType or "Key") .. " bindings changed and saved to " .. savedScope .. ".")
+  end
+
+  DataToColor:CheckBindingChanges()
+end
+
+-- These fixed bindings mirror KeyBindingDefaults.Bindings in Core.
+-- Keep key strings and BindingIDs in sync with that C# table.
+local CoreBindings = {
+  -- Movement
+  {"W", "MOVEFORWARD"},
+  {"S", "MOVEBACKWARD"},
+  {"A", "TURNLEFT"},
+  {"D", "TURNRIGHT"},
+  {"Q", "STRAFELEFT"},
+  {"E", "STRAFERIGHT"},
+  {"SPACE", "JUMP"},
+  {"X", "SITORSTAND"},
+  -- Main Action Bar: ACTIONBUTTON1..12
+  {"1", "ACTIONBUTTON1"},
+  {"2", "ACTIONBUTTON2"},
+  {"3", "ACTIONBUTTON3"},
+  {"4", "ACTIONBUTTON4"},
+  {"5", "ACTIONBUTTON5"},
+  {"6", "ACTIONBUTTON6"},
+  {"7", "ACTIONBUTTON7"},
+  {"8", "ACTIONBUTTON8"},
+  {"9", "ACTIONBUTTON9"},
+  {"0", "ACTIONBUTTON10"},
+  {"-", "ACTIONBUTTON11"},
+  {"=", "ACTIONBUTTON12"},
+}
+
+function DataToColor:SetCoreBindings(deferFinalize)
+  if InCombatLockdown and InCombatLockdown() then
+    DataToColor:Print("Can't apply bindings in combat.")
+    return false
+  end
+
+  local wasChanged = false
+  for _, binding in ipairs(CoreBindings) do
+    wasChanged = Bind(binding[1], binding[2]) or wasChanged
+  end
+
+  if deferFinalize then
+    return wasChanged
+  end
+
+  FinalizeBindingSetup(wasChanged, "Core")
+  return wasChanged
+end
+
+function DataToColor:SetDefaultBindings(deferFinalize)
   if InCombatLockdown and InCombatLockdown() then
     DataToColor:Print("Can't apply bindings in combat.")
     return
@@ -320,22 +377,17 @@ function DataToColor:SetDefaultBindings()
     wasChanged = Bind("F"..i, "MULTIACTIONBAR1BUTTON"..i) or wasChanged
   end
 
-  -- Only save if something actually changed
-  if wasChanged then
-    -- Save to whichever binding set the user currently has selected (account=1, character=2)
-    local bindingSet = GetCurrentBindingSet()
-    SaveBindings(bindingSet)
-    local bindingType = bindingSet == 1 and "account-wide" or "character-specific"
-    DataToColor:Print("Key bindings changed and saved to " .. bindingType .. ".")
+  if deferFinalize then
+    return wasChanged
   end
 
-  -- Refresh binding cache so KeyBindingsReader picks up any changes
-  DataToColor:CheckBindingChanges()
+  FinalizeBindingSetup(wasChanged, "Action bar")
+  return wasChanged
 end
 
 -- Sets only essential bindings (targeting, interaction, pet) without touching action bars
 -- Used by auto-setup to avoid overwriting player's action bar keybinds
-function DataToColor:SetEssentialBindings()
+function DataToColor:SetEssentialBindings(deferFinalize)
   if InCombatLockdown and InCombatLockdown() then
     DataToColor:Print("Can't apply bindings in combat.")
     return
@@ -371,16 +423,12 @@ function DataToColor:SetEssentialBindings()
   -- Follow target
   wasChanged = TryBind("ALT-PAGEDOWN", "FOLLOWTARGET") or wasChanged
 
-  -- Only save if something actually changed
-  if wasChanged then
-    local bindingSet = GetCurrentBindingSet()
-    SaveBindings(bindingSet)
-    local bindingType = bindingSet == 1 and "account-wide" or "character-specific"
-    DataToColor:Print("Essential bindings changed and saved to " .. bindingType .. ".")
+  if deferFinalize then
+    return wasChanged
   end
 
-  -- Refresh binding cache so KeyBindingsReader picks up any changes
-  DataToColor:CheckBindingChanges()
+  FinalizeBindingSetup(wasChanged, "Essential")
+  return wasChanged
 end
 
 -- ========================
@@ -431,15 +479,15 @@ local function SetupMacroButton()
   return true
 end
 
-function DataToColor:CreateSecureButtons()
+function DataToColor:CreateSecureButtons(deferFinalize)
   if InCombatLockdown and InCombatLockdown() then
     DataToColor:Print("Can't create/bind actions in combat.")
-    return
+    return false
   end
 
   -- Setup the macro button with wildcard attributes
   if not SetupMacroButton() then
-    return
+    return false
   end
 
   local wasChanged = false
@@ -458,16 +506,28 @@ function DataToColor:CreateSecureButtons()
     end
   end
 
-  if wasChanged then
-    -- Save to whichever binding set the user currently has selected (account=1, character=2)
-    local bindingSet = GetCurrentBindingSet()
-    SaveBindings(bindingSet)
-    local bindingType = bindingSet == 1 and "account-wide" or "character-specific"
-    DataToColor:Print("Custom actions changed and saved to " .. bindingType .. ".")
+  if deferFinalize then
+    return wasChanged
   end
 
-  -- Refresh binding cache so KeyBindingsReader picks up any changes
-  DataToColor:CheckBindingChanges()
+  FinalizeBindingSetup(wasChanged, "Custom action")
+  return wasChanged
+end
+
+-- The {auth}actions command initializes every fixed binding used by the Bot.
+-- Individual setup functions still work on their own; this entry point batches persistence/cache refresh.
+function DataToColor:SetupBotBindings()
+  if InCombatLockdown and InCombatLockdown() then
+    DataToColor:Print("Can't apply bindings in combat.")
+    return
+  end
+
+  DataToColor:Print("Applying Bot core, essential, action bar, and utility bindings...")
+  local wasChanged = DataToColor:SetCoreBindings(true)
+  wasChanged = DataToColor:SetEssentialBindings(true) or wasChanged
+  wasChanged = DataToColor:SetDefaultBindings(true) or wasChanged
+  wasChanged = DataToColor:CreateSecureButtons(true) or wasChanged
+  FinalizeBindingSetup(wasChanged, "Bot common")
 end
 
 -- ========================
