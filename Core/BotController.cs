@@ -609,14 +609,29 @@ public sealed partial class BotController : IBotController, IDisposable
 
     public bool LoadClassProfile(string classFilename)
     {
-        bool success = InitialiseFromFile(classFilename, SelectedPathFilename);
+        // A class profile's configured paths are the defaults for that profile. Do not
+        // carry manual overrides from the previously loaded class into this session.
+        bool success = InitialiseFromFile(classFilename, []);
         if (success)
         {
             SelectedClassFilename = classFilename;
+            SelectedPathFilename = ClassConfig!.Paths
+                .Select((path, index) => (path, index))
+                .ToDictionary(
+                    entry => entry.index,
+                    entry => GetPathProfileSelection(entry.path.FileName));
         }
 
         ProfileLoaded?.Invoke();
         return success;
+    }
+
+    private string GetPathProfileSelection(string filename)
+    {
+        if (string.IsNullOrWhiteSpace(filename) || !Path.IsPathRooted(filename))
+            return filename;
+
+        return Path.GetRelativePath(dataConfig.Path, filename);
     }
 
     /// <summary>Builds a behavior-test session from the source profile and the supplied in-memory module selection.</summary>

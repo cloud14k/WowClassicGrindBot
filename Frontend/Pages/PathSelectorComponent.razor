@@ -81,7 +81,7 @@
         watcher.IncludeSubdirectories = true;
         watcher.EnableRaisingEvents = true;
 
-        botController.ProfileLoaded += ValidateLoadButton;
+        botController.ProfileLoaded += OnProfileLoaded;
 
         Selected = Target?.FileName ?? string.Empty;
     }
@@ -116,7 +116,7 @@
     public void Dispose()
     {
         watcher.Dispose();
-        botController.ProfileLoaded -= ValidateLoadButton;
+        botController.ProfileLoaded -= OnProfileLoaded;
     }
 
     public void OnGet()
@@ -156,6 +156,13 @@
         ButtonDisabled = string.IsNullOrEmpty(botController.SelectedClassFilename);
     }
 
+    private void OnProfileLoaded()
+    {
+        GetData();
+        ValidateLoadButton();
+        _ = InvokeAsync(StateHasChanged);
+    }
+
     private void GetData()
     {
         Files = botController.PathFiles();
@@ -163,6 +170,10 @@
         if (botController.SelectedPathFilename.TryGetValue(TargetIndex, out string? selected))
         {
             Selected = selected ?? string.Empty;
+        }
+        else
+        {
+            Selected = Target?.FileName ?? string.Empty;
         }
 
         // Update image map when files change
