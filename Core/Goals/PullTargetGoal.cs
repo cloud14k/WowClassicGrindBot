@@ -97,7 +97,12 @@ public sealed class PullTargetGoal : GoapGoal, IGoapEventListener
         {
             AddPrecondition(GoapKey.targettargetsus, false);
         }
-        AddPrecondition(GoapKey.targethostile, true);
+        // Profiles that explicitly opt into neutral targets must be able to
+        // initiate the first pull before the target is recorded in ToPull.
+        // For normal profiles, keep the hostility guard to avoid attacking
+        // friendly or unrelated selected units.
+        if (!classConfig.TargetNeutral)
+            AddPrecondition(GoapKey.targethostile, true);
         AddPrecondition(GoapKey.withinpullrange, true);
 
         AddEffect(GoapKey.pulled, true);

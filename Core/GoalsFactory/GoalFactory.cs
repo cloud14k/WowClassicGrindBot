@@ -25,9 +25,13 @@ namespace Core;
 
 public static class GoalFactory
 {
+    /// <summary>Optional behavior-module allow-list used by the interactive behavior test page.</summary>
+    public sealed record TestModules(bool PathMove, bool Wait, bool Pull, bool Combat, bool Adhoc, bool Loot, bool NPC);
+
     public static IServiceProvider Create(
         IServiceCollection services,
-        IServiceProvider sp, ClassConfiguration classConfig)
+        IServiceProvider sp, ClassConfiguration classConfig,
+        TestModules? testModules = null)
     {
         services.AddStartupIoC(sp);
 
@@ -75,7 +79,8 @@ public static class GoalFactory
 
             services.AddScoped<IBlacklist>(x => x.GetRequiredKeyedService<IBlacklist>(TARGET));
 
-            services.AddScoped<GoapGoal, BlacklistTargetGoal>();
+            if (testModules == null)
+                services.AddScoped<GoapGoal, BlacklistTargetGoal>();
         }
 
         services.AddScoped<NpcNameTargeting>();
@@ -111,6 +116,48 @@ public static class GoalFactory
 
         // each GoapGoal gets an individual instance
         services.AddTransient<Navigation>();
+
+        // This branch deliberately happens before the normal mode-specific Goal graph.
+        // Behavior tests register only the explicitly selected modules.
+        if (testModules != null)
+        {
+            // A normal Grind route both moves and runs the TargetFinder side
+            // activity. Pull/Combat need that acquisition loop; the Path Move
+            // checkbox by itself deliberately uses pathOnly to suppress it.
+            if (testModules.PathMove || testModules.Pull || testModules.Combat)
+                ResolveFollowRouteGoal(services, classConfig,
+                    pathOnly: !testModules.Pull && !testModules.Combat);
+            if (testModules.Wait) ResolveWaitGoal(services, classConfig);
+            // Combat is an encounter-level test: once a target is selected, it
+            // must be able to pull it, approach into range, and then run the
+            // class rotation. Keep Pull selectable on its own for isolated tests.
+            if (testModules.Pull || testModules.Combat)
+            {
+                services.AddScoped<GoapGoal, PullTargetGoal>();
+                services.AddScoped<GoapGoal, ApproachTargetGoal>();
+            }
+            if (testModules.Combat)
+            {
+                services.AddScoped<GoapGoal, CombatGoal>();
+                services.AddScoped<GoapGoal, FindThreatGoal>();
+            }
+            if (testModules.Adhoc) ResolveAdhocGoals(services, classConfig);
+            bool includeLoot = testModules.Loot || testModules.Combat;
+            if (includeLoot && classConfig.Loot)
+            {
+                // These two state-machine goals are part of Loot's normal
+                // lifecycle: consume the produced corpse, enable loot, then
+                // clear the consume state after LootGoal finishes. Combat
+                // includes this complete post-kill lifecycle by design.
+                services.AddScoped<GoapGoal, ConsumeCorpseGoal>();
+                services.AddScoped<GoapGoal, LootGoal>();
+                if (classConfig.GatherCorpse)
+                    services.AddScoped<GoapGoal, SkinningGoal>();
+                services.AddScoped<GoapGoal, CorpseConsumedGoal>();
+            }
+            if (testModules.NPC) ResolveAdhocNPCGoal(services, classConfig, sp.GetRequiredService<DataConfig>());
+            return services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
+        }
 
         if (classConfig.Mode == Mode.CorpseRun)
         {
@@ -367,7 +414,7 @@ public static class GoalFactory
 
 
     public static void ResolveFollowRouteGoal(IServiceCollection services,
-        ClassConfiguration classConfig)
+        ClassConfiguration classConfig, bool pathOnly = false)
     {
         float baseCost = FollowRouteGoal.DEFAULT_COST;
 
@@ -398,7 +445,8 @@ public static class GoalFactory
             services.AddScoped<GoapGoal>(sp =>
                 ActivatorUtilities.CreateInstance<FollowRouteGoal>(sp,
                     cost,
-                    sp.GetRequiredKeyedService<PathSettings>(index)));
+                    sp.GetRequiredKeyedService<PathSettings>(index),
+                    pathOnly));
         }
     }
 

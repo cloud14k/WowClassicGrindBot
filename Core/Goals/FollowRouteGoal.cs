@@ -49,6 +49,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private CancellationTokenSource sideActivityCts;
 
     private readonly PathSettings pathSettings;
+    private readonly bool pathOnly;
     private readonly RouteGenerator routeGenerator;
     private readonly WorldMapAreaDB worldMapAreaDB;
 
@@ -97,7 +98,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         IMountHandler mountHandler, TargetFinder targetFinder,
         IBlacklist targetBlacklist,
         RouteGenerator routeGenerator,
-        WorldMapAreaDB worldMapAreaDB)
+        WorldMapAreaDB worldMapAreaDB,
+        bool pathOnly = false)
     : base("Follow " + pathSettings.DisplayName)
     {
         this.cost = cost;
@@ -111,6 +113,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         this.playerReader = playerReader;
         this.bits = bits;
         this.pathSettings = pathSettings;
+        this.pathOnly = pathOnly;
         this.mountHandler = mountHandler;
         this.targetFinder = targetFinder;
         this.targetBlacklist = targetBlacklist;
@@ -167,8 +170,11 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            sideActivityThread = new(Thread_LookingForTarget);
-            sideActivityThread.Start();
+            if (!pathOnly)
+            {
+                sideActivityThread = new(Thread_LookingForTarget);
+                sideActivityThread.Start();
+            }
         }
     }
 
@@ -213,7 +219,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             navigation.Resume();
         }
 
-        if (playerReader.Class != UnitClass.Druid)
+        if (!pathOnly && playerReader.Class != UnitClass.Druid)
             MountIfPossible();
 
         onEnterTime = DateTime.UtcNow;
@@ -221,7 +227,12 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public void OnGoapEvent(GoapEventArgs e)
     {
-        if (e.GetType() == typeof(AbortEvent))
+        if (e.GetType() == typeof(PauseEvent))
+        {
+            navigation.Pause();
+            sideActivityManualReset.Reset();
+        }
+        else if (e.GetType() == typeof(AbortEvent))
         {
             Abort();
         }
@@ -275,7 +286,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             }
         }
 
-        RandomJump();
+        if (!pathOnly)
+            RandomJump();
 
         wait.Update();
     }
@@ -346,6 +358,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void MountIfPossible()
     {
+        if (pathOnly)
+            return;
+
         float totalDistance = VectorExt.TotalDistance<Vector3>(navigation.TotalRoute, VectorExt.WorldDistanceXY);
 
         if (classConfig.UseMount && mountHandler.CanMount() &&

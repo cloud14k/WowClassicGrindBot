@@ -46,6 +46,10 @@ public sealed partial class GoapAgent : IDisposable
     private readonly Thread goapThread;
     private readonly CancellationTokenSource<GoapAgent> cts;
     private readonly ManualResetEventSlim sessionPauseEvent;
+    private readonly ManualResetEventSlim controlWakeEvent = new(false);
+    // Serializes a GOAP tick with pause/stop. Without this, an Update() could
+    // press a key after the UI had already released input for a pause/stop.
+    private readonly object controlSync = new();
 
     private readonly IScreenCapture screenCapture;
     // Resolved only so the container constructs them - both subscribe in their
@@ -57,57 +61,123 @@ public sealed partial class GoapAgent : IDisposable
     private readonly LevelChangeTracker levelChangeTracker;
 
     private long lastNoPlanReport;
+    private int lastCorpseTargetGuid;
+    private float lastCorpseDistance;
+    private bool hasLastCorpseTarget;
 
-    private bool active;
+    private volatile bool active;
+    private volatile bool paused;
+    public bool Paused => paused;
     public bool Active
     {
         get => active;
         set
         {
-            active = value;
-            if (!active)
+            lock (controlSync)
             {
-                sessionPauseEvent.Reset();
+                if (active == value)
+                    return;
 
-                foreach (IGoapEventListener goal in AvailableGoals.OfType<IGoapEventListener>())
+                active = value;
+                if (!active)
                 {
-                    goal.OnGoapEvent(new AbortEvent());
+                    paused = false;
+                    sessionPauseEvent.Reset();
+                    controlWakeEvent.Set();
+
+                    ReleaseInputAndAbortGoals();
+
+                    if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
+                    {
+                        sessionHandler.Stop("Stopped", false);
+                    }
+
+                    screen.Enabled = false;
                 }
-
-                // Stop first: StopMoving decides which key to release from the
-                // input's own record of what is held, and Reset clears that
-                // record. Reversed, the stop reads an empty record, takes the
-                // "moving by interact key" branch and never releases the key
-                // the character is actually running on.
-                stopMoving.Stop();
-                input.Reset();
-
-                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
+                else
                 {
-                    sessionHandler.Stop("Stopped", false);
-                }
+                    paused = false;
+                    addonReader.SessionReset();
+                    SessionStat.Reset();
 
-                screen.Enabled = false;
-            }
-            else
-            {
-                addonReader.SessionReset();
-                SessionStat.Reset();
+                    if (CurrentGoal is IGoapEventListener listener)
+                    {
+                        SendGoalEvent(listener, new ResumeEvent());
+                    }
 
-                if (CurrentGoal is IGoapEventListener listener)
-                {
-                    listener.OnGoapEvent(new ResumeEvent());
-                }
+                    sessionPauseEvent.Set();
+                    controlWakeEvent.Set();
 
-                sessionPauseEvent.Set();
-
-                if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
-                {
-                    SessionStat.Start();
-                    sessionHandler.Start(classConfig.OverridePathFilename ?? classConfig.PathFilename);
+                    if (classConfig.Mode is Mode.AttendedGrind or Mode.Grind)
+                    {
+                        SessionStat.Start();
+                        sessionHandler.Start(classConfig.OverridePathFilename ?? classConfig.PathFilename);
+                    }
                 }
             }
         }
+    }
+
+    /// <summary>Temporarily suspends the current session while retaining its state and statistics.</summary>
+    public void Pause()
+    {
+        lock (controlSync)
+        {
+            if (!active || paused)
+                return;
+
+            paused = true;
+            sessionPauseEvent.Reset();
+            controlWakeEvent.Set();
+
+            // Pausing must not broadcast Abort to every goal: that tears down
+            // unrelated state and can discard route progress. Pause only the
+            // selected goal, preserving its in-memory route position.
+            if (CurrentGoal is IGoapEventListener listener)
+                SendGoalEvent(listener, new PauseEvent());
+            try { stopMoving.Stop(); }
+            catch (Exception ex) { logger.LogError(ex, "Failed to stop movement while pausing"); }
+            try { input.Reset(); }
+            catch (Exception ex) { logger.LogError(ex, "Failed to release input while pausing"); }
+        }
+    }
+
+    /// <summary>Resumes the paused session and lets the current goal continue from its retained state.</summary>
+    public void Resume()
+    {
+        lock (controlSync)
+        {
+            if (!active || !paused)
+                return;
+
+            if (CurrentGoal is IGoapEventListener listener)
+                SendGoalEvent(listener, new ResumeEvent());
+
+            paused = false;
+            sessionPauseEvent.Set();
+            controlWakeEvent.Set();
+        }
+    }
+
+    private void ReleaseInputAndAbortGoals()
+    {
+        try { stopMoving.Stop(); }
+        catch (Exception ex) { logger.LogError(ex, "Failed to stop movement during session control"); }
+
+        try { input.Reset(); }
+        catch (Exception ex) { logger.LogError(ex, "Failed to release input during session control"); }
+
+        try { screen.Enabled = false; }
+        catch (Exception ex) { logger.LogError(ex, "Failed to disable screen processing during session control"); }
+
+        foreach (IGoapEventListener goal in AvailableGoals.OfType<IGoapEventListener>())
+            SendGoalEvent(goal, new AbortEvent());
+    }
+
+    private void SendGoalEvent(IGoapEventListener goal, GoapEventArgs args)
+    {
+        try { goal.OnGoapEvent(args); }
+        catch (Exception ex) { logger.LogError(ex, "Goal {GoalType} failed while handling {EventType}", goal.GetType().Name, args.GetType().Name); }
     }
 
     public BitVector32 WorldState { get; private set; }
@@ -230,33 +300,61 @@ public sealed partial class GoapAgent : IDisposable
 
         WaitHandle[] waitHandles = [
             addonReader.DataReady.WaitHandle,
-            cts.Token.WaitHandle
+            cts.Token.WaitHandle,
+            controlWakeEvent.WaitHandle
         ];
 
         while (!cts.IsCancellationRequested)
         {
-            GoapGoal? newGoal = NextGoal();
-            if (newGoal != null)
+            bool waitForSession = false;
+            lock (controlSync)
             {
-                if (newGoal != CurrentGoal)
+                // Active/paused is checked on the execution thread as well as
+                // at the wait gate. This closes the wake-up race where a tick
+                // could begin immediately after Stop/Pause reset the gate.
+                if (!active || paused)
                 {
-                    wasEmpty = false;
-                    CurrentGoal?.OnExit();
-                    CurrentGoal = newGoal;
-
-                    LogNewGoal(logger, newGoal.Name);
-                    CurrentGoal.OnEnter();
+                    waitForSession = true;
                 }
+                else
+                {
+                    GoapGoal? newGoal = NextGoal();
+                    if (newGoal != null)
+                    {
+                        if (newGoal != CurrentGoal)
+                        {
+                            wasEmpty = false;
+                            CurrentGoal?.OnExit();
+                            CurrentGoal = newGoal;
 
-                newGoal.Update();
+                            LogNewGoal(logger, newGoal.Name);
+                            CurrentGoal.OnEnter();
+                        }
+
+                        newGoal.Update();
+                    }
+                    else if (!wasEmpty)
+                    {
+                        LogNewEmptyGoal(logger);
+                        ReportNoPlan();
+                        CurrentGoal?.OnExit();
+                        CurrentGoal = null;
+                        wasEmpty = true;
+                    }
+                }
             }
-            else if (!wasEmpty)
+
+            if (waitForSession)
             {
-                LogNewEmptyGoal(logger);
-                ReportNoPlan();
-                CurrentGoal?.OnExit();
-                CurrentGoal = null;
-                wasEmpty = true;
+                try
+                {
+                    sessionPauseEvent.Wait(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                continue;
             }
 
             Thread.Sleep(2);
@@ -264,6 +362,7 @@ public sealed partial class GoapAgent : IDisposable
             try
             {
                 WaitHandle.WaitAny(waitHandles);
+                controlWakeEvent.Reset();
                 sessionPauseEvent.Wait(cts.Token);
             }
             catch (OperationCanceledException)
@@ -323,6 +422,13 @@ public sealed partial class GoapAgent : IDisposable
         bool dmgTaken = combatLog.DamageTakenCount() > 0;
         bool dmgDone = combatLog.DamageDoneCount() > 0;
         bool hasTarget = b.Target();
+
+        if (hasTarget)
+        {
+            lastCorpseTargetGuid = playerReader.TargetGuid;
+            lastCorpseDistance = (playerReader.MaxRange() + playerReader.MinRange()) / 2f;
+            hasLastCorpseTarget = true;
+        }
 
         // Not b.Combat(): a pet opener leaves the player unflagged until the mob
         // walks over and swings, so every combat gated goal would sit out the first
@@ -416,6 +522,28 @@ public sealed partial class GoapAgent : IDisposable
 
         BroadcastGoapEvent(GoapKey.producedcorpse, true);
 
+        // Corpse discovery belongs to session kill tracking, not CombatGoal.
+        // Loot-only test sessions must still receive the corpse POI without
+        // registering or running the combat action goal.
+        int deadGuid = combatLog.DeadGuid.Value;
+        bool hasMatchingTargetSnapshot = hasLastCorpseTarget && lastCorpseTargetGuid == deadGuid;
+        float distance = hasMatchingTargetSnapshot
+            ? lastCorpseDistance
+            : (playerReader.MaxRange() + playerReader.MinRange()) / 2f;
+        float direction = playerReader.Direction;
+        Vector3 playerPosition = playerReader.MapPos;
+        Vector3 corpsePosition = PointEstimator.GetMapPos(
+            playerReader.WorldMapArea,
+            playerReader.WorldPos,
+            direction,
+            distance);
+        BroadcastGoapEvent(new CorpseEvent(
+            corpsePosition,
+            distance,
+            direction,
+            playerPosition,
+            deadGuid));
+
         if (logger.IsEnabled(LogLevel.Information))
         {
             int damageTakenCount = combatLog.DamageTakenCount();
@@ -430,10 +558,14 @@ public sealed partial class GoapAgent : IDisposable
 
     private void BroadcastGoapEvent(GoapKey goapKey, bool value)
     {
+        BroadcastGoapEvent(new GoapStateEvent(goapKey, value));
+    }
+
+    private void BroadcastGoapEvent(GoapEventArgs args)
+    {
+        HandleGoapEvent(args);
         foreach (IGoapEventListener goal in AvailableGoals.OfType<IGoapEventListener>())
-        {
-            goal.OnGoapEvent(new GoapStateEvent(goapKey, value));
-        }
+            SendGoalEvent(goal, args);
     }
 
     private void RemoveClosestPoiByType(string type)

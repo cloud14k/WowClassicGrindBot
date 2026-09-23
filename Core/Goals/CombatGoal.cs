@@ -5,13 +5,11 @@ using Game;
 using Microsoft.Extensions.Logging;
 
 using System;
-using System.Numerics;
-
 using static System.MathF;
 
 namespace Core.Goals;
 
-public sealed class CombatGoal : GoapGoal, IGoapEventListener
+public sealed class CombatGoal : GoapGoal
 {
     public override float Cost => 4f;
 
@@ -71,15 +69,21 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         Keys = classConfiguration.Combat.Sequence;
     }
 
+    // Retained for production Goal drivers that explicitly publish a corpse
+    // context after driving CombatGoal outside the GoapAgent loop. In normal
+    // sessions GoapAgent publishes corpse events directly from kill credit so
+    // Loot-only sessions do not need CombatGoal registered as an action goal.
     public void OnGoapEvent(GoapEventArgs e)
     {
-        if (e is GoapStateEvent s && s.Key == GoapKey.producedcorpse)
+        if (e is GoapStateEvent state && state.Key == GoapKey.producedcorpse)
         {
-            // have to check range
-            // ex. target died far away have to consider the range and approximate
             float distance = (lastMaxDistance + lastMinDistance) / 2f;
-            int packedGuid = combatLog.DeadGuid.Value;
-            SendGoapEvent(new CorpseEvent(GetCorpseLocation(distance), distance, playerReader.Direction, playerReader.MapPos, packedGuid));
+            SendGoapEvent(new CorpseEvent(
+                GetCorpseLocation(distance),
+                distance,
+                playerReader.Direction,
+                playerReader.MapPos,
+                combatLog.DeadGuid.Value));
         }
     }
 
@@ -91,6 +95,8 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
 
         lastDirection = playerReader.Direction;
+        lastMinDistance = playerReader.MinRange();
+        lastMaxDistance = playerReader.MaxRange();
     }
 
     public override void OnExit()
@@ -114,7 +120,6 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         lastDirection = playerReader.Direction;
         lastMinDistance = playerReader.MinRange();
         lastMaxDistance = playerReader.MaxRange();
-
         if (bits.Drowning())
         {
             input.PressJumpAscend();
@@ -190,8 +195,9 @@ public sealed class CombatGoal : GoapGoal, IGoapEventListener
         }
     }
 
-    private Vector3 GetCorpseLocation(float distance)
+    private System.Numerics.Vector3 GetCorpseLocation(float distance)
     {
         return PointEstimator.GetMapPos(playerReader.WorldMapArea, playerReader.WorldPos, playerReader.Direction, distance);
     }
+
 }

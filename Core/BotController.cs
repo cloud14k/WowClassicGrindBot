@@ -410,10 +410,29 @@ public sealed partial class BotController : IBotController, IDisposable
 
     public void ToggleBotStatus()
     {
+        SetBotActive(!IsBotActive);
+    }
+
+    /// <summary>Sets the agent state explicitly, avoiding stale UI state toggling the wrong direction.</summary>
+    public void SetBotActive(bool active)
+    {
         if (GoapAgent == null)
             return;
 
-        GoapAgent.Active = !GoapAgent.Active;
+        GoapAgent.Active = active;
+        StatusChanged?.Invoke();
+    }
+
+    /// <summary>Sets the current session's pause state and notifies UI subscribers.</summary>
+    public void SetBotPaused(bool paused)
+    {
+        if (GoapAgent == null)
+            return;
+
+        if (paused)
+            GoapAgent.Pause();
+        else
+            GoapAgent.Resume();
 
         StatusChanged?.Invoke();
     }
@@ -460,16 +479,16 @@ public sealed partial class BotController : IBotController, IDisposable
         return true;
     }
 
-    private void CreateSession(ClassConfiguration config)
+    private void CreateSession(ClassConfiguration config, GoalFactory.TestModules? testModules = null)
     {
         IServiceCollection s = new ServiceCollection();
 
         s.AddSingleton<IBotController>(this);
-        s.AddScoped<ClassConfiguration>(GetConfig);
-        static ClassConfiguration GetConfig(IServiceProvider sp) =>
-            sp.GetRequiredService<IBotController>().ResolveLoadedProfile();
+        // A session keeps the exact in-memory profile it was built from. This also
+        // lets the test session use a private path override without touching disk.
+        s.AddScoped<ClassConfiguration>(_ => config);
 
-        GoalFactory.Create(s, serviceProvider, config);
+        GoalFactory.Create(s, serviceProvider, config, testModules);
 
         s.AddScoped<IEnumerable<IRouteProvider>>(GetPathProviders);
         s.AddScoped<RouteInfo>();
@@ -563,6 +582,38 @@ public sealed partial class BotController : IBotController, IDisposable
 
         ProfileLoaded?.Invoke();
         return success;
+    }
+
+    /// <summary>Builds a behavior-test session from the source profile and the supplied in-memory module selection.</summary>
+    public void CreateBehaviorTestSession(string classFilename, string? routeFilename, GoalFactory.TestModules modules)
+    {
+        if (GoapAgent?.Active == true)
+            GoapAgent.Active = false;
+
+        ClassConfiguration config = ReadClassConfiguration(classFilename);
+        config.Mode = Mode.Grind;
+        // The Combat test preset represents a complete encounter lifecycle,
+        // including post-kill looting. Loot remains independently selectable.
+        config.Loot = modules.Loot || modules.Combat;
+        if (!string.IsNullOrWhiteSpace(routeFilename))
+        {
+            // A manual route override is a session-local, standalone route. It must
+            // replace path groups as well as an inline PathFilename; otherwise the
+            // override inherits an unrelated first route's race/level requirements.
+            config.PathFilename = routeFilename;
+            config.OverridePathFilename = string.Empty;
+            config.Paths = [];
+            config.PathsFilenames = [];
+        }
+        config.Initialise(serviceProvider, new Dictionary<int, string>());
+        config.FileName = classFilename;
+        ClassConfig = config;
+        SelectedClassFilename = classFilename;
+        SelectedPathFilename = string.IsNullOrWhiteSpace(routeFilename)
+            ? []
+            : new Dictionary<int, string> { [0] = routeFilename };
+        CreateSession(config, modules);
+        ProfileLoaded?.Invoke();
     }
 
     public void LoadPathProfile(Dictionary<int, string> pathFilenames)

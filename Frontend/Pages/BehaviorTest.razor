@@ -1,0 +1,251 @@
+@page "/BehaviorTest"
+@implements IDisposable
+@inject DataConfig dataConfig
+@inject IBotController bot
+@inject IAddonReader addonReader
+@inject PlayerReader player
+@inject AddonBits bits
+@inject KeyBindingsReader keyBindingsReader
+@inject IJSRuntime JSRuntime
+
+<div class="behavior-test container-fluid">
+    <header class="bt-header">
+        <div><h1>Bot 行为测试</h1><p>选择职业配置、路径文件和需要启用的行为模块，以最小化方式验证 Bot 行为。</p></div>
+        <span class="badge @(IsPaused ? "bg-warning text-dark" : IsRunning ? "bg-success" : "bg-secondary")">@(IsPaused ? "已暂停" : IsRunning ? "运行中" : "已停止")</span>
+    </header>
+
+    <div class="row g-3">
+        <section class="col-xl-7"><div class="card"><div class="card-header">测试配置</div><div class="card-body">
+            <div class="row g-3">
+                <div class="col-md-6"><label class="form-label">职业 JSON</label><select class="form-select" @bind="className" @bind:after="LoadConfig"><option value="">选择职业配置</option>@foreach (var f in ClassFiles){<option value="@f">@f</option>}</select></div>
+                <div class="col-md-6"><label class="form-label">路径 JSON</label><select class="form-select" @bind="pathName" @bind:after="OnPathChanged"><option value="">(无路径覆盖)</option>@foreach (var f in PathFiles){<option value="@f">@f</option>}</select><small class="text-muted">路径来源：@(ManualPath ? "手动覆盖路径" : "职业配置默认路径")</small> <button class="btn btn-sm btn-link" @onclick="RestorePath">恢复默认路径</button></div>
+            </div>
+            <div class="bt-modules mt-3"><div class="fw-semibold mb-2">行为模块</div>@foreach (var m in ModuleList){<label class="form-check"><input class="form-check-input" type="checkbox" disabled="@(!CanEnable(m) || (CombatSelected && m.Key=="Pull"))" checked="@m.Enabled" @onchange="e => SetModule(m, e)"/><span class="form-check-label">@m.Label</span>@if(IsAutoIncluded(m)){<span class="text-muted ms-2">@AutoIncludedReason(m)</span>}else if(m.Key=="Pull"&&!m.Configured){<span class="text-muted ms-2">无 Pull.Sequence（仅接近，不会主动开怪）</span>}else if(m.Key=="Path"&&CanEnable(m)&&!m.Configured){<span class="text-muted ms-2">当前手动路径可用</span>}else if(!m.Configured){<span class="text-muted ms-2">未配置</span>}</label>}</div>
+            @if(CombatSelected){<div class="small text-muted mt-2">Combat 是完整遭遇流程：自动注册寻怪路径、Pull、Approach、Combat、Find Threat 和 Loot（含尸体状态处理）。Follow Route 会沿所选路径自动寻找目标；找到目标后拉怪、接近、执行战斗循环并在击杀后拾取。Loot 不单独启用。@if(!ModuleList.First(m=>m.Key=="Pull").Configured){<span class="text-warning">当前职业没有配置 Pull.Sequence，拉怪阶段只能接近目标，无法释放职业配置的拉怪技能。</span>}</div>}
+            @if(PullSelected&&!CombatSelected){<div class="small text-muted mt-2">仅拉怪会自动注册寻怪路径和 Approach 支持，沿所选路线寻找目标并尝试拉怪；不会注册 Combat 或 Loot。@if(!ModuleList.First(m=>m.Key=="Pull").Configured){<span class="text-warning">当前职业没有配置 Pull.Sequence，只能接近目标，无法主动开怪。</span>}</div>}
+            @if(LoadedConfig != null){<div class="border rounded p-2 mt-3 small">
+                <div class="fw-semibold">拉怪动作与按键（Pull.Sequence）</div>
+                @if(PullSelected||CombatSelected){<div class="mt-2">接近目标按键（INTERACTTARGET）：<b>@ApproachBindingDisplay</b></div>}
+                @if(PullActions.Any()){
+                    <ol class="mb-1 mt-2">@foreach(var action in PullActions){<li><b>@(action["Name"]?.ToString() ?? "(未命名动作)")</b> · 按键：@(action["Key"]?.ToString() ?? "—")@if(!string.IsNullOrWhiteSpace(PullActionRequirement(action))){<span class="text-muted"> · 条件：@PullActionRequirement(action)</span>}</li>}</ol>
+                    <span class="text-muted">运行时按配置顺序检查这些动作；Approach 项用于接近目标，其余动作按各自按键/条件执行。</span>
+                }else{
+                    <div class="text-warning mt-2">此职业 JSON 没有 Pull.Sequence：不会释放主动拉怪技能。</div>
+                    <div class="text-muted">Pull 阶段仍可通过全局 Approach 移动控制接近自动选中的目标；不会从 Combat.Sequence 推断或借用拉怪技能。</div>
+                }
+            </div>}
+            @if((CombatSelected||PullSelected)&&!HasRouteForTargetSearch){<div class="alert alert-warning py-2 mt-2 mb-0 small">当前职业配置和路径覆盖都没有可用路线；原有自动寻怪依赖 Follow Route，因此本次无法自动搜索目标。</div>}
+            <div class="d-flex flex-wrap gap-2 mt-3"><button class="btn btn-sm btn-outline-secondary" @onclick="OnlyMove">仅移动</button><button class="btn btn-sm btn-outline-secondary" @onclick="OnlyPull">仅拉怪</button><button class="btn btn-sm btn-outline-secondary" @onclick="OnlyCombat">仅战斗</button><button class="btn btn-sm btn-outline-secondary" @onclick="AllConfigured">完整配置</button><button class="btn btn-sm btn-outline-secondary" @onclick="ClearModules">全部清空</button></div>
+            <div class="d-flex gap-2 mt-3">
+                <Button Color="ButtonColor.Primary" @onclick="LoadConfig">加载配置</Button>
+                <Button Color="ButtonColor.Success" disabled="@(LoadedConfig == null || IsRunning || IsPreparing)" @onclick="StartTest">@(IsPreparing ? "正在检查按键…" : "开始测试")</Button>
+                <Button Color="ButtonColor.Warning" disabled="@(!IsRunning)" @onclick="StopTest">停止测试</Button>
+                <Button Color="ButtonColor.Warning" disabled="@(LoadedConfig == null || IsRunning)" @onclick="Recreate">重新创建 Session</Button>
+                <Button Color="@(IsPaused ? ButtonColor.Success : ButtonColor.Warning)" disabled="@(!IsRunning)" @onclick="TogglePause">@(IsPaused ? "继续测试" : "暂停测试")</Button>
+            </div>
+            @if(!string.IsNullOrWhiteSpace(Error)){<div class="alert alert-danger mt-3 mb-0">@Error</div>}
+        </div></div></section>
+        <section class="col-xl-5"><div class="card h-100"><div class="card-header">本次实际配置预览</div><div class="card-body">
+            <dl class="row mb-2"><dt class="col-5">职业配置</dt><dd class="col-7">@(LoadedConfig == null ? "—" : className)</dd><dt class="col-5">默认路径</dt><dd class="col-7">@(DefaultPath ?? "—")</dd><dt class="col-5">实际路径</dt><dd class="col-7">@(ActualPath ?? "—")</dd><dt class="col-5">路径来源</dt><dd class="col-7">@(ManualPath ? "手动覆盖" : "职业配置默认路径")</dd></dl>
+            <div class="row"><div class="col-md-6"><div class="small text-success fw-semibold">明确启用模块</div>@foreach(var m in EnabledModules){<div class="text-success">✓ @m.Label</div>}@if(!EnabledModules.Any()){<span class="text-muted">无</span>}</div><div class="col-md-6"><div class="small text-muted fw-semibold">未明确启用</div>@foreach(var m in DisabledModules){<div class="text-muted">@m.Label</div>}</div></div>
+            @if(LoadedConfig != null){<div class="small mt-3"><div class="fw-semibold">自动依赖（不计为明确启用模块）</div>@if(HasRouteSearchDependency){<div class="text-muted">寻怪路线：Pull/Combat 需要 Follow Route + TargetFinder 沿所选路径自动搜索目标；不代表勾选 Path Move。</div>}@if(CombatSelected){<div class="text-muted">Combat 流程：自动注册 Pull、Approach、Find Threat 和 Loot。</div>}@if(!HasRouteSearchDependency&&!CombatSelected){<div class="text-muted">无</div>}</div><div class="alert alert-light border mt-3 mb-0 small">Test Mode：Custom<br/>Class：@className<br/>Path：@(ActualPath ?? "—")<br/>Enabled：@(EnabledModules.Any() ? string.Join(" + ", EnabledModules.Select(x=>x.Label)) : "None")</div>}
+        </div></div></section>
+    </div>
+
+    <ErrorBoundary>
+    <ChildContent>
+    <h2 class="h5 mt-4">实时运行状态</h2>
+    <div class="row g-3">
+      <div class="col-lg-4"><div class="card h-100"><div class="card-header">Player / Target</div><div class="card-body bt-kv"><div>Health <b>@Safe(() => $"{player.HealthPercent()}%")</b></div><div>Mana <b>@Safe(() => $"{player.ManaPercent()}%")</b></div><div>Position X/Y/Z <b>@Safe(() => player.MapPos.ToString("0.00"))</b></div><div>Direction <b>@Safe(() => player.Direction.ToString("0.00"))</b></div><div>InCombat <b>@bits.Combat()</b></div><div>Casting <b>@Safe(() => player.IsCasting().ToString())</b></div><div>Dead <b>@bits.Dead()</b></div><hr/><div>Target Exists <b>@bits.Target()</b></div><div>Target Alive <b>@bits.Target_Alive()</b></div><div>Target Hostile <b>@bits.Target_Hostile()</b></div><div>Target Health <b>@Safe(() => $"{player.TargetHealthPercent()}%")</b></div><div>Distance <b>@Safe(() => player.MaxRange().ToString())</b></div><div>Combat Range <b>@Safe(() => player.WithInCombatRange().ToString())</b></div></div></div></div>
+      <div class="col-lg-4"><div class="card h-100"><div class="card-header">Route / Goal</div><div class="card-body bt-kv"><div>当前路径文件 <b>@(ActualPath ?? bot.ClassConfig?.PathFilename ?? "—")</b></div><div>Waypoint 数量 <b>@(bot.RouteInfo?.Route.Length ?? 0)</b></div><div>下一个 Waypoint <b>@NextWaypointText</b></div><div>距离下一个点 <b>@NextPointDistance</b></div><div>当前移动状态 <b>@(bits.Moving() ? "Moving" : "Idle")</b></div><div>注册 Goal 数量 <b>@(bot.GoapAgent?.AvailableGoals.Length ?? 0)</b></div><div>CanRun 检查通过 Goal <b>@EligibleGoalCount</b></div><div>前置条件满足 Goal <b>@StateEligibleGoalCount</b></div><div>当前选中的 Goal <b class="text-warning">@(bot.GoapAgent?.CurrentGoal?.Name ?? "—")</b></div><div>Goal Cost / Priority <b>@(bot.GoapAgent?.CurrentGoal?.Cost.ToString("0.0") ?? "—")</b></div><hr/><div class="fw-semibold">Registered Goals</div>@if(bot.GoapAgent != null){@foreach(var goal in bot.GoapAgent.AvailableGoals){<div class="text-success">✓ @goal.Name <span class="text-muted">(@goal.Cost.ToString("0.0"))</span></div>}}else{<span class="text-muted">Session 尚未创建</span>}</div></div></div>
+      <div class="col-lg-4"><div class="card h-100"><div class="card-header">Requirement / Action State</div><div class="card-body"><div class="fw-semibold">@(bot.GoapAgent?.CurrentGoal is null ? "未选中 Goal：注册 Goal 的前置条件" : "当前 Goal Requirements")</div>
+        @if(bot.GoapAgent is { } agent && agent.CurrentGoal is { } current){
+            @if(current.Preconditions.Count>0){<div class="small text-muted mt-2">Goal 前置条件</div>@foreach(var req in current.Preconditions){var actual=SafeBool(()=>agent.HasState(req.Key));var met=actual==req.Value;<Badge style="margin:2px" Color="@(met?BadgeColor.Success:BadgeColor.Danger)">@Core.GOAP.GoapKey_Extension.ToStringF(req.Key,req.Value) (当前：@actual)</Badge>}}
+            var requirements=current.Keys.SelectMany(k=>k.RequirementsRuntime.Select(r=>(Action:k.Name,Requirement:r))).ToArray();
+            @if(requirements.Length>0){<div class="small text-muted mt-2">Action Requirements</div>@foreach(var req in requirements){var met=SafeBool(req.Requirement.HasRequirement);<Badge style="margin:2px" Color="@(met?BadgeColor.Success:BadgeColor.Danger)">@req.Action · @Safe(req.Requirement.LogMessage)</Badge>}}
+            else if(current.Preconditions.Count==0){<span class="text-muted">无显式 Requirement</span>}
+        }else if(bot.GoapAgent is { } idleAgent && idleAgent.AvailableGoals.Length>0){
+            <div class="small text-muted mt-2">当前没有 Goal 通过规划；下列颜色显示每个注册 Goal 的前置条件状态。</div>
+            @foreach(var candidate in idleAgent.AvailableGoals){<div class="fw-semibold mt-2">@candidate.Name</div>@if(candidate.Preconditions.Count==0){<span class="text-muted">无显式前置条件</span>}@foreach(var req in candidate.Preconditions){var actual=SafeBool(()=>idleAgent.HasState(req.Key));var met=actual==req.Value;<Badge style="margin:2px" Color="@(met?BadgeColor.Success:BadgeColor.Danger)">@Core.GOAP.GoapKey_Extension.ToStringF(req.Key,req.Value) (当前：@actual)</Badge>}}
+        }else{<span class="text-muted">当前无注册 Goal</span>}
+        <hr/><div>Action Name <b>@(bot.GoapAgent?.CurrentGoal?.Keys.FirstOrDefault()?.Name ?? "—")</b></div><div>Key <b>@(bot.GoapAgent?.CurrentGoal?.Keys.FirstOrDefault()?.Key ?? "—")</b></div><div>Casting 状态 <b>@Safe(() => player.IsCasting().ToString())</b></div><div>执行时间 <b>@CurrentGoalDuration</b></div><div>最近一次动作 <b>@(recentAction ?? "—")</b></div></div></div></div>
+    </div>
+    <div class="card mt-3"><div class="card-header d-flex justify-content-between"><span>实时事件日志</span><button class="btn btn-sm btn-outline-secondary" @onclick="ClearLog">清空</button></div><div class="card-body bt-log">@foreach(var line in logs){<div>@line</div>}</div></div>
+    </ChildContent>
+    <ErrorContent>
+        <div class="alert alert-danger mt-4">实时状态显示发生错误。上方的暂停和停止按钮仍可使用；重新进入页面可恢复状态面板。</div>
+    </ErrorContent>
+    </ErrorBoundary>
+</div>
+
+@code {
+    private sealed class Module(string key, string label) { public string Key=key; public string Label=label; public bool Configured; public bool Enabled; }
+    private readonly List<Module> ModuleList = [new("Path", "Path Move"),new("Wait","Wait"),new("Pull","Pull"),new("Combat","Combat"),new("Adhoc","Adhoc"),new("NPC","NPC")];
+    private string className = ""; private string pathName = ""; private string? DefaultPath; private bool ManualPath; private Newtonsoft.Json.Linq.JObject? LoadedConfig; private string? Error; private string? recentAction; private string? lastGoal; private string? lastAction; private string? lastEligible; private bool? lastCombat; private bool? lastMoving; private System.Numerics.Vector3? lastWaypoint; private DateTime currentGoalSince;
+    private readonly List<string> logs=[]; private IEnumerable<string> ClassFiles => Files(dataConfig.Class); private IEnumerable<string> PathFiles => Files(dataConfig.Path);
+    private const string SelectionStorageKey = "behavior-test-selection";
+    private bool restoringSelection; private bool IsPreparing;
+    private sealed record PersistedSelection(string ClassName, string? PathName, string[] EnabledModules);
+    private bool IsRunning => bot.GoapAgent?.Active == true; private bool IsPaused => bot.GoapAgent?.Paused == true; private bool CombatSelected => ModuleList.First(x=>x.Key=="Combat").Enabled; private bool PullSelected => ModuleList.First(x=>x.Key=="Pull").Enabled; private bool HasRouteSearchDependency => (CombatSelected||PullSelected)&&HasRouteForTargetSearch; private bool IsAutoIncluded(Module m) => (CombatSelected && m.Key=="Pull") || (HasRouteSearchDependency && m.Key=="Path"); private string AutoIncludedReason(Module m) => m.Key=="Path" ? "Pull/Combat 自动注册寻怪路线（不启用 Path Move）" : "Combat 流程自动注册 Pull"; private IEnumerable<Module> EnabledModules => ModuleList.Where(x=>x.Enabled); private IEnumerable<Module> DisabledModules => ModuleList.Where(x=>!x.Enabled);
+    private string NextWaypointText => Safe(() => TryGetNextWaypoint(out var point) ? point.ToString("0.00") : "—");
+    private string NextPointDistance => Safe(() => TryGetNextWaypoint(out var point) ? System.Numerics.Vector3.Distance(player.MapPos, point).ToString("0.0") : "—");
+    private string CurrentGoalDuration
+    {
+        get
+        {
+            if (currentGoalSince == default)
+                return "—";
+
+            var elapsed = DateTime.Now - currentGoalSince;
+            if (elapsed < TimeSpan.Zero)
+                elapsed = TimeSpan.Zero;
+
+            return $"{(int)elapsed.TotalMinutes:00}:{elapsed.Seconds:00}";
+        }
+    }
+    private int EligibleGoalCount { get { try { return Core.GOAP.GoapPlanner.LastUsable.Count; } catch { return 0; } } }
+    private int StateEligibleGoalCount
+    {
+        get
+        {
+            try
+            {
+                var agent = bot.GoapAgent;
+                return agent == null ? 0 : agent.AvailableGoals.Count(goal =>
+                    goal.Preconditions.All(requirement => agent.HasState(requirement.Key) == requirement.Value));
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+    }
+    private string? ActualPath => string.IsNullOrWhiteSpace(pathName) ? DefaultPath : pathName;
+    private string ApproachBindingDisplay => !keyBindingsReader.IsInitialized ? "游戏按键尚未读取完成" : keyBindingsReader.TryGetBinding(BindingID.INTERACTTARGET, out var key, out var modifier) ? $"{modifier.ToPrefix()}{key}" : "未绑定（不能安全接近目标）";
+    private IEnumerable<Newtonsoft.Json.Linq.JObject> PullActions => LoadedConfig?["Pull"]?["Sequence"] is Newtonsoft.Json.Linq.JArray actions ? actions.OfType<Newtonsoft.Json.Linq.JObject>() : [];
+    private static string PullActionRequirement(Newtonsoft.Json.Linq.JObject action)
+    {
+        if (action["Requirements"] is Newtonsoft.Json.Linq.JArray requirements)
+            return string.Join(" && ", requirements.Select(x => x.ToString()));
+
+        return action["Requirement"]?.ToString() ?? string.Empty;
+    }
+    private bool HasRouteForTargetSearch => (LoadedConfig?["Paths"] is Newtonsoft.Json.Linq.JArray routes && routes.Count>0) || (LoadedConfig?["PathsFilenames"] is Newtonsoft.Json.Linq.JArray routeGroups && routeGroups.Count>0) || !string.IsNullOrWhiteSpace(ActualPath);
+    private IEnumerable<string> Files(string root) { if(!Directory.Exists(root)) return []; return Directory.EnumerateFiles(root,"*.json",SearchOption.AllDirectories).Select(x=>Path.GetRelativePath(root,x)).OrderBy(x=>x,StringComparer.OrdinalIgnoreCase); }
+    protected override void OnInitialized(){ addonReader.AddonDataChanged += Changed; bot.StatusChanged += OnBotStatusChanged; }
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+            await RestoreSelection();
+    }
+    public void Dispose(){ addonReader.AddonDataChanged -= Changed; bot.StatusChanged -= OnBotStatusChanged; }
+    private void OnBotStatusChanged()=>_ = InvokeAsync(StateHasChanged);
+    private bool TryGetNextWaypoint(out System.Numerics.Vector3 point){point=default;try{if(bot.GoapAgent?.CurrentGoal is Core.IRouteProvider route&&route.HasNext()){point=route.NextMapPoint();return true;}}catch(Exception){/* Route state can change while the agent updates its waypoint stack. */}return false;}
+    private async void Changed(){
+        try{
+            await InvokeAsync(() => {
+                try{
+                    var goal=bot.GoapAgent?.CurrentGoal;var goalName=goal?.Name;
+                    if(goalName!=lastGoal){lastGoal=goalName;currentGoalSince=DateTime.Now;if(goal!=null)AddLog($"Selected Goal: {goal.Name} (Cost={goal.Cost:0.0})");}
+                    var action=goal?.Keys.FirstOrDefault()?.Name;
+                    if(action!=lastAction&&action!=null){lastAction=action;recentAction=action;AddLog($"Action: {action}");}
+                    if(TryGetNextWaypoint(out var waypoint)){if(lastWaypoint.HasValue&&waypoint!=lastWaypoint.Value)AddLog($"Waypoint → {waypoint:0.00}");lastWaypoint=waypoint;}
+                    var eligible=string.Join(", ",Core.GOAP.GoapPlanner.LastUsable.Select(g=>g.Name));
+                    if(eligible!=lastEligible){lastEligible=eligible;AddLog($"Eligible Goals: {(string.IsNullOrEmpty(eligible)?"none":eligible)}");}
+                    var combat=bits.Combat();
+                    if(lastCombat!=combat){lastCombat=combat;AddLog($"Combat={combat}");if(combat&&bot.GoapAgent?.AvailableGoals.All(g=>g.Name!="Combat")!=false)AddLog("No Combat Goal registered");}
+                    var moving=bits.Moving();
+                    if(lastMoving!=moving){lastMoving=moving;AddLog(moving?"Move Forward / navigation active":"Movement stopped");}
+                    Error=null;
+                }
+                catch(Exception ex){Error=$"状态刷新暂时失败：{ex.Message}";}
+                try{StateHasChanged();}catch(Exception){/* UI circuit is shutting down. */}
+            });
+        }
+        catch(Exception){/* A UI refresh must never escape onto the frontend update thread. */}
+    }
+    private string Safe(Func<string> f){try{return f();}catch{return "—";}}
+    private bool SafeBool(Func<bool> f){try{return f();}catch{return false;}}
+    private void AddLog(string s){ logs.Insert(0,$"{DateTime.Now:HH:mm:ss} {s}"); if(logs.Count>400) logs.RemoveAt(logs.Count-1); }
+    private async Task LoadConfig(){ Error=null; if(string.IsNullOrWhiteSpace(className)){Error="请选择职业配置 JSON。";return;} try { var raw=File.ReadAllText(Path.Combine(dataConfig.Class,className)); LoadedConfig=Newtonsoft.Json.Linq.JObject.Parse(raw); DefaultPath=(string?)LoadedConfig["PathFilename"]; if(string.IsNullOrEmpty(DefaultPath) && LoadedConfig["Paths"] is Newtonsoft.Json.Linq.JArray paths) DefaultPath=(string?)paths.FirstOrDefault()?["PathFilename"]; pathName=""; ManualPath=false; foreach(var m in ModuleList){var token=LoadedConfig[m.Key]; m.Configured=m.Key switch{"Path"=>!string.IsNullOrWhiteSpace(DefaultPath)||(LoadedConfig["Paths"] is Newtonsoft.Json.Linq.JArray a&&a.Count>0)||(LoadedConfig["PathsFilenames"] is Newtonsoft.Json.Linq.JArray groups&&groups.Count>0),"Loot"=>token==null||token.Type!=Newtonsoft.Json.Linq.JTokenType.Boolean||(bool)token,"Pull"=>token?["Sequence"] is Newtonsoft.Json.Linq.JArray pull&&pull.Count>0,_=>token?["Sequence"] is Newtonsoft.Json.Linq.JArray arr&&arr.Count>0}; m.Enabled=false;} AddLog($"Load ClassConfig: {className}"); AddLog($"Default Path: {DefaultPath ?? "(none)"}"); }catch(Exception ex){Error=ex.Message;} await SaveSelection(); await InvokeAsync(StateHasChanged); }
+    private async Task OnPathChanged(){ManualPath=!string.IsNullOrWhiteSpace(pathName);if(ManualPath)AddLog($"Override Path: {pathName}");await SaveSelection();}
+    private async Task RestorePath(){pathName="";ManualPath=false;AddLog("Restore default path");await SaveSelection();}
+    private bool CanEnable(Module m) => m.Key switch { "Path" => HasRouteForTargetSearch, "Pull" => true, _ => m.Configured };
+    private async Task SetModule(Module m, ChangeEventArgs e){m.Enabled=CanEnable(m)&&(bool)(e.Value??false);await SaveSelection();}
+    private void OnlyMove()=>Preset("Path"); private void OnlyPull()=>Preset("Pull"); private void OnlyCombat()=>Preset("Combat"); private void Preset(string key){foreach(var m in ModuleList)m.Enabled=CanEnable(m)&&m.Key==key;_ = SaveSelection();}
+    private void AllConfigured(){foreach(var m in ModuleList)m.Enabled=m.Configured;_ = SaveSelection();} private void ClearModules(){foreach(var m in ModuleList)m.Enabled=false;_ = SaveSelection();}
+    private Core.GoalFactory.TestModules CurrentModules()=>new(ModuleList.First(x=>x.Key=="Path").Enabled,ModuleList.First(x=>x.Key=="Wait").Enabled,ModuleList.First(x=>x.Key=="Pull").Enabled,CombatSelected,ModuleList.First(x=>x.Key=="Adhoc").Enabled,CombatSelected,ModuleList.First(x=>x.Key=="NPC").Enabled);
+    private async Task StartTest(){if(IsPreparing)return;IsPreparing=true;Error=null;try{if(LoadedConfig==null)throw new InvalidOperationException("请先加载配置。");if(bot is not BotController controller)throw new InvalidOperationException("当前运行环境不支持测试 Session。");if(!await EnsureApproachBindingReady())return;controller.CreateBehaviorTestSession(className,ActualPath,CurrentModules());AddLog("Create Test Session");foreach(var goal in bot.GoapAgent!.AvailableGoals)AddLog($"Register Goal: {goal.Name}");controller.SetBotActive(true);AddLog("Bot Started");}catch(Exception ex){Error=ex.Message;}finally{IsPreparing=false;await InvokeAsync(StateHasChanged);} }
+    private void StopTest(){Error=null;if(bot is BotController controller)controller.SetBotActive(false);else bot.ToggleBotStatus();AddLog("Bot Stopped");}
+    private async Task TogglePause(){
+        try{
+            if(bot is not BotController controller)throw new InvalidOperationException("当前运行环境不支持测试 Session。");
+            if(IsPaused){controller.SetBotPaused(false);AddLog("Bot Resumed from paused state.");}
+            else{controller.SetBotPaused(true);AddLog("Bot Paused; session state retained.");}
+            Error=null;
+        }
+        catch(Exception ex){Error=$"暂停状态切换失败：{ex.Message}";AddLog($"Pause toggle failed: {ex.Message}");}
+        await InvokeAsync(StateHasChanged);
+    }
+    private async Task Recreate(){if(IsPreparing||bot is not BotController controller||LoadedConfig==null)return;IsPreparing=true;Error=null;try{if(!await EnsureApproachBindingReady())return;controller.CreateBehaviorTestSession(className,ActualPath,CurrentModules());AddLog("Recreate Test Session");foreach(var goal in bot.GoapAgent!.AvailableGoals)AddLog($"Register Goal: {goal.Name}");}catch(Exception ex){Error=ex.Message;}finally{IsPreparing=false;await InvokeAsync(StateHasChanged);}}
+    private async Task<bool> EnsureApproachBindingReady(){if(!PullSelected&&!CombatSelected)return true;var timeout=System.Diagnostics.Stopwatch.StartNew();while(!keyBindingsReader.IsInitialized&&timeout.Elapsed<TimeSpan.FromSeconds(5))await Task.Delay(100);if(!keyBindingsReader.IsInitialized){Error="游戏按键数据尚未读取完成，未创建测试 Session。请稍后重试。";return false;}if(!keyBindingsReader.TryGetBinding(BindingID.INTERACTTARGET,out var key,out var modifier)){Error="游戏中没有读取到 INTERACTTARGET（Interact with Target）绑定，未创建测试 Session，避免将默认 Home 错按成其他动作。请先运行插件按键设置并确认该绑定。";return false;}AddLog($"Approach binding: {modifier.ToPrefix()}{key}");return true;}
+    private void ClearLog()=>logs.Clear();
+
+    private async Task RestoreSelection()
+    {
+        try
+        {
+            var json = await JSRuntime.InvokeAsync<string?>("LocalStorageHelper.getItem", SelectionStorageKey);
+            if (string.IsNullOrWhiteSpace(json))
+                return;
+
+            var saved = System.Text.Json.JsonSerializer.Deserialize<PersistedSelection>(json);
+            if (saved == null || string.IsNullOrWhiteSpace(saved.ClassName) || !ClassFiles.Contains(saved.ClassName, StringComparer.OrdinalIgnoreCase))
+                return;
+
+            restoringSelection = true;
+            className = saved.ClassName;
+            await LoadConfig();
+            pathName = saved.PathName != null && PathFiles.Contains(saved.PathName, StringComparer.OrdinalIgnoreCase) ? saved.PathName : "";
+            ManualPath = !string.IsNullOrWhiteSpace(pathName);
+            var enabled = saved.EnabledModules.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var module in ModuleList)
+                module.Enabled = CanEnable(module) && enabled.Contains(module.Key);
+            AddLog("Restored Behavior Test selection from this browser session");
+            restoringSelection = false;
+            await SaveSelection();
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            restoringSelection = false;
+            Error = $"恢复测试配置失败：{ex.Message}";
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task SaveSelection()
+    {
+        if (restoringSelection || string.IsNullOrWhiteSpace(className))
+            return;
+
+        try
+        {
+            var saved = new PersistedSelection(className, pathName, ModuleList.Where(m => m.Enabled).Select(m => m.Key).ToArray());
+            var json = System.Text.Json.JsonSerializer.Serialize(saved);
+            await JSRuntime.InvokeVoidAsync("LocalStorageHelper.setItem", SelectionStorageKey, json);
+        }
+        catch (Microsoft.JSInterop.JSDisconnectedException)
+        {
+            // The current test selection will be written on the next interaction.
+        }
+        catch (Microsoft.JSInterop.JSException)
+        {
+            // Persistence is optional and must never break the Blazor circuit.
+        }
+        catch (InvalidOperationException)
+        {
+            // JS interop is unavailable during prerender or circuit shutdown.
+        }
+    }
+}

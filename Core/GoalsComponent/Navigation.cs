@@ -556,6 +556,15 @@ public sealed partial class Navigation : IDisposable
         ResetStuckParameters();
     }
 
+    /// <summary>Releases movement controls while retaining the current route for a test-session pause.</summary>
+    public void Pause()
+    {
+        active = false;
+        ReleaseTurnKeys();
+        input.StopForward(true);
+        ResetStuckParameters();
+    }
+
     public void StopMovement()
     {
         input.StopForward(true);
