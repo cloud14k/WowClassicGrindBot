@@ -65,7 +65,7 @@
     "Sequence": [
       {
         "Name": "Food",
-        "Key": "N1",
+        "Key": "=",
         "Requirement": "Health%<30"
       }
     ]

@@ -276,6 +276,14 @@ public sealed partial class GoapAgent : IDisposable
     {
         cts.Cancel();
         sessionPauseEvent.Set();
+        controlWakeEvent.Set();
+
+        // The session scope owns the cancellation source and disposes it as soon
+        // as this method returns. Wait for the worker to finish before that can
+        // happen; otherwise a worker just leaving the initial pause gate can
+        // access cts.Token after the source has been disposed.
+        if (Thread.CurrentThread != goapThread)
+            goapThread.Join();
 
         foreach (GoapGoal a in AvailableGoals)
         {
@@ -290,6 +298,9 @@ public sealed partial class GoapAgent : IDisposable
 
         combatLog.KillCredit -= OnKillCredit;
         combatLog.PlayerDeath -= PlayerDied;
+
+        sessionPauseEvent.Dispose();
+        controlWakeEvent.Dispose();
     }
 
     private void GoapThread()
