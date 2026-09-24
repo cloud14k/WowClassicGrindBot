@@ -1,36 +1,30 @@
-﻿@using System.IO
+@using System.IO
 @using Microsoft.AspNetCore.Components
-@using Microsoft.JSInterop
 
 @inject IBotController botController
 @inject DataConfig dataConfig
-@inject IJSRuntime JSRuntime
 
 @implements IDisposable
 
-<style>
-    #path-autocomplete-container .dropdown-menu {
-        max-height: 600px !important;
-        overflow-y: auto;
-    }
-</style>
-
 <Card class="@(Hide ? "hide" : "")" style="margin-top: 10px">
     <CardHeader>
-        <div class="d-flex">
-            <div class="p-2 bd-highlight">
-                Path Profile
+        <div class="d-flex align-items-center gap-3">
+            <div class="flex-shrink-0">Path Profile</div>
+            <div class="input-group flex-grow-1">
+                <button type="button"
+                        class="form-control text-start path-profile-picker"
+                        @onclick="OpenPathBrowser"
+                        disabled="@ButtonDisabled"
+                        aria-label="Browse path profiles">
+                    @(string.IsNullOrEmpty(Selected) ? "Select a path profile" : Selected)
+                </button>
+                <button type="button"
+                        class="btn btn-outline-secondary"
+                        @onclick="ClearSelection"
+                        disabled="@(ButtonDisabled || string.IsNullOrEmpty(Selected))"
+                        aria-label="Clear selected path">×</button>
             </div>
-            <div class="p-2 flex-grow-1 bd-highlight" id="path-autocomplete-container">
-                <AutoComplete @bind-Value="Selected"
-                TItem="AutoCompleteItem"
-                DataProvider="DataProvider"
-                PropertyName="@nameof(AutoCompleteItem.Name)"
-                Placeholder="@(Files.First() ?? string.Empty)"
-                OnChanged="(AutoCompleteItem selected) => OnSelectedPathChanged(selected)"
-                Disabled="ButtonDisabled" />
-            </div>
-            <div class="p-2 bd-highlight">
+            <div class="flex-shrink-0">
                 <Button Color="ButtonColor.Primary" @onclick="OnClickButtonLoad" disabled="@(ButtonDisabled)">
                     <span>Load Path</span>
                 </Button>
@@ -38,6 +32,114 @@
         </div>
     </CardHeader>
 </Card>
+
+@if (IsBrowserOpen)
+{
+    <div class="path-browser-backdrop" @onclick="ClosePathBrowser">
+        <section class="path-browser-dialog" role="dialog" aria-modal="true" aria-labelledby="path-browser-title" @onclick:stopPropagation="true">
+            <header class="path-browser-header">
+                <h5 id="path-browser-title">Select Path Profile</h5>
+                <button type="button" class="btn-close" aria-label="Close" @onclick="ClosePathBrowser"></button>
+            </header>
+            <div class="path-browser-location">
+                <div class="small text-muted">Starting folder: @Path.GetFullPath(dataConfig.Path)</div>
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <Button Color="ButtonColor.Secondary" @onclick="GoToParent" disabled="@(string.IsNullOrEmpty(BrowseDirectory))">Up</Button>
+                    <span>@(string.IsNullOrEmpty(BrowseDirectory) ? "." : BrowseDirectory)</span>
+                </div>
+            </div>
+            @if (!string.IsNullOrEmpty(BrowseError))
+            {
+                <div class="alert alert-danger mx-3 mt-2 mb-0">@BrowseError</div>
+            }
+            <div class="path-browser-list">
+                @if (string.IsNullOrEmpty(BrowseDirectory) && Files.Any())
+                {
+                    <button type="button" class="path-browser-entry" @onclick="UseClassDefault">
+                        <span class="me-2">↩</span>Use Class Profile Default
+                    </button>
+                }
+                @foreach (var directory in BrowseDirectories)
+                {
+                    <button type="button" class="path-browser-entry" @onclick="() => OpenDirectory(directory)">
+                        <span class="me-2">📁</span>@directory
+                    </button>
+                }
+                @foreach (var file in BrowseFiles)
+                {
+                    <button type="button" class="path-browser-entry" @onclick="() => SelectPathFile(file)">
+                        <span class="me-2">📄</span>@file
+                    </button>
+                }
+                @if (BrowseDirectories.Count == 0 && BrowseFiles.Count == 0 && string.IsNullOrEmpty(BrowseError))
+                {
+                    <div class="text-muted p-3">No JSON path profiles in this folder.</div>
+                }
+            </div>
+            <footer class="path-browser-footer">
+                <Button Color="ButtonColor.Secondary" @onclick="ClosePathBrowser">Cancel</Button>
+            </footer>
+        </section>
+    </div>
+}
+
+<style>
+    .path-profile-picker {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .path-browser-backdrop {
+        position: fixed;
+        inset: 0;
+        z-index: 1060;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        background: rgba(0, 0, 0, .6);
+    }
+
+    .path-browser-dialog {
+        display: flex;
+        flex-direction: column;
+        width: min(640px, 100%);
+        max-height: min(720px, 90vh);
+        color: var(--bs-body-color, #f8f9fa);
+        background: var(--bs-body-bg, #212529);
+        border: 1px solid var(--bs-border-color, #495057);
+        border-radius: .5rem;
+        box-shadow: 0 1rem 3rem rgba(0, 0, 0, .4);
+    }
+
+    .path-browser-header,
+    .path-browser-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 1rem;
+        border-bottom: 1px solid var(--bs-border-color, #495057);
+    }
+
+    .path-browser-header h5 { margin: 0; }
+    .path-browser-footer { justify-content: flex-end; border-top: 1px solid var(--bs-border-color, #495057); border-bottom: 0; }
+    .path-browser-location { padding: .75rem 1rem; border-bottom: 1px solid var(--bs-border-color, #495057); }
+    .path-browser-list { min-height: 180px; overflow-y: auto; }
+
+    .path-browser-entry {
+        display: block;
+        width: 100%;
+        padding: .6rem 1rem;
+        color: inherit;
+        text-align: left;
+        background: transparent;
+        border: 0;
+    }
+
+    .path-browser-entry:hover,
+    .path-browser-entry:focus { background: rgba(127, 127, 127, .2); }
+</style>
 
 @code {
     [Parameter]
@@ -49,10 +151,14 @@
     [Parameter]
     public int TargetIndex { get; set; } = 0;
 
-    private IEnumerable<string> Files { get; set; } = null!;
-
-    private string Selected { get; set; } = new("");
+    private IEnumerable<string> Files { get; set; } = [];
+    private List<string> BrowseDirectories { get; set; } = [];
+    private List<string> BrowseFiles { get; set; } = [];
+    private string BrowseDirectory { get; set; } = string.Empty;
+    private string BrowseError { get; set; } = string.Empty;
+    private string Selected { get; set; } = string.Empty;
     private bool ButtonDisabled { get; set; } = true;
+    private bool IsBrowserOpen { get; set; }
 
     private FileSystemWatcher watcher = null!;
 
@@ -62,7 +168,6 @@
         ValidateLoadButton();
 
         watcher = new(dataConfig.Path);
-
         watcher.NotifyFilter = NotifyFilters.Attributes
             | NotifyFilters.CreationTime
             | NotifyFilters.DirectoryName
@@ -71,46 +176,16 @@
             | NotifyFilters.LastWrite
             | NotifyFilters.Security
             | NotifyFilters.Size;
-
         watcher.Changed += OnChanged;
         watcher.Created += OnChanged;
         watcher.Deleted += OnChanged;
         watcher.Renamed += OnChanged;
-
         watcher.Filter = "*.json";
         watcher.IncludeSubdirectories = true;
         watcher.EnableRaisingEvents = true;
 
         botController.ProfileLoaded += OnProfileLoaded;
-
         Selected = Target?.FileName ?? string.Empty;
-    }
-
-    protected override async Task OnAfterRenderAsync(bool firstRender)
-    {
-        await base.OnAfterRenderAsync(firstRender);
-
-        if (firstRender)
-        {
-            await InitializeImageInjectorAsync();
-        }
-    }
-
-    private async Task InitializeImageInjectorAsync()
-    {
-        if (Files == null || !Files.Any())
-        {
-            await JSRuntime.InvokeVoidAsync("PathAutocompleteImageInjector.init", []);
-            return;
-        }
-
-        var allItems = Files
-            .Select(name => {
-                return new { name, imagePath = GetImagePath(name) };
-            })
-            .ToList();
-
-        await JSRuntime.InvokeVoidAsync("PathAutocompleteImageInjector.init", allItems);
     }
 
     public void Dispose()
@@ -119,42 +194,98 @@
         botController.ProfileLoaded -= OnProfileLoaded;
     }
 
-    public void OnGet()
+    public void OnGet() => GetData();
+
+    private void OpenPathBrowser()
     {
-        GetData();
+        BrowseDirectory = string.Empty;
+        BrowseError = string.Empty;
+        IsBrowserOpen = true;
+        RefreshBrowserEntries();
     }
 
-    private void OnSelectedPathChanged(AutoCompleteItem? pick)
-    {
-        string name = pick?.Name ?? string.Empty;
+    private void ClosePathBrowser() => IsBrowserOpen = false;
 
-        if (string.IsNullOrEmpty(name) || name == Files.First())
+    private void OpenDirectory(string directory)
+    {
+        BrowseDirectory = Path.Combine(BrowseDirectory, directory);
+        RefreshBrowserEntries();
+    }
+
+    private void GoToParent()
+    {
+        if (string.IsNullOrEmpty(BrowseDirectory))
+            return;
+
+        BrowseDirectory = Path.GetDirectoryName(BrowseDirectory) ?? string.Empty;
+        RefreshBrowserEntries();
+    }
+
+    private void RefreshBrowserEntries()
+    {
+        BrowseError = string.Empty;
+        BrowseDirectories.Clear();
+        BrowseFiles.Clear();
+
+        try
         {
-            Selected = string.Empty;
+            var currentDirectory = GetCurrentBrowseDirectory();
+            BrowseDirectories.AddRange(Directory.EnumerateDirectories(currentDirectory)
+                .Select(path => Path.GetFileName(path))
+                .OfType<string>()
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+            BrowseFiles.AddRange(Directory.EnumerateFiles(currentDirectory, "*.json")
+                .Select(path => Path.GetFileName(path))
+                .OfType<string>()
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
         }
-
-        botController.SelectedPathFilename[TargetIndex] = name;
-
-        ValidateLoadButton();
-        base.InvokeAsync(StateHasChanged);
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            BrowseError = $"Unable to browse this folder: {ex.Message}";
+        }
     }
+
+    private string GetCurrentBrowseDirectory()
+    {
+        var root = Path.GetFullPath(dataConfig.Path);
+        var current = Path.GetFullPath(Path.Combine(root, BrowseDirectory));
+        var relative = Path.GetRelativePath(root, current);
+        if (relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+            throw new UnauthorizedAccessException("The selected folder is outside the path profile directory.");
+
+        return current;
+    }
+
+    private void SelectPathFile(string file)
+    {
+        var selectedPath = Path.Combine(BrowseDirectory, file);
+        Selected = selectedPath;
+        botController.SelectedPathFilename[TargetIndex] = selectedPath;
+        ValidateLoadButton();
+        ClosePathBrowser();
+    }
+
+    private void UseClassDefault()
+    {
+        Selected = string.Empty;
+        botController.SelectedPathFilename[TargetIndex] = string.Empty;
+        ValidateLoadButton();
+        ClosePathBrowser();
+    }
+
+    private void ClearSelection() => UseClassDefault();
 
     private void OnChanged(object? sender, FileSystemEventArgs e)
     {
         GetData();
-        base.InvokeAsync(StateHasChanged);
+        if (IsBrowserOpen)
+            RefreshBrowserEntries();
+        _ = InvokeAsync(StateHasChanged);
     }
 
+    private void OnClickButtonLoad() => botController.LoadPathProfile(botController.SelectedPathFilename);
 
-    private void OnClickButtonLoad()
-    {
-        botController.LoadPathProfile(botController.SelectedPathFilename);
-    }
-
-    private void ValidateLoadButton()
-    {
-        ButtonDisabled = string.IsNullOrEmpty(botController.SelectedClassFilename);
-    }
+    private void ValidateLoadButton() => ButtonDisabled = string.IsNullOrEmpty(botController.SelectedClassFilename);
 
     private void OnProfileLoaded()
     {
@@ -168,52 +299,8 @@
         Files = botController.PathFiles();
 
         if (botController.SelectedPathFilename.TryGetValue(TargetIndex, out string? selected))
-        {
             Selected = selected ?? string.Empty;
-        }
         else
-        {
             Selected = Target?.FileName ?? string.Empty;
-        }
-
-        // Update image map when files change
-        _ = UpdateImageMapAsync();
-    }
-
-    private async Task UpdateImageMapAsync()
-    {
-        if (Files == null || !Files.Any())
-            return;
-
-        var allItems = Files
-            .Select(name => new { name, imagePath = GetImagePath(name) ?? "" })
-            .ToList();
-
-        await JSRuntime.InvokeVoidAsync("PathAutocompleteImageInjector.update", allItems);
-    }
-
-    private async Task<AutoCompleteDataProviderResult<AutoCompleteItem>> DataProvider(AutoCompleteDataProviderRequest<AutoCompleteItem> request)
-    {
-        GetData();
-
-        var items = Files.Select(x => new AutoCompleteItem(x, GetImagePath(x)));
-
-        return await Task.FromResult(request.ApplyTo(items.OrderBy(i => i.Name)));
-    }
-
-    private string GetImagePath(string profileName)
-    {
-        if (string.IsNullOrEmpty(profileName))
-            return string.Empty;
-
-        var jpgFileName = Path.ChangeExtension(profileName, ".jpg");
-
-        return Path.Combine("path", jpgFileName);
-    }
-
-    public sealed class AutoCompleteItem(string name, string imagePath)
-    {
-        public string Name { get; set; } = name;
-        public string ImagePath { get; set; } = imagePath;
     }
 }
