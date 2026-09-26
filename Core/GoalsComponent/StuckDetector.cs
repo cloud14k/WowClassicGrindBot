@@ -1,4 +1,5 @@
 using Core.Goals;
+using Core.Training;
 
 using Microsoft.Extensions.Logging;
 
@@ -40,12 +41,15 @@ public sealed partial class StuckDetector
     private readonly AddonBits bits;
     private readonly PlayerDirection playerDirection;
     private readonly StopMoving stopMoving;
+    private readonly TrainingRecorder trainingRecorder;
 
     private Vector3 worldTarget;
 
     private long startTime;
     private long attemptTime;
     private int attemptCount;
+    public int AttemptCount => attemptCount;
+    public bool IsRecovering => attemptCount > 0;
 
     // Closest the target has ever been on this attempt, and when that happened. A
     // last-reading comparison cannot tell a yard of shuffling apart from covering ground;
@@ -69,7 +73,7 @@ public sealed partial class StuckDetector
 
     public StuckDetector(ILogger<StuckDetector> logger, ConfigurableInput input,
         AddonBits bits, PlayerReader playerReader, PlayerDirection playerDirection,
-        StopMoving stopMoving)
+        StopMoving stopMoving, TrainingRecorder trainingRecorder)
     {
         this.logger = logger;
         this.input = input;
@@ -78,6 +82,7 @@ public sealed partial class StuckDetector
         this.playerReader = playerReader;
         this.playerDirection = playerDirection;
         this.stopMoving = stopMoving;
+        this.trainingRecorder = trainingRecorder;
 
         Reset();
     }
@@ -139,6 +144,7 @@ public sealed partial class StuckDetector
 
         if (attemptCount == 1)
         {
+            trainingRecorder.RecordEvent("StuckDetected");
             LogUnstuckJump(logger, attemptCount);
 
             if (!bits.Flying())
@@ -289,6 +295,8 @@ public sealed partial class StuckDetector
         // approach so far makes shuffling in place read as what it is.
         if (distance < bestDistance - MIN_RANGE_DIFF)
         {
+            if (attemptCount > 0)
+                trainingRecorder.RecordEvent("StuckRecovered", attemptCount.ToString());
             bestDistance = distance;
             bestTime = GetTimestamp();
 

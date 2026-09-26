@@ -1,5 +1,6 @@
 ﻿using Core.Goals;
 using Core.Session;
+using Core.Training;
 
 using Game;
 
@@ -7,6 +8,7 @@ using Microsoft.Extensions.Logging;
 
 using SharedLib;
 using SharedLib.Extensions;
+using SharedLib.NpcFinder;
 
 using System;
 using System.Collections.Generic;
@@ -42,6 +44,9 @@ public sealed partial class GoapAgent : IDisposable
 
     private readonly IGrindSessionHandler sessionHandler;
     private readonly StopMoving stopMoving;
+    private readonly TrainingRecorder trainingRecorder;
+    private readonly NpcNameFinder npcNameFinder;
+    private readonly StuckDetector stuckDetector;
 
     private readonly Thread goapThread;
     private readonly CancellationTokenSource<GoapAgent> cts;
@@ -114,6 +119,8 @@ public sealed partial class GoapAgent : IDisposable
                         sessionHandler.Start(classConfig.OverridePathFilename ?? classConfig.PathFilename);
                     }
                 }
+                try { trainingRecorder.SetBotActive(value); }
+                catch (Exception ex) { logger.LogError(ex, "Training recorder state change failed"); }
             }
         }
     }
@@ -212,7 +219,10 @@ public sealed partial class GoapAgent : IDisposable
         SessionStat sessionStat,
         StopMoving stopMoving,
         IGrindSessionHandler sessionHandler,
-        IEnumerable<GoapGoal> availableGoals
+        IEnumerable<GoapGoal> availableGoals,
+        TrainingRecorder trainingRecorder,
+        NpcNameFinder npcNameFinder,
+        StuckDetector stuckDetector
         )
     {
         this.routeInfo = routeInfo;
@@ -243,6 +253,10 @@ public sealed partial class GoapAgent : IDisposable
         SessionStat = sessionStat;
 
         this.stopMoving = stopMoving;
+        this.trainingRecorder = trainingRecorder;
+        trainingRecorder.ConfigureSession(classConfiguration);
+        this.npcNameFinder = npcNameFinder;
+        this.stuckDetector = stuckDetector;
 
         this.sessionHandler = sessionHandler;
 
@@ -330,6 +344,21 @@ public sealed partial class GoapAgent : IDisposable
                 else
                 {
                     GoapGoal? newGoal = NextGoal();
+                    try
+                    {
+                        if (trainingRecorder.IsRecording)
+                        {
+                            GameStateSnapshot snapshot = GameStateSnapshotFactory.Capture(
+                                0, playerReader, bits, addonReader,
+                                npcNameFinder, routeInfo, newGoal?.Name,
+                                WorldState.Data, State, stuckDetector, combatLog, input);
+                            trainingRecorder.ObserveTick(snapshot, newGoal?.Name ?? "IDLE");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Training snapshot failed");
+                    }
                     if (newGoal != null)
                     {
                         if (newGoal != CurrentGoal)
@@ -520,6 +549,7 @@ public sealed partial class GoapAgent : IDisposable
 
     private void OnKillCredit()
     {
+        trainingRecorder.RecordEvent("TargetKilled", combatLog.DeadGuid.Value.ToString());
         if (!Active)
         {
             LogInactiveKillDetected(logger);
@@ -564,6 +594,7 @@ public sealed partial class GoapAgent : IDisposable
 
     public void PlayerDied()
     {
+        trainingRecorder.RecordEvent("PlayerDeath");
         SessionStat.Deaths++;
     }
 

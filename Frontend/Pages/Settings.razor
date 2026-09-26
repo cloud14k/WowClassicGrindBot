@@ -2,6 +2,23 @@
 
 @inject IconDB iconDB
 @inject IJSRuntime JSRuntime
+@inject IServiceProvider Services
+@using Core.Training
+
+<Card class="mt-2">
+    <CardHeader>训练数据采集</CardHeader>
+    <CardBody>
+        <label class="form-check-label">
+            <input type="checkbox" class="form-check-input me-2" @bind="trainingEnabled"
+                   @bind:after="OnTrainingChanged" disabled="@(trainingSettings is null)" />
+            启用 AI 训练数据采集
+        </label>
+        @if (trainingError is not null)
+        {
+            <div class="text-danger small">@trainingError</div>
+        }
+    </CardBody>
+</Card>
 
 <Card class="mt-2">
     <CardHeader>Icon CDN Region</CardHeader>
@@ -24,11 +41,17 @@
 @code {
     private int selectedRegion;
     private string? detectedRegion;
+    private TrainingCollectionSettings? trainingSettings;
+    private bool trainingEnabled;
+    private string? trainingError;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender)
         {
+            trainingSettings = Services.GetService(typeof(TrainingCollectionSettings))
+                as TrainingCollectionSettings;
+            trainingEnabled = trainingSettings?.EnableTrainingDataCollection ?? false;
             selectedRegion = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.getCdnRegion");
             int detected = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.detectCdnRegion");
             detectedRegion = detected switch { 1 => "US", 2 => "EU", 3 => "KR", 4 => "TW", _ => "US" };
@@ -43,5 +66,19 @@
             ? await JSRuntime.InvokeAsync<int>("LocalStorageHelper.detectCdnRegion")
             : selectedRegion;
         iconDB.Region = (CdnRegion)effectiveRegion;
+    }
+
+    private void OnTrainingChanged()
+    {
+        try
+        {
+            trainingSettings?.SetEnabled(trainingEnabled);
+            trainingError = null;
+        }
+        catch (Exception ex)
+        {
+            trainingEnabled = trainingSettings?.EnableTrainingDataCollection ?? false;
+            trainingError = ex.Message;
+        }
     }
 }

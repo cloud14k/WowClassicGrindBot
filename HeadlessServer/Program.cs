@@ -1,6 +1,7 @@
 ﻿using CommandLine;
 
 using Core;
+using Core.Training;
 
 using Frontend;
 
@@ -93,6 +94,8 @@ public sealed class Program
         services.AddSingleton<RunOptions>(options.Value);
 
         services.AddStartupConfigFactories();
+        services.AddSingleton(new TrainingCollectionSettings(
+            configuration.GetValue<bool>(TrainingCollectionSettings.ConfigurationKey)));
 
         // Navmesh / follower tunables bind from the same configuration the host
         // already built (json + env + command line).

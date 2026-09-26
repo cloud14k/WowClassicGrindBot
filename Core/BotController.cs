@@ -1,6 +1,7 @@
 using Core.Goals;
 using Core.GoalsComponent;
 using Core.GOAP;
+using Core.Training;
 
 using Game;
 
@@ -46,6 +47,7 @@ public sealed partial class BotController : IBotController, IDisposable
     private readonly ActionBarTextureReader textureReader;
     private readonly ActionBarMacroReader macroReader;
     private readonly WowProcessInput wowProcessInput;
+    private readonly TrainingRecorder trainingRecorder;
 
     private readonly NpcNameOverlay? npcNameOverlay;
 
@@ -93,7 +95,8 @@ public sealed partial class BotController : IBotController, IDisposable
         ActionBarSlotValidator slotValidator,
         ActionBarTextureReader textureReader,
         ActionBarMacroReader macroReader,
-        WowProcessInput wowProcessInput)
+        WowProcessInput wowProcessInput,
+        TrainingRecorder trainingRecorder)
     {
         this.serviceProvider = serviceProvider;
 
@@ -111,6 +114,8 @@ public sealed partial class BotController : IBotController, IDisposable
         this.textureReader = textureReader;
         this.macroReader = macroReader;
         this.wowProcessInput = wowProcessInput;
+        this.trainingRecorder = trainingRecorder;
+        wowProcessInput.ExecutionObserver = trainingRecorder;
 
         this.minimapNodeFinder = minimapNodeFinder;
 
@@ -518,6 +523,7 @@ public sealed partial class BotController : IBotController, IDisposable
         IServiceCollection s = new ServiceCollection();
 
         s.AddSingleton<IBotController>(this);
+        s.AddSingleton(trainingRecorder);
         // A session keeps the exact in-memory profile it was built from. This also
         // lets the test session use a private path override without touching disk.
         s.AddScoped<ClassConfiguration>(_ => config);
@@ -571,6 +577,8 @@ public sealed partial class BotController : IBotController, IDisposable
 
         npcNameOverlay?.Dispose();
         sessionScope?.Dispose();
+        wowProcessInput.ExecutionObserver = null;
+        trainingRecorder.Dispose();
     }
 
     public void MinimapNodeFound()

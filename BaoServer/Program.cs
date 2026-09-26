@@ -1,4 +1,5 @@
 using Core;
+using Core.Training;
 
 using Frontend;
 
@@ -71,12 +72,14 @@ public static class Program
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
         builder.Logging.ClearProviders().AddSerilog();
 
-        ConfigureServices(builder.Configuration, builder.Services);
+        ConfigureServices(builder.Configuration, builder.Services,
+            builder.Environment.ContentRootPath);
 
         return ConfigureApp(builder, builder.Environment);
     }
 
-    private static void ConfigureServices(IConfiguration configuration, IServiceCollection services)
+    private static void ConfigureServices(IConfiguration configuration,
+        IServiceCollection services, string contentRootPath)
     {
         ILoggerFactory logFactory = LoggerFactory.Create(builder =>
         {
@@ -113,6 +116,9 @@ public static class Program
         }
 
         services.AddStartupConfigurations(configuration);
+        services.AddSingleton(new TrainingCollectionSettings(
+            configuration.GetValue<bool>(TrainingCollectionSettings.ConfigurationKey),
+            Path.Combine(contentRootPath, "appsettings.json")));
 
         bool gameEnvironmentReady = services.AddWoWProcess(log);
 

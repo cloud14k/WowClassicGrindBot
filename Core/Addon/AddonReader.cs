@@ -58,6 +58,9 @@ public sealed partial class AddonReader : IAddonReader
     private int lastMouseOverId = -1;
     public string MouseOverName { get; private set; } = string.Empty;
 
+    /// <summary>Copies the decoded addon cells for lossless future reinterpretation.</summary>
+    public int[] CopyRawData() => (int[])reader.Data.Clone();
+
     public double AvgUpdateLatency { private set; get; }
 
     public AddonReader(ILogger<AddonReader> logger,

@@ -3,10 +3,12 @@ using Core.Database;
 using Core.Extensions;
 using Core.Goals;
 using Core.Session;
+using Core.Training;
 
 using Game;
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -135,6 +137,10 @@ public static class DependencyInjection
     public static IServiceCollection AddStartupIoC(
         this IServiceCollection s, IServiceProvider sp)
     {
+        // Live CoreTests construct a child GOAP container without BotController.
+        // Production sessions already pass their root recorder, so these are fallbacks.
+        s.TryAddSingleton<TrainingCollectionSettings>();
+        s.TryAddSingleton<TrainingRecorder>();
         s.ForwardSingleton<ILoggerFactory>(sp);
         s.ForwardSingleton<ILogger>(sp);
 
@@ -299,6 +305,9 @@ public static class DependencyInjection
         s.AddAddonComponents();
 
         s.AddSingleton<ActionBarSlotValidator>();
+
+        s.TryAddSingleton<TrainingCollectionSettings>();
+        s.AddSingleton<TrainingRecorder>();
 
         s.AddSingleton<IBotController, BotController>();
         s.AddSingleton<IMailSettingsService, MailSettingsService>();

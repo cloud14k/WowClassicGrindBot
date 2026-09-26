@@ -1,5 +1,6 @@
 ﻿using Core.Database;
 using Core.GOAP;
+using Core.Training;
 
 using Microsoft.Extensions.Logging;
 
@@ -36,6 +37,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
     private readonly CombatLog combatLog;
     private readonly PlayerDirection playerDirection;
     private readonly GoapAgentState state;
+    private readonly TrainingRecorder trainingRecorder;
 
     private readonly CancellationToken token;
 
@@ -61,10 +63,12 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         ClassConfiguration classConfig, NpcNameTargeting npcNameTargeting,
         PlayerDirection playerDirection,
         GoapAgentState state, CombatLog combatLog,
-        CancellationTokenSource cts)
+        CancellationTokenSource cts,
+        TrainingRecorder trainingRecorder)
         : base(nameof(LootGoal))
     {
         this.logger = logger;
+        this.trainingRecorder = trainingRecorder;
         this.input = input;
         this.wait = wait;
         this.playerReader = playerReader;
@@ -87,6 +91,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
     public override void OnEnter()
     {
+        trainingRecorder.RecordEvent("LootStart");
         stopMoving.StopForward();
 
         float e = wait.UntilCount(Loot.RESET_UPDATE_COUNT, LootReset);
@@ -121,6 +126,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         }
 
         CleanUpAfterLooting();
+        trainingRecorder.RecordEvent("LootEnd");
 
         ClearTargetIfNeeded();
     }
@@ -176,10 +182,12 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
         bool success = windowOpenElapsedMs >= 0 && windowClosedElapsedMs >= 0;
         if (success)
         {
+            trainingRecorder.RecordEvent("LootSuccess");
             LogLootSuccess(logger, availableItems, windowOpenElapsedMs, windowClosedElapsedMs);
         }
         else
         {
+            trainingRecorder.RecordEvent("LootFailed");
             SendGoapEvent(ScreenCaptureEvent.Default);
             LogLootFailed(logger, windowOpenElapsedMs, windowClosedElapsedMs);
         }
@@ -212,6 +220,7 @@ public sealed partial class LootGoal : GoapGoal, IGoapEventListener
 
     private void HandleFailedLoot()
     {
+        trainingRecorder.RecordEvent("LootFailed", "Target not found");
         SendGoapEvent(ScreenCaptureEvent.Default);
         Log("Loot Failed, target not found!");
     }

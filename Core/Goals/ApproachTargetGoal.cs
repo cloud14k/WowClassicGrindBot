@@ -75,7 +75,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly IMountHandler mountHandler;
     private readonly IBlacklist targetBlacklist;
     private readonly CombatLog combatLog;
-    private readonly ApproachThrottle approachThrottle;
+    private readonly ApproachExecutor approachExecutor;
 
     private long approachStart;
 
@@ -110,7 +110,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         IBlacklist blacklist,
         IMountHandler mountHandler,
         CombatLog combatLog,
-        ApproachThrottle approachThrottle)
+        ApproachExecutor approachExecutor)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -125,7 +125,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.mountHandler = mountHandler;
         this.targetBlacklist = blacklist;
         this.combatLog = combatLog;
-        this.approachThrottle = approachThrottle;
+        this.approachExecutor = approachExecutor;
 
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
@@ -152,7 +152,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         initialMinRange = playerReader.MinRange();
 
         approachStart = GetTimestamp();
-        approachThrottle.ResetForNewChase();
+        approachExecutor.ResetForNewChase();
         SetNextStuckTimeCheck();
 
         probe = CloserTargetProbe.Idle;
@@ -187,15 +187,8 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         // has not replanned yet. A press inside that lag window restarts the
         // interact run onto a mob the player already stands on, which is what
         // carries a melee class past it.
-        if (!ProbeInFlight &&
-            approachThrottle.ShouldPress(playerReader.WithInCombatRange()) &&
-            (!bits.SoftInteract() || HasValidSoftInteract()))
-        {
-            input.PressApproach();
-            wait.Update();
-
-            approachThrottle.OnPressed();
-        }
+        if (!ProbeInFlight)
+            approachExecutor.TryPress(playerReader.WithInCombatRange());
 
         if (!bits.Combat())
         {
@@ -449,15 +442,6 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             input.PressJump();
             wait.Update();
         }
-    }
-
-    private bool HasValidSoftInteract()
-    {
-        return
-            bits.SoftInteract() &&
-            !bits.SoftInteract_Dead() &&
-            !bits.SoftInteract_Tagged() &&
-            playerReader.SoftInteract_Type == GuidType.Creature;
     }
 
     private void Log(string text)

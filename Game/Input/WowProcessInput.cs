@@ -26,6 +26,12 @@ public sealed partial class WowProcessInput : IMouseInput
 
     private readonly BitArray keysDown;
 
+    public IInputExecutionObserver? ExecutionObserver
+    {
+        get => nativeInput.ExecutionObserver;
+        set => nativeInput.ExecutionObserver = value;
+    }
+
     public ConsoleKey ForwardKey { get; set; }
     public ConsoleKey BackwardKey { get; set; }
     public ConsoleKey TurnLeftKey { get; set; }
@@ -158,11 +164,17 @@ public sealed partial class WowProcessInput : IMouseInput
 
         // Press modifier(s) down
         if ((modifier & ModifierKey.Shift) != 0)
+        {
             nativeInput.KeyDown(VK_SHIFT);
+        }
         if ((modifier & ModifierKey.Ctrl) != 0)
+        {
             nativeInput.KeyDown(VK_CONTROL);
+        }
         if ((modifier & ModifierKey.Alt) != 0)
+        {
             nativeInput.KeyDown(VK_MENU);
+        }
 
         // Press actual key
         keysDown[(int)key] = true;
@@ -171,11 +183,17 @@ public sealed partial class WowProcessInput : IMouseInput
 
         // Release modifiers (reverse order)
         if ((modifier & ModifierKey.Alt) != 0)
+        {
             nativeInput.KeyUp(VK_MENU);
+        }
         if ((modifier & ModifierKey.Ctrl) != 0)
+        {
             nativeInput.KeyUp(VK_CONTROL);
+        }
         if ((modifier & ModifierKey.Shift) != 0)
+        {
             nativeInput.KeyUp(VK_SHIFT);
+        }
 
         LogKeyPressRandomWithModifier(logger, key, modifier, elapsedMs);
 

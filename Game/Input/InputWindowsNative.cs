@@ -1,6 +1,7 @@
 ﻿using SixLabors.ImageSharp;
 
 using System;
+using System.Diagnostics;
 using System.Threading;
 
 using static WinAPI.NativeMethods;
@@ -13,6 +14,7 @@ public sealed class InputWindowsNative : IInput
 
     private readonly WowProcess process;
     private readonly CancellationToken token;
+    public IInputExecutionObserver? ExecutionObserver { get; set; }
 
     public InputWindowsNative(WowProcess process, CancellationTokenSource cts, int maxDelay)
     {
@@ -63,21 +65,27 @@ public sealed class InputWindowsNative : IInput
     private void PressModifiersDown(bool shift, bool ctrl, bool alt)
     {
         if (shift)
-            PostMessage(process.MainWindowHandle, WM_KEYDOWN, VK_SHIFT, MakeKeyDownLParam(VK_SHIFT));
+            PostKey(WM_KEYDOWN, VK_SHIFT, MakeKeyDownLParam(VK_SHIFT), true);
         if (ctrl)
-            PostMessage(process.MainWindowHandle, WM_KEYDOWN, VK_CONTROL, MakeKeyDownLParam(VK_CONTROL));
+            PostKey(WM_KEYDOWN, VK_CONTROL, MakeKeyDownLParam(VK_CONTROL), true);
         if (alt)
-            PostMessage(process.MainWindowHandle, WM_KEYDOWN, VK_MENU, MakeKeyDownLParam(VK_MENU));
+            PostKey(WM_KEYDOWN, VK_MENU, MakeKeyDownLParam(VK_MENU), true);
     }
 
     private void ReleaseModifiersUp(bool shift, bool ctrl, bool alt)
     {
         if (alt)
-            PostMessage(process.MainWindowHandle, WM_KEYUP, VK_MENU, MakeKeyUpLParam(VK_MENU));
+            PostKey(WM_KEYUP, VK_MENU, MakeKeyUpLParam(VK_MENU), false);
         if (ctrl)
-            PostMessage(process.MainWindowHandle, WM_KEYUP, VK_CONTROL, MakeKeyUpLParam(VK_CONTROL));
+            PostKey(WM_KEYUP, VK_CONTROL, MakeKeyUpLParam(VK_CONTROL), false);
         if (shift)
-            PostMessage(process.MainWindowHandle, WM_KEYUP, VK_SHIFT, MakeKeyUpLParam(VK_SHIFT));
+            PostKey(WM_KEYUP, VK_SHIFT, MakeKeyUpLParam(VK_SHIFT), false);
+    }
+
+    private void PostKey(uint message, int key, int lParam, bool down, int? durationMs = null)
+    {
+        if (PostMessage(process.MainWindowHandle, message, key, lParam))
+            ExecutionObserver?.OnKeyboard((ConsoleKey)key, down, durationMs);
     }
 
     public void KeyDown(int key)
@@ -87,7 +95,7 @@ public sealed class InputWindowsNative : IInput
 
         bool extended = IsExtendedKey(actualKey);
         int lParam = MakeKeyDownLParam(actualKey, extended);
-        PostMessage(process.MainWindowHandle, WM_KEYDOWN, actualKey, lParam);
+        PostKey(WM_KEYDOWN, actualKey, lParam, true);
     }
 
     public void KeyUp(int key)
@@ -95,7 +103,7 @@ public sealed class InputWindowsNative : IInput
         var (actualKey, shift, ctrl, alt) = TranslateKeyForLayout(key);
         bool extended = IsExtendedKey(actualKey);
         int lParam = MakeKeyUpLParam(actualKey, extended);
-        PostMessage(process.MainWindowHandle, WM_KEYUP, actualKey, lParam);
+        PostKey(WM_KEYUP, actualKey, lParam, false);
 
         ReleaseModifiersUp(shift, ctrl, alt);
     }
@@ -115,12 +123,14 @@ public sealed class InputWindowsNative : IInput
         // Press modifiers first if needed
         PressModifiersDown(shift, ctrl, alt);
 
-        PostMessage(process.MainWindowHandle, WM_KEYDOWN, actualKey, downLParam);
+        PostKey(WM_KEYDOWN, actualKey, downLParam, true);
 
         int delay = DelayTime(milliseconds);
+        long holdStart = Stopwatch.GetTimestamp();
         token.WaitHandle.WaitOne(delay);
 
-        PostMessage(process.MainWindowHandle, WM_KEYUP, actualKey, upLParam);
+        PostKey(WM_KEYUP, actualKey, upLParam, false,
+            (int)Stopwatch.GetElapsedTime(holdStart).TotalMilliseconds);
 
         // Release modifiers
         ReleaseModifiersUp(shift, ctrl, alt);
@@ -138,9 +148,11 @@ public sealed class InputWindowsNative : IInput
         // Press modifiers first if needed
         PressModifiersDown(shift, ctrl, alt);
 
-        PostMessage(process.MainWindowHandle, WM_KEYDOWN, actualKey, downLParam);
+        PostKey(WM_KEYDOWN, actualKey, downLParam, true);
+        long holdStart = Stopwatch.GetTimestamp();
         token.WaitHandle.WaitOne(milliseconds);
-        PostMessage(process.MainWindowHandle, WM_KEYUP, actualKey, upLParam);
+        PostKey(WM_KEYUP, actualKey, upLParam, false,
+            (int)Stopwatch.GetElapsedTime(holdStart).TotalMilliseconds);
 
         // Release modifiers
         ReleaseModifiersUp(shift, ctrl, alt);
@@ -148,38 +160,46 @@ public sealed class InputWindowsNative : IInput
 
     public void LeftClick(Point p)
     {
+        Point screenPoint = p;
         SetCursorPos(p);
 
         ScreenToClient(process.MainWindowHandle, ref p);
         int lparam = MakeLParam(p.X, p.Y);
 
-        PostMessage(process.MainWindowHandle, WM_LBUTTONDOWN, 0, lparam);
+        if (PostMessage(process.MainWindowHandle, WM_LBUTTONDOWN, 0, lparam))
+            ExecutionObserver?.OnMouse("LeftDown", screenPoint);
         token.WaitHandle.WaitOne(DelayTime(maxDelay));
-        PostMessage(process.MainWindowHandle, WM_LBUTTONUP, 0, lparam);
+        if (PostMessage(process.MainWindowHandle, WM_LBUTTONUP, 0, lparam))
+            ExecutionObserver?.OnMouse("LeftUp", screenPoint);
     }
 
     public void RightClick(Point p)
     {
+        Point screenPoint = p;
         SetCursorPos(p);
 
         ScreenToClient(process.MainWindowHandle, ref p);
         int lparam = MakeLParam(p.X, p.Y);
 
-        PostMessage(process.MainWindowHandle, WM_RBUTTONDOWN, 0, lparam);
+        if (PostMessage(process.MainWindowHandle, WM_RBUTTONDOWN, 0, lparam))
+            ExecutionObserver?.OnMouse("RightDown", screenPoint);
         token.WaitHandle.WaitOne(DelayTime(maxDelay));
-        PostMessage(process.MainWindowHandle, WM_RBUTTONUP, 0, lparam);
+        if (PostMessage(process.MainWindowHandle, WM_RBUTTONUP, 0, lparam))
+            ExecutionObserver?.OnMouse("RightUp", screenPoint);
     }
 
     public void SetCursorPos(Point p)
     {
-        WinAPI.NativeMethods.SetCursorPos(p.X, p.Y);
+        if (WinAPI.NativeMethods.SetCursorPos(p.X, p.Y))
+            ExecutionObserver?.OnMouse("Move", p);
     }
 
     public void SendText(string text)
     {
         foreach (char c in text)
         {
-            PostMessage(process.MainWindowHandle, WM_CHAR, c, 0);
+            if (PostMessage(process.MainWindowHandle, WM_CHAR, c, 0))
+                ExecutionObserver?.OnText(c);
         }
     }
 }

@@ -1,6 +1,7 @@
 ﻿using Game;
 
 using Microsoft.Extensions.Logging;
+using Core.Training;
 
 using SharedLib;
 
@@ -14,15 +15,18 @@ public sealed partial class ConfigurableInput
     private readonly ILogger<ConfigurableInput> logger;
     private readonly WowProcessInput input;
     private readonly ClassConfiguration classConfig;
+    private readonly TrainingRecorder trainingRecorder;
 
     private readonly bool Log;
 
     public ConfigurableInput(ILogger<ConfigurableInput> logger,
-        WowProcessInput input, ClassConfiguration classConfig)
+        WowProcessInput input, ClassConfiguration classConfig,
+        TrainingRecorder trainingRecorder)
     {
         this.logger = logger;
         this.input = input;
         this.classConfig = classConfig;
+        this.trainingRecorder = trainingRecorder;
         Log = classConfig.Log;
 
         input.ForwardKey = classConfig.ForwardKey;
@@ -44,6 +48,8 @@ public sealed partial class ConfigurableInput
     /// </summary>
     public void Reset()
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("ReleaseAll"));
         input.Reset();
 
         if (Jump.ConsoleKey != default)
@@ -86,6 +92,9 @@ public sealed partial class ConfigurableInput
             return;
         }
 
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("ToggleWalk", Key: key.ToString()));
+
         if (modifier != ModifierKey.None)
             input.PressRandomWithModifier(key, modifier, WalkTapMs, token);
         else
@@ -108,33 +117,45 @@ public sealed partial class ConfigurableInput
 
     public void StartForward(bool forced)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("MoveForward", Key: ForwardKey.ToString()));
         input.SetKeyState(ForwardKey, true, forced);
     }
 
     public void StopForward(bool forced)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("StopForward", Key: ForwardKey.ToString()));
         if (input.IsKeyDown(ForwardKey))
             input.SetKeyState(ForwardKey, false, forced);
     }
 
     public void StartBackward(bool forced)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("MoveBackward", Key: BackwardKey.ToString()));
         input.SetKeyState(BackwardKey, true, forced);
     }
 
     public void StopBackward(bool forced)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("StopBackward", Key: BackwardKey.ToString()));
         if (input.IsKeyDown(BackwardKey))
             input.SetKeyState(BackwardKey, false, forced);
     }
 
     public void SetKeyState(ConsoleKey key, bool state, bool forced)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new(state ? "KeyDown" : "KeyUp", Key: key.ToString()));
         input.SetKeyState(key, state, forced);
     }
 
     public void TurnRandomDir(int milliseconds, CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Turn", "Random direction"));
         input.PressRandom(
             Random.Shared.Next(2) == 0
             ? input.TurnLeftKey
@@ -143,6 +164,10 @@ public sealed partial class ConfigurableInput
 
     public int PressRandom(KeyAction keyAction, CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new(
+                keyAction.BaseAction ? keyAction.Name : "UseAction", keyAction.Name,
+                keyAction.ConsoleKey.ToString()));
         int elapsedMs = keyAction.HasModifier
             ? input.PressRandomWithModifier(keyAction.ConsoleKey, keyAction.Modifier, keyAction.PressDuration, token)
             : input.PressRandom(keyAction.ConsoleKey, keyAction.PressDuration, token);
@@ -165,11 +190,15 @@ public sealed partial class ConfigurableInput
 
     public void PressFixed(ConsoleKey key, int milliseconds, CancellationToken token)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("KeyPress", Key: key.ToString()));
         input.PressFixed(key, milliseconds, token);
     }
 
     public void PressRandom(ConsoleKey key, int milliseconds)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("KeyPress", Key: key.ToString()));
         input.PressRandom(key, milliseconds);
     }
 
@@ -179,6 +208,8 @@ public sealed partial class ConfigurableInput
 
     public void PressFastInteract(CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Interact", Key: Interact.ConsoleKey.ToString()));
         if (Interact.HasModifier)
             input.PressRandomWithModifier(Interact.ConsoleKey, Interact.Modifier, InputDuration.FastPress, token);
         else
@@ -188,6 +219,8 @@ public sealed partial class ConfigurableInput
 
     public void PressVeryFastInteract()
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Interact", Key: Interact.ConsoleKey.ToString()));
         if (Interact.HasModifier)
             input.PressRandomWithModifier(Interact.ConsoleKey, Interact.Modifier, InputDuration.VeryFastPress);
         else
@@ -202,6 +235,9 @@ public sealed partial class ConfigurableInput
             return;
         }
 
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Approach", Key: Approach.ConsoleKey.ToString()));
+
         if (Approach.HasModifier)
             input.PressRandomWithModifier(Approach.ConsoleKey, Approach.Modifier, InputDuration.FastPress);
         else
@@ -215,6 +251,9 @@ public sealed partial class ConfigurableInput
         {
             return false;
         }
+
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Approach", Key: Approach.ConsoleKey.ToString()));
 
         if (Approach.HasModifier)
             input.PressRandomWithModifier(Approach.ConsoleKey, Approach.Modifier, InputDuration.FastPress);
@@ -240,6 +279,8 @@ public sealed partial class ConfigurableInput
 
     public void PressFastLastTarget(CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("TargetLastTarget", Key: TargetLastTarget.ConsoleKey.ToString()));
         if (TargetLastTarget.HasModifier)
             input.PressRandomWithModifier(TargetLastTarget.ConsoleKey, TargetLastTarget.Modifier, InputDuration.FastPress, token);
         else
@@ -289,6 +330,9 @@ public sealed partial class ConfigurableInput
         if (Jump.ConsoleKey == default)
             return;
 
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("JumpAscend", Key: Jump.ConsoleKey.ToString()));
+
         input.PressFixed(Jump.ConsoleKey, DROWNING_ASCEND_MS, token);
         Jump.SetClicked();
     }
@@ -299,6 +343,8 @@ public sealed partial class ConfigurableInput
 
     public void PressDismount(CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Dismount", Key: Mount.ConsoleKey.ToString()));
         if (Mount.HasModifier)
             input.PressRandomWithModifier(Mount.ConsoleKey, Mount.Modifier, Mount.PressDuration, token);
         else
@@ -311,6 +357,8 @@ public sealed partial class ConfigurableInput
 
     public void PressESC(CancellationToken token = default)
     {
+        if (trainingRecorder.IsRecording)
+            trainingRecorder.RecordRequestedAction(new("Escape", Key: ConsoleKey.Escape.ToString()));
         input.PressRandom(ConsoleKey.Escape, InputDuration.VeryFastPress, token);
     }
 

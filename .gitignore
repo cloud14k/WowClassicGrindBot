@@ -323,3 +323,6 @@ PPather/MPQ/libstorm.so
 
 # Rendered route pictures from `run.ps1 routegen --output`. Regenerated in seconds.
 CoreTests/routegen-out/
+
+# Opt-in raw AI training sessions
+**/training-data/

@@ -12,6 +12,9 @@
       }
     }
   },
+  "Training": {
+    "EnableTrainingDataCollection": false
+  },
   "Navmesh": {
     "Bake": {
       "AgentRadius": 0.5,

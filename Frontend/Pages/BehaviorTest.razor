@@ -18,7 +18,7 @@
         <section class="col-xl-7"><div class="card"><div class="card-header">测试配置</div><div class="card-body">
             <div class="row g-3">
                 <div class="col-md-6"><label class="form-label">职业 JSON</label><select class="form-select" @bind="className" @bind:after="LoadConfig"><option value="">选择职业配置</option>@foreach (var f in ClassFiles){<option value="@f">@f</option>}</select><small class="form-text text-muted">选择职业 JSON 后自动加载。</small></div>
-                <div class="col-md-6"><label class="form-label">路径 JSON</label><select class="form-select" @bind="pathName" @bind:after="OnPathChanged"><option value="">(无路径覆盖)</option>@foreach (var f in PathFiles){<option value="@f">@f</option>}</select><small class="text-muted">路径来源：@(ManualPath ? "手动覆盖路径" : "职业配置默认路径")</small> <button class="btn btn-sm btn-link" @onclick="RestorePath">恢复默认路径</button></div>
+                <div class="col-md-6"><label class="form-label">路径 JSON</label><div class="input-group"><button type="button" class="form-control text-start bt-path-picker" @onclick="OpenPathBrowser" aria-label="选择路径 JSON">@(string.IsNullOrWhiteSpace(pathName) ? "(无路径覆盖)" : pathName)</button><button type="button" class="btn btn-outline-secondary" @onclick="RestorePath" disabled="@string.IsNullOrWhiteSpace(pathName)" aria-label="清除路径覆盖">×</button></div><small class="text-muted">路径来源：@(ManualPath ? "手动覆盖路径" : "职业配置默认路径")</small> <button class="btn btn-sm btn-link" @onclick="RestorePath">恢复默认路径</button></div>
             </div>
             <div class="bt-modules mt-3"><div class="fw-semibold mb-2">行为模块</div>@foreach (var m in ModuleList){<label class="form-check"><input class="form-check-input" type="checkbox" disabled="@(!CanEnable(m) || (CombatSelected && m.Key=="Pull"))" checked="@m.Enabled" @onchange="e => SetModule(m, e)"/><span class="form-check-label">@m.Label</span>@if(IsAutoIncluded(m)){<span class="text-muted ms-2">@AutoIncludedReason(m)</span>}else if(m.Key=="Pull"&&!m.Configured){<span class="text-muted ms-2">无 Pull.Sequence（仅接近，不会主动开怪）</span>}else if(m.Key=="Path"&&CanEnable(m)&&!m.Configured){<span class="text-muted ms-2">当前手动路径可用</span>}else if(!m.Configured){<span class="text-muted ms-2">未配置</span>}</label>}</div>
             @if(CombatSelected){<div class="small text-muted mt-2">Combat 是完整遭遇流程：自动注册寻怪路径、Pull、Approach、Combat、Find Threat 和 Loot（含尸体状态处理）。Follow Route 会沿所选路径自动寻找目标；找到目标后拉怪、接近、执行战斗循环并在击杀后拾取。Loot 不单独启用。@if(!ModuleList.First(m=>m.Key=="Pull").Configured){<span class="text-warning">当前职业没有配置 Pull.Sequence，拉怪阶段只能接近目标，无法释放职业配置的拉怪技能。</span>}</div>}
@@ -53,6 +53,27 @@
         </div></div></section>
     </div>
 
+    @if (IsPathBrowserOpen)
+    {
+        <div class="bt-path-backdrop" @onclick="ClosePathBrowser">
+            <section class="bt-path-dialog" role="dialog" aria-modal="true" aria-labelledby="bt-path-title" @onclick:stopPropagation="true">
+                <header class="bt-path-header"><h5 id="bt-path-title">选择路径 JSON</h5><button type="button" class="btn-close" aria-label="关闭" @onclick="ClosePathBrowser"></button></header>
+                <div class="bt-path-location">
+                    <div class="small text-muted">起始目录：@Path.GetFullPath(dataConfig.Path)</div>
+                    <div class="d-flex align-items-center gap-2 mt-2"><button type="button" class="btn btn-sm btn-secondary" @onclick="GoToParentDirectory" disabled="@string.IsNullOrEmpty(BrowseDirectory)">上一级</button><span>@(string.IsNullOrEmpty(BrowseDirectory) ? "." : BrowseDirectory)</span></div>
+                </div>
+                @if (!string.IsNullOrEmpty(BrowseError)) { <div class="alert alert-danger mx-3 mt-2 mb-0">@BrowseError</div> }
+                <div class="bt-path-list">
+                    <button type="button" class="bt-path-entry" @onclick="UseDefaultPath"><span class="me-2">↩</span>不覆盖路径（使用职业配置默认路径）</button>
+                    @foreach (var directory in BrowseDirectories) { <button type="button" class="bt-path-entry" @onclick="() => OpenPathDirectory(directory)"><span class="me-2">📁</span>@directory</button> }
+                    @foreach (var file in BrowseFiles) { <button type="button" class="bt-path-entry" @onclick="() => SelectPathFile(file)"><span class="me-2">📄</span>@file</button> }
+                    @if (BrowseDirectories.Count == 0 && BrowseFiles.Count == 0 && string.IsNullOrEmpty(BrowseError)) { <div class="text-muted p-3">此目录没有 JSON 路径文件。</div> }
+                </div>
+                <footer class="bt-path-footer"><button type="button" class="btn btn-secondary" @onclick="ClosePathBrowser">取消</button></footer>
+            </section>
+        </div>
+    }
+
     <ErrorBoundary>
     <ChildContent>
     <h2 class="h5 mt-4">实时运行状态</h2>
@@ -86,6 +107,11 @@
     private readonly List<string> logs=[]; private IEnumerable<string> ClassFiles => Files(dataConfig.Class); private IEnumerable<string> PathFiles => Files(dataConfig.Path);
     private const string SelectionStorageKey = "behavior-test-selection";
     private bool restoringSelection;
+    private bool IsPathBrowserOpen;
+    private string BrowseDirectory = "";
+    private string BrowseError = "";
+    private readonly List<string> BrowseDirectories = [];
+    private readonly List<string> BrowseFiles = [];
     private sealed record PersistedSelection(string ClassName, string? PathName, string[] EnabledModules);
     private bool IsRunning => bot.GoapAgent?.Active == true; private bool IsPaused => bot.GoapAgent?.Paused == true; private bool CombatSelected => ModuleList.First(x=>x.Key=="Combat").Enabled; private bool PullSelected => ModuleList.First(x=>x.Key=="Pull").Enabled; private bool HasRouteSearchDependency => (CombatSelected||PullSelected)&&HasRouteForTargetSearch; private bool IsAutoIncluded(Module m) => (CombatSelected && m.Key=="Pull") || (HasRouteSearchDependency && m.Key=="Path"); private string AutoIncludedReason(Module m) => m.Key=="Path" ? "Pull/Combat 自动注册寻怪路线（不启用 Path Move）" : "Combat 流程自动注册 Pull"; private IEnumerable<Module> EnabledModules => ModuleList.Where(x=>x.Enabled); private IEnumerable<Module> DisabledModules => ModuleList.Where(x=>!x.Enabled);
     private string NextWaypointText => Safe(() => TryGetNextWaypoint(out var point) ? point.ToString("0.00") : "—");
@@ -171,6 +197,26 @@
     private async Task LoadConfig(){ Error=null; if(string.IsNullOrWhiteSpace(className)){Error="请选择职业配置 JSON。";return;} try { var raw=File.ReadAllText(Path.Combine(dataConfig.Class,className)); LoadedConfig=Newtonsoft.Json.Linq.JObject.Parse(raw); DefaultPath=(string?)LoadedConfig["PathFilename"]; if(string.IsNullOrEmpty(DefaultPath) && LoadedConfig["Paths"] is Newtonsoft.Json.Linq.JArray paths) DefaultPath=(string?)paths.FirstOrDefault()?["PathFilename"]; pathName=""; ManualPath=false; foreach(var m in ModuleList){var token=LoadedConfig[m.Key]; m.Configured=m.Key switch{"Path"=>!string.IsNullOrWhiteSpace(DefaultPath)||(LoadedConfig["Paths"] is Newtonsoft.Json.Linq.JArray a&&a.Count>0)||(LoadedConfig["PathsFilenames"] is Newtonsoft.Json.Linq.JArray groups&&groups.Count>0),"Loot"=>token==null||token.Type!=Newtonsoft.Json.Linq.JTokenType.Boolean||(bool)token,"Pull"=>token?["Sequence"] is Newtonsoft.Json.Linq.JArray pull&&pull.Count>0,_=>token?["Sequence"] is Newtonsoft.Json.Linq.JArray arr&&arr.Count>0}; m.Enabled=false;} if(bot is BotController controller&&!controller.IsBotActive)controller.LoadClassProfile(className); AddLog($"Load ClassConfig: {className}"); AddLog($"Default Path: {DefaultPath ?? "(none)"}"); }catch(Exception ex){Error=ex.Message;} await SaveSelection(); await InvokeAsync(StateHasChanged); }
     private async Task OnPathChanged(){ManualPath=!string.IsNullOrWhiteSpace(pathName);if(ManualPath)AddLog($"Override Path: {pathName}");await SaveSelection();}
     private async Task RestorePath(){pathName="";ManualPath=false;AddLog("Restore default path");await SaveSelection();}
+    private void OpenPathBrowser(){BrowseDirectory="";IsPathBrowserOpen=true;RefreshPathBrowserEntries();}
+    private void ClosePathBrowser()=>IsPathBrowserOpen=false;
+    private void OpenPathDirectory(string directory){BrowseDirectory=Path.Combine(BrowseDirectory,directory);RefreshPathBrowserEntries();}
+    private void GoToParentDirectory(){if(string.IsNullOrEmpty(BrowseDirectory))return;BrowseDirectory=Path.GetDirectoryName(BrowseDirectory)??"";RefreshPathBrowserEntries();}
+    private void RefreshPathBrowserEntries(){
+        BrowseError="";BrowseDirectories.Clear();BrowseFiles.Clear();
+        try{
+            var directory=GetPathBrowseDirectory();
+            BrowseDirectories.AddRange(Directory.EnumerateDirectories(directory).Select(Path.GetFileName).OfType<string>().OrderBy(x=>x,StringComparer.OrdinalIgnoreCase));
+            BrowseFiles.AddRange(Directory.EnumerateFiles(directory,"*.json").Select(Path.GetFileName).OfType<string>().OrderBy(x=>x,StringComparer.OrdinalIgnoreCase));
+        }
+        catch(Exception ex) when(ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException){BrowseError=$"无法浏览此目录：{ex.Message}";}
+    }
+    private string GetPathBrowseDirectory(){
+        var root=Path.GetFullPath(dataConfig.Path);var current=Path.GetFullPath(Path.Combine(root,BrowseDirectory));var relative=Path.GetRelativePath(root,current);
+        if(relative==".."||relative.StartsWith($"..{Path.DirectorySeparatorChar}",StringComparison.Ordinal)||Path.IsPathRooted(relative))throw new UnauthorizedAccessException("所选目录超出路径配置目录。");
+        return current;
+    }
+    private async Task SelectPathFile(string file){pathName=Path.Combine(BrowseDirectory,file);ClosePathBrowser();await OnPathChanged();}
+    private async Task UseDefaultPath(){await RestorePath();ClosePathBrowser();}
     private bool CanEnable(Module m) => m.Key switch { "Path" => HasRouteForTargetSearch, "Pull" => true, _ => m.Configured };
     private async Task SetModule(Module m, ChangeEventArgs e){m.Enabled=CanEnable(m)&&(bool)(e.Value??false);await SaveSelection();}
     private void OnlyMove()=>Preset("Path"); private void OnlyPull()=>Preset("Pull"); private void OnlyCombat()=>Preset("Combat"); private void Preset(string key){foreach(var m in ModuleList)m.Enabled=CanEnable(m)&&m.Key==key;_ = SaveSelection();}

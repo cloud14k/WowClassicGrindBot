@@ -94,6 +94,7 @@ public static class GoalFactory
         services.AddScoped<CastingHandler>();
         services.AddScoped<StuckDetector>();
         services.AddScoped<ApproachThrottle>();
+        services.AddScoped<ApproachExecutor>();
         services.AddScoped<CombatTracker>();
         services.AddScoped<SafeSpotCollector>();
         services.AddScoped<ThreatFinder>();
@@ -135,6 +136,7 @@ public static class GoalFactory
             {
                 services.AddScoped<GoapGoal, PullTargetGoal>();
                 services.AddScoped<GoapGoal, ApproachTargetGoal>();
+                services.AddScoped<GoapGoal, ApproachRecoveryGoal>();
             }
             if (testModules.Combat)
             {
@@ -168,6 +170,7 @@ public static class GoalFactory
             services.AddScoped<GoapGoal, WalkToCorpseGoal>();
             services.AddScoped<GoapGoal, CombatGoal>();
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
+            services.AddScoped<GoapGoal, ApproachRecoveryGoal>();
 
             if (classConfig.Mode == Mode.AttendedGather)
             {
@@ -203,6 +206,7 @@ public static class GoalFactory
         {
             services.AddScoped<GoapGoal, PullTargetGoal>();
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
+            services.AddScoped<GoapGoal, ApproachRecoveryGoal>();
             services.AddScoped<GoapGoal, AssistFocusGoal>();
             services.AddScoped<GoapGoal, CombatGoal>();
             services.AddScoped<GoapGoal, FindThreatGoal>();
@@ -233,6 +237,7 @@ public static class GoalFactory
             services.AddScoped<GoapGoal, WalkToCorpseGoal>();
             services.AddScoped<GoapGoal, PullTargetGoal>();
             services.AddScoped<GoapGoal, ApproachTargetGoal>();
+            services.AddScoped<GoapGoal, ApproachRecoveryGoal>();
             AddFleeGoal(services, classConfig);
             services.AddScoped<GoapGoal, CombatGoal>();
             services.AddScoped<GoapGoal, FindThreatGoal>();

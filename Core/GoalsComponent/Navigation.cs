@@ -1,5 +1,6 @@
 using Core.Database;
 using Core.GOAP;
+using Core.Training;
 
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -38,6 +39,7 @@ public sealed partial class Navigation : IDisposable
     private readonly IPPather pather;
     private readonly IMountHandler mountHandler;
     private readonly AreaDB areaDB;
+    private readonly TrainingRecorder trainingRecorder;
 
     private const float MinDistanceMount = 10;
     private readonly float MaxDistance = 200;
@@ -144,7 +146,8 @@ public sealed partial class Navigation : IDisposable
         StuckDetector stuckDetector, IPPather pather, IMountHandler mountHandler,
         ClassConfiguration classConfiguration,
         AreaDB areaDB,
-        IOptions<SplineFollowerOptions> splineOptions)
+        IOptions<SplineFollowerOptions> splineOptions,
+        TrainingRecorder trainingRecorder)
     {
         this.logger = logger;
         this.playerDirection = playerDirection;
@@ -156,6 +159,7 @@ public sealed partial class Navigation : IDisposable
         this.pather = pather;
         this.mountHandler = mountHandler;
         this.areaDB = areaDB;
+        this.trainingRecorder = trainingRecorder;
 
         splineSettings = splineOptions.Value;
         spline = new SplineFollowerCore(splineSettings);
@@ -198,6 +202,7 @@ public sealed partial class Navigation : IDisposable
 
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
+            trainingRecorder.RecordEvent("DestinationReached");
             OnDestinationReached?.Invoke();
             return;
         }
@@ -273,6 +278,7 @@ public sealed partial class Navigation : IDisposable
                     if (debug)
                         LogDebug($"Reached wayPoint! Distance: {worldDistance} -- Remains: {wayPoints.Count}");
 
+                    trainingRecorder.RecordEvent("WaypointReached");
                     OnWayPointReached?.Invoke();
                 }
             }
@@ -386,6 +392,7 @@ public sealed partial class Navigation : IDisposable
                 {
                     wayPoints.Pop();
                     UpdateTotalRoute();
+                    trainingRecorder.RecordEvent("WaypointReached");
                     OnWayPointReached?.Invoke();
                 }
 
