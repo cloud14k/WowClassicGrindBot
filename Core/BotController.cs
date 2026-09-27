@@ -68,6 +68,7 @@ public sealed partial class BotController : IBotController, IDisposable
     public RouteInfo? RouteInfo { get; private set; }
 
     private IServiceScope? sessionScope;
+    private ServiceProvider? sessionProvider;
 
     public event Action? ProfileLoaded;
     public event Action? StatusChanged;
@@ -492,6 +493,9 @@ public sealed partial class BotController : IBotController, IDisposable
 
     private bool InitialiseFromFile(string classFile, Dictionary<int, string> pathFiles)
     {
+        if (GoapAgent?.Active == true)
+            SetBotActive(false);
+
         long startTime = GetTimestamp();
         try
         {
@@ -534,6 +538,18 @@ public sealed partial class BotController : IBotController, IDisposable
 
     private void CreateSession(ClassConfiguration config, GoalFactory.TestModules? testModules = null)
     {
+        // Finish the previous session before constructing components that share the
+        // game input and screen. Loading a profile is also allowed while it is active.
+        if (GoapAgent?.Active == true)
+            GoapAgent.Active = false;
+
+        sessionScope?.Dispose();
+        sessionProvider?.Dispose();
+        sessionScope = null;
+        sessionProvider = null;
+        GoapAgent = null;
+        RouteInfo = null;
+
         IServiceCollection s = new ServiceCollection();
 
         s.AddSingleton<IBotController>(this);
@@ -555,7 +571,7 @@ public sealed partial class BotController : IBotController, IDisposable
                 ValidateScopes = true
             });
 
-        sessionScope?.Dispose();
+        sessionProvider = provider;
         sessionScope = provider.CreateScope();
 
         GoapAgent = sessionScope.
@@ -587,10 +603,13 @@ public sealed partial class BotController : IBotController, IDisposable
     public void Dispose()
     {
         KeyReader.GameBindingChanged -= OnGameBindingChanged;
-        cts.Cancel();
+        if (GoapAgent?.Active == true)
+            GoapAgent.Active = false;
 
+        cts.Cancel();
         npcNameOverlay?.Dispose();
         sessionScope?.Dispose();
+        sessionProvider?.Dispose();
         wowProcessInput.ExecutionObserver = null;
         trainingRecorder.Dispose();
     }

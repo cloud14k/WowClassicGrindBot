@@ -122,7 +122,10 @@ public sealed partial class NpcNameTargeting : IDisposable
         }
 
         input.SetCursorPos(p);
-        wait.Update();
+        wait.Update(token);
+
+        if (token.IsCancellationRequested)
+            return false;
 
         classifier.Classify(out CursorType cls, out _);
 
@@ -137,7 +140,7 @@ public sealed partial class NpcNameTargeting : IDisposable
             }
 
             input.InteractMouseOver(token);
-            wait.Update();
+            wait.Update(token);
 
             LogFoundTarget(logger, cls, mouseOverReader.MouseOverId,
                 npc.Rect);

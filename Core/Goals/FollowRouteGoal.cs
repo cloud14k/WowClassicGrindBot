@@ -45,7 +45,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private const int CYCLE_PROFESSION_PERIOD = 8000;
 
     private readonly ManualResetEventSlim sideActivityManualReset;
-    private readonly Thread? sideActivityThread;
+    private Thread? sideActivityThread;
     private CancellationTokenSource sideActivityCts;
     private Exception? sideActivityFailure;
 
@@ -161,34 +161,65 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         sideActivityCts = new();
         sideActivityManualReset = new(false);
 
+        StartSideActivityThread();
+    }
+
+    private void StartSideActivityThread()
+    {
         if (classConfig.GatheringMode)
         {
-            if (classConfig.GatherFindKeyConfig.Length > 1)
-            {
-                sideActivityThread = new(() => RunSideActivity(Thread_AttendedGather)) { IsBackground = true };
-                sideActivityThread.Start();
-            }
+            if (classConfig.GatherFindKeyConfig.Length <= 1)
+                return;
+
+            sideActivityThread = new(() => RunSideActivity(Thread_AttendedGather)) { IsBackground = true };
         }
         else
         {
-            if (!pathOnly)
-            {
-                sideActivityThread = new(() => RunSideActivity(Thread_LookingForTarget)) { IsBackground = true };
-                sideActivityThread.Start();
-            }
+            if (pathOnly)
+                return;
+
+            sideActivityThread = new(() => RunSideActivity(Thread_LookingForTarget)) { IsBackground = true };
         }
+
+        sideActivityThread.Start();
+    }
+
+    private void JoinSideActivityThread()
+    {
+        if (sideActivityThread != null && Thread.CurrentThread != sideActivityThread)
+            sideActivityThread.Join();
+
+        sideActivityThread = null;
+    }
+
+    private void RestartSideActivityThread()
+    {
+        JoinSideActivityThread();
+        sideActivityCts.Dispose();
+        sideActivityCts = new();
+        StartSideActivityThread();
     }
 
     public void Dispose()
     {
-        navigation.Dispose();
-
         sideActivityCts.Cancel();
         sideActivityManualReset.Set();
+        // The worker uses the process-wide input. Do not let it outlive this
+        // profile and race the next session's movement or target selection.
+        JoinSideActivityThread();
+
+        navigation.Dispose();
+        sideActivityCts.Dispose();
+        sideActivityManualReset.Dispose();
     }
 
     private void Abort()
     {
+        sideActivityCts.Cancel();
+        sideActivityManualReset.Set();
+        JoinSideActivityThread();
+        sideActivityManualReset.Reset();
+
         if (!targetBlacklist.Is())
             navigation.StopMovement();
 
@@ -206,7 +237,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (sideActivityCts.IsCancellationRequested)
         {
-            sideActivityCts = new();
+            RestartSideActivityThread();
         }
         sideActivityManualReset.Set();
 
@@ -294,7 +325,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             if (!bits.Target())
             {
                 LogWarning("sideActivityCts is cancelled but needs to be restarted!");
-                sideActivityCts = new();
+                RestartSideActivityThread();
                 sideActivityManualReset.Set();
             }
         }
@@ -318,7 +349,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 {
                     Log("Blacklisted target found, clearing target");
                     input.PressClearTarget();
-                    wait.Update();
+                    wait.Update(sideActivityCts.Token);
                     continue; // Don't fall through - loop again to find a valid target
                 }
 
@@ -330,7 +361,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 }
             }
 
-            wait.Update();
+            wait.Update(sideActivityCts.Token);
+            if (sideActivityCts.IsCancellationRequested)
+                break;
             sideActivityManualReset.Wait();
         }
 
@@ -360,6 +393,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 AlternateGatherTypes();
             }
             sideActivityCts.Token.WaitHandle.WaitOne(CYCLE_PROFESSION_PERIOD);
+            if (sideActivityCts.IsCancellationRequested)
+                break;
             sideActivityManualReset.Wait();
         }
 

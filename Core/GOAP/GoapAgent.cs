@@ -168,6 +168,9 @@ public sealed partial class GoapAgent : IDisposable
 
     private void ReleaseInputAndAbortGoals()
     {
+        foreach (IGoapEventListener goal in AvailableGoals.OfType<IGoapEventListener>())
+            SendGoalEvent(goal, new AbortEvent());
+
         try { stopMoving.Stop(); }
         catch (Exception ex) { logger.LogError(ex, "Failed to stop movement during session control"); }
 
@@ -177,8 +180,6 @@ public sealed partial class GoapAgent : IDisposable
         try { screen.Enabled = false; }
         catch (Exception ex) { logger.LogError(ex, "Failed to disable screen processing during session control"); }
 
-        foreach (IGoapEventListener goal in AvailableGoals.OfType<IGoapEventListener>())
-            SendGoalEvent(goal, new AbortEvent());
     }
 
     private void SendGoalEvent(IGoapEventListener goal, GoapEventArgs args)
@@ -288,6 +289,11 @@ public sealed partial class GoapAgent : IDisposable
 
     public void Dispose()
     {
+        // A session may be replaced without the UI Stop button. Release its
+        // input before the scoped goals and input wrapper are torn down.
+        if (Active)
+            Active = false;
+
         cts.Cancel();
         sessionPauseEvent.Set();
         controlWakeEvent.Set();

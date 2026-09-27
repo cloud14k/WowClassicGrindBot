@@ -182,7 +182,9 @@ public sealed partial class RequirementFactory
             { "Items Broken", bits.Items_Broken },
             { "BagFull", bagReader.BagsFull },
             { "BagGreyItem", bagReader.AnyGreyItem },
-            { "HasRangedWeapon", equipmentReader.RangedWeapon },
+            // Deliberately bypass the ranged-slot equipment check.  The game still
+            // validates whether the selected ranged action can actually be cast.
+            { "HasRangedWeapon", () => true },
             { "HasAmmo", bits.Ammo },
 
             // Class trainer - false once there is nothing left to learn, so a
