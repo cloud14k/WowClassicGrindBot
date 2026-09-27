@@ -46,7 +46,7 @@
       {
         "Name": "Raptor Strike",
         "Key": "4",
-        "WhenUsable": true,
+        "WhenUsable": false,
         "AfterCastWaitSwing": true,
         "Requirements": [
           "MainHandSwing > -400",

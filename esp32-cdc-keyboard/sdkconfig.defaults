@@ -1,6 +1,10 @@
 CONFIG_IDF_TARGET="esp32s3"
 
+# Use the configured custom descriptor IDs below instead of TinyUSB's
+# Espressif/default VID and automatically generated PID.
+# CONFIG_TINYUSB_DESC_USE_ESPRESSIF_VID is not set
 CONFIG_TINYUSB_DESC_CUSTOM_VID=0x46d
+# CONFIG_TINYUSB_DESC_USE_DEFAULT_PID is not set
 CONFIG_TINYUSB_DESC_CUSTOM_PID=0xc07f
 
 CONFIG_TINYUSB_DESC_MANUFACTURER_STRING="Logitech"

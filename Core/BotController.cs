@@ -264,17 +264,31 @@ public sealed partial class BotController : IBotController, IDisposable
 
         while (!cts.IsCancellationRequested)
         {
-            time = GetTimestamp();
-            screen.Update();
-            times[tickCount & MOD] =
-                GetElapsedTime(time).TotalMilliseconds;
+            try
+            {
+                time = GetTimestamp();
+                screen.Update();
+                times[tickCount & MOD] =
+                    GetElapsedTime(time).TotalMilliseconds;
 
-            addonReader.Update();
+                addonReader.Update();
 
-            AvgScreenLatency = Average(times);
-            tickCount++;
+                AvgScreenLatency = Average(times);
+                tickCount++;
 
-            Thread.Sleep(2);
+                Thread.Sleep(2);
+            }
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                // A transient capture/DPI/window transition must not bring
+                // down the whole bot. The next tick can recover the capture.
+                logger.LogError(ex, "Addon thread iteration failed; continuing");
+                Thread.Sleep(50);
+            }
         }
         logger.LogWarning("Addon thread stopped!");
 

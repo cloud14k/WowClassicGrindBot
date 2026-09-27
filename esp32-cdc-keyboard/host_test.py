@@ -1,8 +1,6 @@
 """Host-side test tool for the ESP32 TinyUSB HID+CDC firmware.
 
-The CDC stream carries one complete HID report per write:
-  0x01 + keyboard report (modifiers, reserved, six key usages)
-  0x02 + mouse report (buttons, x, y, wheel, pan)
+The CDC stream carries framed HID reports with acknowledgement.
 """
 
 from __future__ import annotations
@@ -11,6 +9,7 @@ import argparse
 import math
 import string
 import time
+import itertools
 from typing import Iterable
 
 import serial
@@ -19,6 +18,7 @@ import serial
 KEYBOARD_REPORT_ID = 0x01
 MOUSE_REPORT_ID = 0x02
 SHIFT = 0x02
+SEQUENCES = itertools.count(1)
 
 
 def key_report(modifiers: int, keys: Iterable[int]) -> bytes:
@@ -119,9 +119,33 @@ def char_usage(char: str) -> tuple[int, int]:
 
 
 def send_report(ser: serial.Serial, report: bytes) -> None:
-    ser.write(report)
-    ser.flush()
-    print(f"TX: {report.hex(' ')}")
+    sequence = next(SEQUENCES) & 0xFF
+    frame = bytearray([0xA5, report[0], sequence, len(report) - 1, *report[1:]])
+    frame.append(0)
+    for value in frame[:-1]:
+        frame[-1] ^= value
+    for _ in range(3):
+        ser.write(frame)
+        ser.flush()
+        line = bytearray()
+        while True:
+            first = ser.read(1)
+            if not first:
+                break
+            if first[0] == 0x5A and not line:
+                ack = ser.read(2)
+                if ack == bytes([sequence, 0]):
+                    print(f"TX: {frame.hex(' ')}")
+                    return
+                if len(ack) == 2 and ack[0] == sequence:
+                    raise serial.SerialException(f"ESP32 rejected report: status={ack[1]}")
+                continue
+            if first == b"\n":
+                print(f"S3: {line.decode('ascii', errors='replace').rstrip()}")
+                line.clear()
+            elif first != b"\r":
+                line.extend(first)
+    raise serial.SerialException("ESP32 did not acknowledge HID report")
 
 
 def send_text(ser: serial.Serial, text: str, interval: float) -> None:

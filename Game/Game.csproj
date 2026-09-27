@@ -12,6 +12,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SharedLib\SharedLib.csproj" />
     <ProjectReference Include="..\WinAPI\WinAPI.csproj" />
+    <ProjectReference Include="..\HidShared\HidShared.csproj" />
   </ItemGroup>
 
 </Project>

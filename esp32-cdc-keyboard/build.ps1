@@ -10,9 +10,10 @@ $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\scripts\set-esp-idf-env.ps1"
 
 $idf = "$env:IDF_TOOLS_PATH\tools\idf-exe\1.0.3\idf.py.exe"
+$buildDir = 'build-codex'
 
 function Invoke-IdfAction([string[]]$Arguments) {
-    & $idf @Arguments
+    & $idf -B $buildDir @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw "idf.py $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
     }

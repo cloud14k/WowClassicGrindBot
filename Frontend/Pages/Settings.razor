@@ -3,7 +3,52 @@
 @inject IconDB iconDB
 @inject IJSRuntime JSRuntime
 @inject IServiceProvider Services
+@inject WowProcessInput wowInput
 @using Core.Training
+@using Game
+@using HidShared
+
+<Card class="mt-2">
+    <CardHeader>键鼠输入</CardHeader>
+    <CardBody>
+        <select class="form-select mb-2" style="width: auto;" @bind="inputBackend">
+            <option value="Windows">普通键鼠</option>
+            <option value="Hid">ESP32 HID</option>
+        </select>
+        @if (inputBackend == "Hid")
+        {
+            <div class="d-flex flex-wrap align-items-end gap-2">
+                <label>CDC 串口
+                    <select class="form-select" @bind="hidPort">
+                        @if (hidPorts.Length == 0)
+                        {
+                            <option value="@hidPort">@hidPort</option>
+                        }
+                        @foreach (string port in hidPorts)
+                        {
+                            <option value="@port">@port</option>
+                        }
+                    </select>
+                </label>
+                <button class="btn btn-secondary" @onclick="RefreshHidPorts">刷新 COM</button>
+                <span class="badge @(BotHidConnected ? "bg-success" : "bg-secondary") fs-6">
+                    Bot COM：@(BotHidConnected ? $"OPEN ({BotHidPort})" : "CLOSED")
+                </span>
+                <button class="btn btn-outline-primary" @onclick="TestHidAsync" disabled="@(hidTestRunning || !BotHidConnected)">@(hidTestRunning ? "测试中..." : "测试 Bot HID")</button>
+            </div>
+            <div class="@(BotHidConnected ? "text-success" : "text-muted") small mt-1">
+                这里显示的是 bot 实际使用的 CDC 状态；设置页不会另外打开或关闭 COM。
+            </div>
+            @if (hidTestMessage is not null)
+            {
+                <div class="@(hidTestSucceeded ? "text-success" : "text-danger") small mt-1">@hidTestMessage</div>
+            }
+        }
+        <div><button class="btn btn-primary mt-2" @onclick="SaveInputBackend">保存</button></div>
+        <div class="text-muted small">保存后立即切换输入后端，无需重启程序。HID 模式仅在 WoW 位于前台时发送新输入；切到后台会释放已按键并等待恢复。</div>
+        @if (inputError is not null) { <div class="text-danger small">@inputError</div> }
+    </CardBody>
+</Card>
 
 <Card class="mt-2">
     <CardHeader>训练数据采集</CardHeader>
@@ -44,6 +89,17 @@
     private TrainingCollectionSettings? trainingSettings;
     private bool trainingEnabled;
     private string? trainingError;
+    private InputBackendSettings? inputSettings;
+    private string inputBackend = "Windows";
+    private string hidPort = "COM3";
+    private string[] hidPorts = [];
+    private bool hidTestRunning;
+    private bool hidTestSucceeded;
+    private string? hidTestMessage;
+    private string? inputError;
+
+    private bool BotHidConnected => wowInput.IsHidBackend && wowInput.IsHidConnected;
+    private string BotHidPort => wowInput.HidPort ?? hidPort;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -51,6 +107,10 @@
         {
             trainingSettings = Services.GetService(typeof(TrainingCollectionSettings))
                 as TrainingCollectionSettings;
+            inputSettings = Services.GetService(typeof(InputBackendSettings)) as InputBackendSettings;
+            inputBackend = inputSettings?.Backend ?? "Windows";
+            hidPort = inputSettings?.Port ?? "COM3";
+            RefreshHidPorts();
             trainingEnabled = trainingSettings?.EnableTrainingDataCollection ?? false;
             selectedRegion = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.getCdnRegion");
             int detected = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.detectCdnRegion");
@@ -81,4 +141,65 @@
             trainingError = ex.Message;
         }
     }
+
+    private void SaveInputBackend()
+    {
+        try { inputSettings?.Save(inputBackend, hidPort); inputError = null; }
+        catch (Exception ex) { inputError = ex.Message; }
+    }
+
+    private void RefreshHidPorts()
+    {
+        try
+        {
+            hidPorts = HidPortDiscovery.GetPortNames();
+            if (hidPorts.Length > 0 && !hidPorts.Contains(hidPort, StringComparer.OrdinalIgnoreCase))
+                hidPort = hidPorts[0];
+            hidTestMessage = null;
+        }
+        catch (Exception ex)
+        {
+            hidPorts = [];
+            hidTestSucceeded = false;
+            hidTestMessage = $"读取 COM 口失败：{ex.Message}";
+        }
+    }
+
+    private async Task TestHidAsync()
+    {
+        if (!BotHidConnected)
+        {
+            hidTestSucceeded = false;
+            hidTestMessage = "Bot 当前没有打开 ESP32 HID 串口，请先保存 HID 后端配置。";
+            return;
+        }
+
+        hidTestRunning = true;
+        hidTestSucceeded = false;
+        hidTestMessage = $"正在测试 {BotHidPort}...";
+        try
+        {
+            using CancellationTokenSource timeout = new(TimeSpan.FromSeconds(3));
+            byte sequence = await wowInput.ProbeHidAsync(timeout.Token);
+            hidTestSucceeded = true;
+            hidTestMessage = $"HID 在位：{BotHidPort} 已返回 ACK（序号 {sequence}）。";
+        }
+        catch (OperationCanceledException)
+        {
+            hidTestSucceeded = false;
+            hidTestMessage = $"HID 测试超时：{BotHidPort} 未返回 ESP32 ACK。请检查设备和固件日志。";
+        }
+        catch (UnauthorizedAccessException)
+        {
+            hidTestSucceeded = false;
+            hidTestMessage = $"HID 测试失败：{BotHidPort} 的 bot 连接不可用。";
+        }
+        catch (Exception ex)
+        {
+            hidTestSucceeded = false;
+            hidTestMessage = $"HID 测试失败：{ex.Message}";
+        }
+        finally { hidTestRunning = false; }
+    }
+
 }

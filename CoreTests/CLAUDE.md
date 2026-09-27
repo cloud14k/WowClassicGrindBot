@@ -112,6 +112,20 @@ NpcNames values: `Enemy`, `Friendly`, `Neutral`, `Corpse`, `NamePlate`
 .\run.ps1 input
 ```
 
+### HidTester - ESP32-S3 GUI
+
+Run the independent .NET 8 WinForms HID tester:
+
+```powershell
+.\HidTester\run.ps1
+```
+
+It reports CDC command acknowledgements and Windows low-level keyboard/mouse
+events in separate panels. Detailed S3 `[RX]`, `[HID]`, and `[DONE]` logs are
+available only on the firmware UART monitor. PASS requires both a CDC ACK and
+the expected Windows input events. Foreground-app reactions require manual
+confirmation.
+
 ### cursor-grab - Cursor Type Classification
 
 ```powershell

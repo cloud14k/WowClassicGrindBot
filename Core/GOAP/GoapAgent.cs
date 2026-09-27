@@ -319,6 +319,18 @@ public sealed partial class GoapAgent : IDisposable
 
     private void GoapThread()
     {
+        try { RunGoapThread(); }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "GOAP worker failed; stopping the session");
+            try { Active = false; }
+            catch (Exception stopError) { logger.LogError(stopError, "Failed to stop session after GOAP worker error"); }
+        }
+    }
+
+    private void RunGoapThread()
+    {
         bool wasEmpty = false;
 
         sessionPauseEvent.Wait();

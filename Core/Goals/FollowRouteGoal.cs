@@ -47,6 +47,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly ManualResetEventSlim sideActivityManualReset;
     private readonly Thread? sideActivityThread;
     private CancellationTokenSource sideActivityCts;
+    private Exception? sideActivityFailure;
 
     private readonly PathSettings pathSettings;
     private readonly bool pathOnly;
@@ -164,7 +165,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             if (classConfig.GatherFindKeyConfig.Length > 1)
             {
-                sideActivityThread = new(Thread_AttendedGather);
+                sideActivityThread = new(() => RunSideActivity(Thread_AttendedGather)) { IsBackground = true };
                 sideActivityThread.Start();
             }
         }
@@ -172,7 +173,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         {
             if (!pathOnly)
             {
-                sideActivityThread = new(Thread_LookingForTarget);
+                sideActivityThread = new(() => RunSideActivity(Thread_LookingForTarget)) { IsBackground = true };
                 sideActivityThread.Start();
             }
         }
@@ -252,6 +253,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     public override void Update()
     {
+        if (Volatile.Read(ref sideActivityFailure) is Exception failure)
+            throw new InvalidOperationException("Route side activity failed.", failure);
+
         if (bits.Target() && bits.Target_Dead())
         {
             Log("Has target but its dead.");
@@ -274,7 +278,16 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (!sideActivityCts.IsCancellationRequested)
         {
-            navigation.Update(sideActivityCts.Token);
+            CancellationToken navigationToken = sideActivityCts.Token;
+            try
+            {
+                navigation.Update(navigationToken);
+            }
+            catch (OperationCanceledException) when (navigationToken.IsCancellationRequested)
+            {
+                // Target search cancels route movement from another thread. A timed
+                // turn can observe that cancellation before this GOAP tick ends.
+            }
         }
         else
         {
@@ -323,6 +336,17 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
         if (logger.IsEnabled(LogLevel.Debug))
             logger.LogDebug("LookingForTarget Thread stopped!");
+    }
+
+    private void RunSideActivity(Action activity)
+    {
+        try { activity(); }
+        catch (OperationCanceledException) when (sideActivityCts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Volatile.Write(ref sideActivityFailure, ex);
+            logger.LogError(ex, "Route side activity worker failed");
+        }
     }
 
     private void Thread_AttendedGather()

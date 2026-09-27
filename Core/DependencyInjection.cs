@@ -147,7 +147,6 @@ public static class DependencyInjection
         s.AddLogging();
 
         s.ForwardSingleton<CancellationTokenSource>(sp);
-
         s.ForwardSingleton<WowProcessInput>(sp);
         s.ForwardSingleton<IMouseInput>(sp);
         s.ForwardSingleton<IMouseOverReader>(sp);
@@ -241,6 +240,7 @@ public static class DependencyInjection
     public static IServiceCollection AddCoreFrontend(
         this IServiceCollection s)
     {
+        s.TryAddSingleton<InputBackendSettings>();
         s.AddSingleton<WApi>();
         s.AddSingleton<FrontendUpdate>();
 
@@ -399,6 +399,7 @@ public static class DependencyInjection
 
     public static IServiceCollection AddCoreBase(this IServiceCollection s, ILogger log)
     {
+        s.TryAddSingleton<InputBackendSettings>();
         s.AddSingleton<ManualResetEventSlim>(x => new(false));
         s.AddSingleton<Wait>();
 

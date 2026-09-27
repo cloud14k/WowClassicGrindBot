@@ -36,7 +36,7 @@ Open a new terminal after the setup. Build the project with either script:
 Build, flash, and monitor with a specific port:
 
 ```bash
-idf.py -p PORT flash monitor
+idf.py -B build-codex -p PORT flash monitor
 ```
 
 The equivalent project-local commands are:
@@ -54,14 +54,21 @@ To build, flash, and start the monitor in one command:
 
 ### Host HID test
 
-The CDC virtual port is used to send HID reports to the firmware. Install
+The CDC virtual port sends framed HID reports and receives correlated S3 debug lines. Each frame
+is `A5 report-id sequence payload-length payload xor-checksum`; keyboard payloads
+are 8 bytes, mouse payloads are 5 bytes. The bridge responds with
+`5A sequence status` after queuing the HID report and prints `[sequence][RX]`,
+`[HID]`, and `[DONE]` lines for device-side visibility. Retries with the same sequence
+are deduplicated. Install
 `pyserial` into the global Python installation if needed:
 
 ```powershell
 python -m pip install pyserial
 ```
 
-The current device was detected as `COM3` (`VID_303A&PID_4009`):
+The firmware uses the configured custom USB identity `VID_046D&PID_C07F`
+(manufacturer `Logitech`, product `Gaming Mouse G403`). Windows may assign a
+different COM number, so select the port shown by Device Manager or HidTester:
 
 ```powershell
 python .\host_test.py --port COM3 mouse --x 20 --y 30

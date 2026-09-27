@@ -15,6 +15,7 @@ using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.PixelFormats;
 
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -61,7 +62,12 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
     public Rectangle ScreenRect => screenRect;
     private Rectangle screenRect;
 
-    public Image<Bgra32> ScreenImage { get; init; }
+    public Image<Bgra32> ScreenImage { get; private set; }
+
+    // ScreenImage is read by several worker threads. Keep replaced images alive
+    // until the capture object is disposed so a reader that already obtained the
+    // old reference cannot observe a disposed image during a resize.
+    private readonly List<Image<Bgra32>> retiredScreenImages = [];
 
     private readonly SixLabors.ImageSharp.Configuration ContiguousJpegConfiguration
         = new(new JpegConfigurationModule()) { PreferContiguousImageBuffers = true };
@@ -130,6 +136,7 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
     private DataFrame[] frames = null!;
     private Image<Bgra32> addonImage = null!;
     private bool loggedInvalidAddonSentinels;
+    private bool loggedScreenSizeMismatch;
 
     public int[] Data { get; private set; } = [];
     public StringBuilder TextBuilder { get; } = new(3);
@@ -353,8 +360,26 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
         gpuTextureCopy?.Dispose();
         writeStagingTexture?.Dispose();
         readStagingTexture?.Dispose();
+        ScreenImage.Dispose();
+        foreach (Image<Bgra32> retired in retiredScreenImages)
+            retired.Dispose();
+        retiredScreenImages.Clear();
         deviceContext?.Dispose();
         device?.Dispose();
+    }
+
+    private void ResizeScreenImage(int width, int height)
+    {
+        if (width <= 0 || height <= 0 || (ScreenImage.Width == width && ScreenImage.Height == height))
+            return;
+
+        Image<Bgra32> replacement = new(ContiguousJpegConfiguration, width, height);
+        Image<Bgra32> previous = ScreenImage;
+        ScreenImage = replacement;
+        retiredScreenImages.Add(previous);
+        loggedScreenSizeMismatch = false;
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Screen image resized to {Width}x{Height}", width, height);
     }
 
     private void StopCapture()
@@ -408,6 +433,7 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
         {
             screenRect = newRect;
             clientOffset = NativeMethods.GetClientAreaOffset(process.MainWindowHandle);
+            ResizeScreenImage(screenRect.Width, screenRect.Height);
             RecreateFramePool();
         }
 
@@ -454,6 +480,13 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
         catch (SharpGenException) when (CheckDeviceRemoved())
         {
             // Device lost — silently stop capturing
+        }
+        catch (Exception ex)
+        {
+            // Window resize/DPI transitions can briefly produce a frame whose
+            // dimensions do not match the image buffer. Drop that frame instead
+            // of allowing the addon thread to terminate the bot process.
+            logger.LogWarning(ex, "Skipping invalid WGC frame {Width}x{Height}", frameSize.Width, frameSize.Height);
         }
         finally
         {
@@ -557,12 +590,34 @@ public sealed partial class WowScreenWGC : IWowScreen, IAddonDataProvider, IGpuT
         if (!ScreenImage.DangerousTryGetSinglePixelMemory(out Memory<Bgra32> memory))
             return;
 
+        // The capture item can report a transient desktop-sized frame while
+        // WoW is minimized, restored, or moved between DPI contexts. Never
+        // copy more pixels than the destination image can hold.
+        int copyWidth = Math.Min(screenRect.Width, ScreenImage.Width);
+        int copyHeight = Math.Min(screenRect.Height, ScreenImage.Height);
+        if (copyWidth <= 0 || copyHeight <= 0)
+            return;
+        if (copyWidth != screenRect.Width || copyHeight != screenRect.Height)
+        {
+            if (!loggedScreenSizeMismatch)
+            {
+                loggedScreenSizeMismatch = true;
+                logger.LogWarning(
+                    "WGC frame/window size mismatch; limiting screen copy to {CopyWidth}x{CopyHeight} (window {WindowWidth}x{WindowHeight}, image {ImageWidth}x{ImageHeight})",
+                    copyWidth, copyHeight, screenRect.Width, screenRect.Height, ScreenImage.Width, ScreenImage.Height);
+            }
+        }
+        else
+        {
+            loggedScreenSizeMismatch = false;
+        }
+
         // Copy client area (offset past title bar/borders)
-        if (!RegionFitsInFrame(clientOffset.X, clientOffset.Y, screenRect.Width, screenRect.Height, frameSize))
+        if (!RegionFitsInFrame(clientOffset.X, clientOffset.Y, copyWidth, copyHeight, frameSize))
             return;
 
         Span<byte> dest = MemoryMarshal.Cast<Bgra32, byte>(memory.Span);
-        ScreenCaptureHelper.CopyRegion(fullFrame, rowPitch, clientOffset.X, clientOffset.Y, dest, screenRect.Width, screenRect.Height);
+        ScreenCaptureHelper.CopyRegion(fullFrame, rowPitch, clientOffset.X, clientOffset.Y, dest, copyWidth, copyHeight);
 
 #if SAVE_SCREEN_IMAGE
         ScreenImage.SaveAsJpeg("screen_wgc.jpg");
