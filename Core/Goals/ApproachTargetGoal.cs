@@ -76,6 +76,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
     private readonly IBlacklist targetBlacklist;
     private readonly CombatLog combatLog;
     private readonly ApproachExecutor approachExecutor;
+    private readonly bool selectedTargetOnly;
 
     private long approachStart;
 
@@ -110,7 +111,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         IBlacklist blacklist,
         IMountHandler mountHandler,
         CombatLog combatLog,
-        ApproachExecutor approachExecutor)
+        ApproachExecutor approachExecutor, bool selectedTargetOnly = false)
         : base(nameof(ApproachTargetGoal))
     {
         this.logger = logger;
@@ -126,6 +127,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
         this.targetBlacklist = blacklist;
         this.combatLog = combatLog;
         this.approachExecutor = approachExecutor;
+        this.selectedTargetOnly = selectedTargetOnly;
 
         AddPrecondition(GoapKey.hastarget, true);
         AddPrecondition(GoapKey.targetisalive, true);
@@ -256,7 +258,7 @@ public sealed partial class ApproachTargetGoal : GoapGoal, IGoapEventListener
             return;
         }
 
-        if (UpdateCloserTargetProbe())
+        if (!selectedTargetOnly && UpdateCloserTargetProbe())
         {
             return;
         }

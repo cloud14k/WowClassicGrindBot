@@ -127,6 +127,8 @@
     private static IEnumerator<(BadgeColor color, string text)> DisplayRequirementBadges(Requirement requirement)
     {
         var renderText = requirement.LogMessage();
+        if (!requirement.BlocksAction)
+            renderText += " (不拦截)";
 
         List<(BadgeColor color, string text)> items = new();
 

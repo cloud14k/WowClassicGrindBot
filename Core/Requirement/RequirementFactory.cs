@@ -395,7 +395,10 @@ public sealed partial class RequirementFactory
             {
                 list.Add(
                     CreateActionUsable(item, playerReader,
-                    classConfig.Form, costReader, usableAction));
+                    classConfig.Form, costReader, usableAction,
+                    // This check is shown in the UI but must not prevent an
+                    // action from being attempted; the game can still reject it.
+                    blocksAction: false));
 
                 list.Add(CreateActionCurrent(item, currentAction));
             }
@@ -961,7 +964,8 @@ public sealed partial class RequirementFactory
     private Requirement CreateActionUsable(KeyAction item,
         PlayerReader playerReader, FormKeyActions forms,
         ActionBarCostReader costReader,
-        ActionBarBits<IUsableAction> usableAction)
+        ActionBarBits<IUsableAction> usableAction,
+        bool blocksAction = true)
     {
         bool CanDoFormChange()
         {
@@ -991,7 +995,8 @@ public sealed partial class RequirementFactory
         return new Requirement
         {
             HasRequirement = f,
-            LogMessage = s
+            LogMessage = s,
+            BlocksAction = blocksAction
         };
     }
 

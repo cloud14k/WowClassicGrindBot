@@ -25,6 +25,7 @@ public sealed class CombatGoal : GoapGoal
     private readonly CombatLog combatLog;
     private readonly ActionBarCastTimeReader castTimeReader;
     private readonly ThreatFinder threatFinder;
+    private readonly bool selectedTargetOnly;
 
     private float lastDirection;
     private float lastMinDistance;
@@ -36,10 +37,11 @@ public sealed class CombatGoal : GoapGoal
         CastingHandler castingHandler, CombatLog combatLog,
         IMountHandler mountHandler,
         ActionBarCastTimeReader castTimeReader,
-        ThreatFinder threatFinder)
+        ThreatFinder threatFinder, bool selectedTargetOnly = false)
         : base(nameof(CombatGoal))
     {
         this.threatFinder = threatFinder;
+        this.selectedTargetOnly = selectedTargetOnly;
 
         this.logger = logger;
         this.input = input;
@@ -126,7 +128,7 @@ public sealed class CombatGoal : GoapGoal
             return;
         }
 
-        if (bits.SoftInteract_Enabled())
+        if (!selectedTargetOnly && bits.SoftInteract_Enabled())
         {
             threatFinder.UnstuckDeadSoftTargetLock();
         }
@@ -173,7 +175,7 @@ public sealed class CombatGoal : GoapGoal
         {
             logger.LogInformation("Lost target!");
 
-            if (combatLog.DamageTakenCount() > 0)
+            if (!selectedTargetOnly && combatLog.DamageTakenCount() > 0)
             {
                 if (bits.Target() && bits.Target_Dead())
                 {

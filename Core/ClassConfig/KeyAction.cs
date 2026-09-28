@@ -348,6 +348,9 @@ public sealed partial class KeyAction
         ReadOnlySpan<Requirement> span = RequirementsRuntime;
         for (int i = 0; i < span.Length; i++)
         {
+            if (!span[i].BlocksAction)
+                continue;
+
             if (!span[i].HasRequirement())
                 return canRun = false;
         }

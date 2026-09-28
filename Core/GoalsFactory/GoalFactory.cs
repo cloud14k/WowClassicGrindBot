@@ -27,7 +27,8 @@ namespace Core;
 public static class GoalFactory
 {
     /// <summary>Optional behavior-module allow-list used by the interactive behavior test page.</summary>
-    public sealed record TestModules(bool PathMove, bool Wait, bool Pull, bool Combat, bool Adhoc, bool Loot, bool NPC);
+    public sealed record TestModules(bool PathMove, bool Wait, bool Pull, bool Combat, bool Adhoc, bool Loot, bool NPC,
+        bool Wander = false, int WanderRadius = 50, Vector3 WanderCenter = default, bool TargetCombat = false);
 
     public static IServiceProvider Create(
         IServiceCollection services,
@@ -135,35 +136,46 @@ public static class GoalFactory
         // Behavior tests register only the explicitly selected modules.
         if (testModules != null)
         {
-            // A normal Grind route both moves and runs the TargetFinder side
-            // activity. Pull/Combat need that acquisition loop; the Path Move
-            // checkbox by itself deliberately uses pathOnly to suppress it.
-            if (testModules.PathMove || testModules.Pull || testModules.Combat)
+            bool combatEnabled = testModules.Combat || testModules.TargetCombat;
+            // Combat keeps its Pull/Approach lifecycle, but does not inherit the
+            // profile's route. Follow Route is enabled only by an explicit Path
+            // Move selection, or by a standalone Pull test.
+            if (testModules.PathMove || (testModules.Pull && !combatEnabled && !testModules.Wander))
                 ResolveFollowRouteGoal(services, classConfig,
-                    pathOnly: !testModules.Pull && !testModules.Combat);
+                    pathOnly: testModules.TargetCombat || (!testModules.Pull && !testModules.Combat));
+            if (testModules.Wander)
+                services.AddScoped<GoapGoal>(provider => ActivatorUtilities.CreateInstance<WanderGoal>(provider,
+                    testModules.WanderCenter, testModules.WanderRadius,
+                    testModules.Combat || (testModules.Pull && !testModules.TargetCombat)));
             if (testModules.Wait) ResolveWaitGoal(services, classConfig);
-            // Combat is an encounter-level test: once a target is selected, it
-            // must be able to pull it, approach into range, and then run the
-            // class rotation. Keep Pull selectable on its own for isolated tests.
-            if (testModules.Pull || testModules.Combat)
+            if (testModules.Pull || combatEnabled)
             {
                 services.AddScoped<GoapGoal, PullTargetGoal>();
-                services.AddScoped<GoapGoal, ApproachTargetGoal>();
+                if (testModules.TargetCombat)
+                    services.AddScoped<GoapGoal>(provider =>
+                        ActivatorUtilities.CreateInstance<ApproachTargetGoal>(provider, true));
+                else
+                    services.AddScoped<GoapGoal, ApproachTargetGoal>();
                 services.AddScoped<GoapGoal, ApproachRecoveryGoal>();
             }
-            if (testModules.Combat)
+            if (combatEnabled)
             {
-                services.AddScoped<GoapGoal, CombatGoal>();
-                services.AddScoped<GoapGoal, FindThreatGoal>();
+                if (testModules.Combat && !testModules.Wander)
+                    services.AddScoped<GoapGoal, FindNearbyTargetGoal>();
+                if (testModules.TargetCombat)
+                    services.AddScoped<GoapGoal>(provider =>
+                        ActivatorUtilities.CreateInstance<CombatGoal>(provider, true));
+                else
+                    services.AddScoped<GoapGoal, CombatGoal>();
+                if (testModules.Combat)
+                    services.AddScoped<GoapGoal, FindThreatGoal>();
             }
             if (testModules.Adhoc) ResolveAdhocGoals(services, classConfig);
-            bool includeLoot = testModules.Loot || testModules.Combat;
-            if (includeLoot && classConfig.Loot)
+            if ((testModules.Loot || combatEnabled) && classConfig.Loot)
             {
-                // These two state-machine goals are part of Loot's normal
-                // lifecycle: consume the produced corpse, enable loot, then
-                // clear the consume state after LootGoal finishes. Combat
-                // includes this complete post-kill lifecycle by design.
+                // These state-machine goals consume the corpse produced by
+                // CombatGoal, enable loot, then clear the consume state. Combat
+                // tests retain the complete post-kill loot lifecycle.
                 services.AddScoped<GoapGoal, ConsumeCorpseGoal>();
                 services.AddScoped<GoapGoal, LootGoal>();
                 if (classConfig.GatherCorpse)

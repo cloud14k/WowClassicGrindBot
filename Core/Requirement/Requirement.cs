@@ -17,4 +17,5 @@ public sealed class Requirement
     public Func<bool> HasRequirement { get; set; } = False;
     public Func<string> LogMessage { get; set; } = Default;
     public bool VisibleIfHasRequirement { get; init; }
+    public bool BlocksAction { get; init; } = true;
 }

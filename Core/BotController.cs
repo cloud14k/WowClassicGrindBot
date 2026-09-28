@@ -681,14 +681,36 @@ public sealed partial class BotController : IBotController, IDisposable
     /// <summary>Builds a behavior-test session from the source profile and the supplied in-memory module selection.</summary>
     public void CreateBehaviorTestSession(string classFilename, string? routeFilename, GoalFactory.TestModules modules)
     {
+        if (modules.Combat && modules.TargetCombat)
+            throw new InvalidOperationException("Combat 与选 target combat 不能同时启用。");
+
+        if (modules.Wander)
+        {
+            if (modules.WanderRadius is < 5 or > 1000)
+                throw new ArgumentOutOfRangeException(nameof(modules), "漫游半径须在 5 到 1000 码之间。");
+            int uiMapId = playerReader.UIMapId.Value;
+            if (uiMapId <= 0 || playerReader.WorldMapArea.UIMapId != uiMapId ||
+                !float.IsFinite(playerReader.MapX) || !float.IsFinite(playerReader.MapY) ||
+                playerReader.MapX is < 0 or > 100 || playerReader.MapY is < 0 or > 100)
+                throw new InvalidOperationException("尚未读取角色地图位置，无法开始漫游。");
+            modules = modules with { WanderCenter = playerReader.WorldPos };
+        }
+
         if (GoapAgent?.Active == true)
             GoapAgent.Active = false;
 
         ClassConfiguration config = ReadClassConfiguration(classFilename);
         config.Mode = Mode.Grind;
-        // The Combat test preset represents a complete encounter lifecycle,
-        // including post-kill looting. Loot remains independently selectable.
-        config.Loot = modules.Loot || modules.Combat;
+        config.Loot = modules.Loot || modules.Combat || modules.TargetCombat;
+        if (modules.Wander || ((modules.Combat || modules.TargetCombat) && !modules.PathMove && !modules.Pull))
+        {
+            // A test without Path Move uses no class-profile route. This also
+            // keeps selected-target combat from inheriting automatic path search.
+            config.PathFilename = string.Empty;
+            config.OverridePathFilename = string.Empty;
+            config.Paths = [];
+            config.PathsFilenames = [];
+        }
         if (!string.IsNullOrWhiteSpace(routeFilename))
         {
             // A manual route override is a session-local, standalone route. It must
