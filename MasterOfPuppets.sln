@@ -36,7 +36,7 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "HeadlessServer", "HeadlessS
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Benchmarks", "Benchmarks\Benchmarks.csproj", "{488984A0-F158-4EDA-A2CB-57C10D8596E1}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "CoreTests", "CoreTests", "{FCD10AB2-7329-D65A-A6D2-C1F532871A67}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Test Tools", "Test Tools", "{FCD10AB2-7329-D65A-A6D2-C1F532871A67}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HidTester", "CoreTests\HidTester\HidTester.csproj", "{5AC8EBE9-1776-455A-BE45-7334F6817473}"
 EndProject

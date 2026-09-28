@@ -1,10 +1,12 @@
 ﻿using Core.Goals;
 using Core.Session;
+using Core.Decision;
 using Core.Training;
 
 using Game;
 
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.DependencyInjection;
 
 using SharedLib;
 using SharedLib.Extensions;
@@ -47,6 +49,14 @@ public sealed partial class GoapAgent : IDisposable
     private readonly TrainingRecorder trainingRecorder;
     private readonly NpcNameFinder npcNameFinder;
     private readonly StuckDetector stuckDetector;
+    private readonly DecisionManager decisionManager;
+    private readonly DecisionSettings decisionSettings;
+    private readonly AIServiceStatus aiStatus;
+    private readonly IServiceProvider services;
+    private AiController? aiController;
+    private AiController AI => aiController ??= services.GetRequiredService<AiController>();
+    private CancellationTokenSource? aiRequest;
+    private readonly List<CancellationTokenSource> aiRequests = new();
 
     private readonly Thread goapThread;
     private readonly CancellationTokenSource<GoapAgent> cts;
@@ -86,6 +96,8 @@ public sealed partial class GoapAgent : IDisposable
                 active = value;
                 if (!active)
                 {
+                    aiRequest?.Cancel();
+                    aiController?.Stop();
                     paused = false;
                     sessionPauseEvent.Reset();
                     controlWakeEvent.Set();
@@ -102,6 +114,8 @@ public sealed partial class GoapAgent : IDisposable
                 else
                 {
                     paused = false;
+                    if (decisionManager.Mode == DecisionMode.AI)
+                        AI.Waiting();
                     addonReader.SessionReset();
                     SessionStat.Reset();
 
@@ -134,6 +148,8 @@ public sealed partial class GoapAgent : IDisposable
                 return;
 
             paused = true;
+            aiRequest?.Cancel();
+            aiController?.Stop();
             sessionPauseEvent.Reset();
             controlWakeEvent.Set();
 
@@ -223,7 +239,11 @@ public sealed partial class GoapAgent : IDisposable
         IEnumerable<GoapGoal> availableGoals,
         TrainingRecorder trainingRecorder,
         NpcNameFinder npcNameFinder,
-        StuckDetector stuckDetector
+        StuckDetector stuckDetector,
+        DecisionManager decisionManager,
+        DecisionSettings decisionSettings,
+        AIServiceStatus aiStatus,
+        IServiceProvider services
         )
     {
         this.routeInfo = routeInfo;
@@ -258,6 +278,10 @@ public sealed partial class GoapAgent : IDisposable
         trainingRecorder.ConfigureSession(classConfiguration);
         this.npcNameFinder = npcNameFinder;
         this.stuckDetector = stuckDetector;
+        this.decisionManager = decisionManager;
+        this.decisionSettings = decisionSettings;
+        this.aiStatus = aiStatus;
+        this.services = services;
 
         this.sessionHandler = sessionHandler;
 
@@ -283,6 +307,7 @@ public sealed partial class GoapAgent : IDisposable
         }
 
         sessionPauseEvent = new(false);
+        decisionSettings.Changed += OnDecisionChanged;
         goapThread = new(GoapThread);
         goapThread.Start();
     }
@@ -295,6 +320,7 @@ public sealed partial class GoapAgent : IDisposable
             Active = false;
 
         cts.Cancel();
+        aiRequest?.Cancel();
         sessionPauseEvent.Set();
         controlWakeEvent.Set();
 
@@ -318,6 +344,9 @@ public sealed partial class GoapAgent : IDisposable
 
         combatLog.KillCredit -= OnKillCredit;
         combatLog.PlayerDeath -= PlayerDied;
+        decisionSettings.Changed -= OnDecisionChanged;
+        foreach (CancellationTokenSource request in aiRequests)
+            request.Dispose();
 
         sessionPauseEvent.Dispose();
         controlWakeEvent.Dispose();
@@ -349,6 +378,11 @@ public sealed partial class GoapAgent : IDisposable
 
         while (!cts.IsCancellationRequested)
         {
+            if (decisionManager.Mode == DecisionMode.AI)
+            {
+                RunAiTick();
+                continue;
+            }
             bool waitForSession = false;
             lock (controlSync)
             {
@@ -386,6 +420,7 @@ public sealed partial class GoapAgent : IDisposable
                             CurrentGoal = newGoal;
 
                             LogNewGoal(logger, newGoal.Name);
+                            logger.LogInformation("DecisionMode=Local ExecutedSource=Local Goal={Goal}", newGoal.Name);
                             CurrentGoal.OnEnter();
                         }
 
@@ -579,12 +614,15 @@ public sealed partial class GoapAgent : IDisposable
         State.LastCombatKillCount++;
         State.ConsumableCorpseCount++;
 
-        BroadcastGoapEvent(GoapKey.producedcorpse, true);
+        if (decisionManager.Mode == DecisionMode.Local)
+            BroadcastGoapEvent(GoapKey.producedcorpse, true);
 
         // Corpse discovery belongs to session kill tracking, not CombatGoal.
         // Loot-only test sessions must still receive the corpse POI without
         // registering or running the combat action goal.
         int deadGuid = combatLog.DeadGuid.Value;
+        if (decisionManager.Mode == DecisionMode.AI)
+            State.PendingLootGuid = deadGuid;
         bool hasMatchingTargetSnapshot = hasLastCorpseTarget && lastCorpseTargetGuid == deadGuid;
         float distance = hasMatchingTargetSnapshot
             ? lastCorpseDistance
@@ -596,12 +634,15 @@ public sealed partial class GoapAgent : IDisposable
             playerReader.WorldPos,
             direction,
             distance);
-        BroadcastGoapEvent(new CorpseEvent(
-            corpsePosition,
-            distance,
-            direction,
-            playerPosition,
-            deadGuid));
+        if (decisionManager.Mode == DecisionMode.Local)
+            BroadcastGoapEvent(new CorpseEvent(
+                corpsePosition,
+                distance,
+                direction,
+                playerPosition,
+                deadGuid));
+        else
+            corpseTracker.AddCorpse(deadGuid, corpsePosition);
 
         if (logger.IsEnabled(LogLevel.Information))
         {
@@ -619,6 +660,79 @@ public sealed partial class GoapAgent : IDisposable
     private void BroadcastGoapEvent(GoapKey goapKey, bool value)
     {
         BroadcastGoapEvent(new GoapStateEvent(goapKey, value));
+    }
+
+    private void RunAiTick()
+    {
+        CancellationToken token = default;
+        bool waitForSession;
+        lock (controlSync)
+        {
+            waitForSession = !active || paused || decisionManager.Mode != DecisionMode.AI;
+            if (!waitForSession)
+            {
+                if (aiRequest is null || aiRequest.IsCancellationRequested)
+                {
+                    aiRequest = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+                    aiRequests.Add(aiRequest);
+                }
+                token = aiRequest.Token;
+            }
+        }
+        if (waitForSession)
+        {
+            try { sessionPauseEvent.Wait(100, cts.Token); }
+            catch (OperationCanceledException) { }
+            return;
+        }
+
+        bool failed = false;
+        try
+        {
+            AIObservation observation = AI.Observe();
+            AIDecisionRequest request = AI.Prepare(observation);
+            DecisionResult decision = decisionManager.DecideAsync(request, token).GetAwaiter().GetResult();
+            lock (controlSync)
+            {
+                if (active && !paused && decisionManager.Mode == DecisionMode.AI && !token.IsCancellationRequested)
+                    AI.Apply(decision, token);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            failed = true;
+            lock (controlSync)
+            {
+                if (active && !paused && decisionManager.Mode == DecisionMode.AI)
+                    AI.Failure(ex);
+            }
+        }
+        // A failed service call never enters GOAP. Wake on mode change or retry.
+        controlWakeEvent.Wait(failed ? 1000 : decisionSettings.Current.Laya.MinimumIntervalMs);
+        controlWakeEvent.Reset();
+    }
+
+    private void OnDecisionChanged(DecisionConfiguration config)
+    {
+        lock (controlSync)
+        {
+            aiRequest?.Cancel();
+            aiController?.Stop();
+            if (config.Mode == DecisionMode.AI)
+            {
+                if (active) AI.Waiting();
+                else aiStatus.Set(aiStatus.Current with { Connected = false, Running = false,
+                    CurrentAction = null, LastError = "Waiting for Laya decision" });
+            }
+            CurrentGoal?.OnExit();
+            CurrentGoal = null;
+            Plan.Clear();
+            input.Reset();
+            logger.LogInformation("DecisionMode={DecisionMode} ExecutedSource={ExecutedSource}",
+                config.Mode, config.Mode == DecisionMode.Local ? "Local" : "AI");
+            controlWakeEvent.Set();
+        }
     }
 
     private void BroadcastGoapEvent(GoapEventArgs args)

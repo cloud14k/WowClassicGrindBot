@@ -8,6 +8,8 @@
 @inject StartupClientVersion client
 @inject IJSRuntime JSRuntime
 @inject IconDB iconDB
+@inject IServiceProvider Services
+@using Core.Decision
 
 @implements IDisposable
 
@@ -26,6 +28,17 @@
     </SidebarSection>
 
     <ContentSection>
+        @if (decisionSettings?.Current.Mode == DecisionMode.AI && aiStatus is not null && !aiStatus.Current.Connected)
+        {
+            <div class="alert alert-danger m-2" role="alert">
+                <strong>Decision Mode: AI · AI Service: DISCONNECTED · AI Control: Paused</strong>
+                @if (!string.IsNullOrWhiteSpace(aiStatus.Current.LastError))
+                {
+                    <div>Last Error: @aiStatus.Current.LastError</div>
+                }
+                <div>Reconnect Status: retrying automatically</div>
+            </div>
+        }
         @Body
     </ContentSection>
 </BlazorBootstrapLayout>
@@ -34,6 +47,8 @@
     private Sidebar2 sidebar = null!;
     private List<NavItem> navItems = [];
     private bool firstRenderComplete;
+    private DecisionSettings? decisionSettings;
+    private AIServiceStatus? aiStatus;
 
     private bool AddonConfigExists => AddonConfig.Exists() && addonConfigurator.Installed();
     private bool HideClassConfig => botController.IsBotActive || botController.ClassConfig == null;
@@ -42,6 +57,10 @@
 
     protected override void OnInitialized()
     {
+        decisionSettings = Services.GetService(typeof(DecisionSettings)) as DecisionSettings;
+        aiStatus = Services.GetService(typeof(AIServiceStatus)) as AIServiceStatus;
+        if (decisionSettings is not null) decisionSettings.Changed += OnDecisionChanged;
+        if (aiStatus is not null) aiStatus.Changed += OnAiStatusChanged;
         addonConfigurator.OnChange += OnChanged;
         botController.ProfileLoaded += OnProfileLoaded;
         botController.StatusChanged += OnChanged;
@@ -76,10 +95,15 @@
 
     public void Dispose()
     {
+        if (decisionSettings is not null) decisionSettings.Changed -= OnDecisionChanged;
+        if (aiStatus is not null) aiStatus.Changed -= OnAiStatusChanged;
         addonConfigurator.OnChange -= OnChanged;
         botController.ProfileLoaded -= OnProfileLoaded;
         botController.StatusChanged -= OnChanged;
     }
+
+    private void OnDecisionChanged(DecisionConfiguration configuration) => _ = InvokeAsync(StateHasChanged);
+    private void OnAiStatusChanged() => _ = InvokeAsync(StateHasChanged);
 
     private void OnChanged()
     {

@@ -4,7 +4,9 @@
 @inject IJSRuntime JSRuntime
 @inject IServiceProvider Services
 @inject WowProcessInput wowInput
+@implements IDisposable
 @using Core.Training
+@using Core.Decision
 @using Game
 @using HidShared
 
@@ -66,6 +68,47 @@
 </Card>
 
 <Card class="mt-2">
+    <CardHeader>AI 决策</CardHeader>
+    <CardBody>
+        <div class="d-flex flex-wrap gap-3 align-items-end">
+            <label>Decision Mode
+                <select class="form-select" @bind="decisionMode">
+                    <option value="Local">Local</option>
+                    <option value="AI">AI</option>
+                </select>
+            </label>
+            <label>Laya 地址
+                <input class="form-control" @bind="layaBaseUrl" />
+            </label>
+            <label>超时 (ms)
+                <input class="form-control" type="number" min="50" max="5000" @bind="layaTimeoutMs" />
+            </label>
+            <label>最小置信度
+                <input class="form-control" type="number" min="0" max="1" step="0.05" @bind="layaMinimumConfidence" />
+            </label>
+            <label>最小决策间隔 (ms)
+                <input class="form-control" type="number" min="100" max="10000" @bind="layaIntervalMs" />
+            </label>
+        </div>
+        <button class="btn btn-primary mt-2" @onclick="SaveDecision" disabled="@(decisionSettings is null)">保存并立即生效</button>
+        <div class="mt-2">Decision Mode: @effectiveDecisionSource</div>
+        @if (effectiveDecisionSource == "AI" && aiStatus is not null)
+        {
+            <div class="alert @(aiStatus.Current.Connected ? "alert-success" : "alert-danger") mt-2" role="alert">
+                AI Service: @(aiStatus.Current.Connected ? "Connected" : "DISCONNECTED")；
+                AI Control: @(aiStatus.Current.Running ? "Running" : "Paused")；
+                Current Action: @(aiStatus.Current.CurrentAction?.ToString() ?? "-")；
+                Confidence: @(aiStatus.Current.Confidence?.ToString("F2") ?? "-")；
+                Latency: @(aiStatus.Current.LatencyMs?.ToString() ?? "-") ms；
+                Last Error: @(aiStatus.Current.LastError ?? "-")；
+                Last Successful AI Decision: @(aiStatus.Current.LastSuccessfulDecisionTime?.ToLocalTime().ToString("G") ?? "-")
+            </div>
+        }
+        @if (decisionError is not null) { <div class="text-danger small">@decisionError</div> }
+    </CardBody>
+</Card>
+
+<Card class="mt-2">
     <CardHeader>Icon CDN Region</CardHeader>
     <CardBody>
         <p class="text-muted small">Select the closest CDN for faster icon loading.</p>
@@ -89,6 +132,22 @@
     private TrainingCollectionSettings? trainingSettings;
     private bool trainingEnabled;
     private string? trainingError;
+    private DecisionSettings? decisionSettings;
+    private AIServiceStatus? aiStatus;
+    private string decisionMode = "Local";
+    private string layaBaseUrl = "http://127.0.0.1:8000";
+    private int layaTimeoutMs = 250;
+    private int layaIntervalMs = 300;
+    private double layaMinimumConfidence = 0.7;
+    private string? decisionError;
+    private string effectiveDecisionSource
+    {
+        get
+        {
+            DecisionConfiguration? active = decisionSettings?.Current;
+            return active?.Mode.ToString() ?? "Local";
+        }
+    }
     private InputBackendSettings? inputSettings;
     private string inputBackend = "Windows";
     private string hidPort = "COM3";
@@ -107,6 +166,18 @@
         {
             trainingSettings = Services.GetService(typeof(TrainingCollectionSettings))
                 as TrainingCollectionSettings;
+            decisionSettings = Services.GetService(typeof(DecisionSettings)) as DecisionSettings;
+            aiStatus = Services.GetService(typeof(AIServiceStatus)) as AIServiceStatus;
+            if (aiStatus is not null) aiStatus.Changed += OnAiStatusChanged;
+            if (decisionSettings is not null)
+            {
+                DecisionConfiguration decision = decisionSettings.Current;
+                decisionMode = decision.Mode.ToString();
+                layaBaseUrl = decision.Laya.BaseUrl;
+                layaTimeoutMs = decision.Laya.TimeoutMs;
+                layaIntervalMs = decision.Laya.MinimumIntervalMs;
+                layaMinimumConfidence = decision.Laya.MinimumConfidence;
+            }
             inputSettings = Services.GetService(typeof(InputBackendSettings)) as InputBackendSettings;
             inputBackend = inputSettings?.Backend ?? "Windows";
             hidPort = inputSettings?.Port ?? "COM3";
@@ -140,6 +211,33 @@
             trainingEnabled = trainingSettings?.EnableTrainingDataCollection ?? false;
             trainingError = ex.Message;
         }
+    }
+
+    private void SaveDecision()
+    {
+        try
+        {
+            DecisionMode mode = Enum.Parse<DecisionMode>(decisionMode, true);
+            decisionSettings?.Save(new DecisionConfiguration
+            {
+                Mode = mode,
+                Laya = new LayaSettings
+                {
+                    BaseUrl = layaBaseUrl,
+                    TimeoutMs = layaTimeoutMs,
+                    MinimumIntervalMs = layaIntervalMs,
+                    MinimumConfidence = layaMinimumConfidence
+                }
+            });
+            decisionError = null;
+        }
+        catch (Exception ex) { decisionError = ex.Message; }
+    }
+
+    private void OnAiStatusChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose()
+    {
+        if (aiStatus is not null) aiStatus.Changed -= OnAiStatusChanged;
     }
 
     private void SaveInputBackend()

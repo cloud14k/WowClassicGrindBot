@@ -326,4 +326,5 @@ CoreTests/routegen-out/
 
 # Opt-in raw AI training sessions
 **/training-data/
+**/decision-settings.json
 *.7z

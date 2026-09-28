@@ -102,6 +102,11 @@ public sealed partial class Navigation : IDisposable
 
     private int failedAttempt;
     private Vector3 lastFailedDestination;
+    private int waypointBatchCount;
+    private int routeGeneration;
+    private bool routeBlocked;
+
+    public string? RouteFile { get; set; }
 
     // Closed-loop follower for dense navmesh splines. Engaged only when the
     // pather emits smoothed paths AND the master env switch is on; the legacy
@@ -199,6 +204,9 @@ public sealed partial class Navigation : IDisposable
     public void Update(CancellationToken token)
     {
         active = true;
+
+        if (routeBlocked)
+            return;
 
         if (wayPoints.Count == 0 && routeToNextWaypoint.Count == 0)
         {
@@ -594,6 +602,13 @@ public sealed partial class Navigation : IDisposable
 
     public void SetWayPoints(Span<Vector3> points)
     {
+        routeGeneration++;
+        routeBlocked = false;
+        waypointBatchCount = points.Length;
+        failedAttempt = 0;
+        lastFailedDestination = Vector3.Zero;
+        lastWorldDistance = float.MaxValue;
+        stuckDetector.ResetForNewRoute();
         wayPoints.Clear();
         routeToNextWaypoint.Clear();
         spline.Clear();
@@ -655,13 +670,23 @@ public sealed partial class Navigation : IDisposable
         Vector3 targetW = wayPoints.Peek();
         float distance = playerW.WorldDistanceXYTo(targetW);
 
+        if (logger.IsEnabled(LogLevel.Information))
+            logger.LogInformation("Navigate: RouteFile={RouteFile} WaypointIndex={WaypointIndex} Target={Target}",
+                RouteFile, waypointBatchCount - wayPoints.Count, targetW);
+
         if (distance > MaxDistance || distance > AvgDistance * 2)
         {
             if (debug)
                 LogDebug($"Distance: {distance} vs Avg:({AvgDistance * 2},{AvgDistance}) - TAVG: {DIFF_THRESHOLD * AvgDistance} ");
 
             stopMoving.Stop();
-            PathRequest(new PathRequest(playerReader.UIMapId.Value, bits.Indoors(), playerW, targetW, distance, PathCalculatedCallback));
+            int generation = routeGeneration;
+            PathRequest(new PathRequest(playerReader.UIMapId.Value, bits.Indoors(), playerW, targetW,
+                distance, result =>
+                {
+                    if (generation == routeGeneration)
+                        PathCalculatedCallback(result);
+                }));
         }
         else
         {
@@ -711,6 +736,22 @@ public sealed partial class Navigation : IDisposable
             }
 
             failedAttempt++;
+
+            if (failedAttempt >= 3 && result.EndW.Z == 0 &&
+                pather is LocalPathingApi && pather.PathsAreSmoothed)
+            {
+                routeBlocked = true;
+                stopMoving.Stop();
+                spline.Clear();
+                ReleaseTurnKeys();
+                logger.LogError("Unreachable waypoint detected: RouteFile={RouteFile} " +
+                    "Index={WaypointIndex} X={X} Y={Y} Z={Z}. " +
+                    "No path after {Attempts} attempts; navigation suspended until a new route is set.",
+                    RouteFile, waypointBatchCount - wayPoints.Count,
+                    result.EndW.X, result.EndW.Y, result.EndW.Z, failedAttempt);
+                OnNoPathFound?.Invoke();
+                return;
+            }
 
             if (failedAttempt == 1 && bits.Indoors())
             {

@@ -135,6 +135,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         pathSettings.Finished = () => !navigation.HasWaypoint();
 
         this.navigation = navigation;
+        navigation.RouteFile = pathSettings.FileName;
         navigation.OnPathCalculated += Navigation_OnPathCalculated;
         navigation.OnDestinationReached += Navigation_OnDestinationReached;
         navigation.OnWayPointReached += Navigation_OnWayPointReached;

@@ -590,6 +590,39 @@ run.bat --Reader:Type=WGC --Pathing:Mode=Local --Reader:UseGpu=true
 
 These properties can also be edited directly in `BaoServer/appsettings.json`.
 
+### Optional AI decision mode
+
+`Decision:Mode` is `Local` by default; `AI` runs a separate controller that
+asks Laya for each action. Local continues through GOAP and the existing goals.
+The default `Decision:Laya:BaseUrl` is `http://127.0.0.1:8000`, with a 250 ms
+timeout, 300 ms minimum request interval, and 0.7 minimum confidence.
+
+The **Settings** page contains the mode and Laya settings. Saving writes
+`decision-settings.json` and switches the active session immediately. The
+**Log** page records `DecisionMode` and `ExecutedSource`. If Laya fails, AI
+control stops, releases input, shows a red service alert, and retries without
+running GOAP. A successful new decision resumes AI control.
+
+The service receives `POST /decision` with `objective`, `currentObservation`,
+`recentHistory`, `lastActionResult`, `availableCapabilities`, and a fixed
+`question`. A response is `{"action":"Wait","confidence":0.9}`. Supported
+actions are `AcquireTarget`, `ApproachTarget`, `MoveAwayFromTarget`,
+`StopMovement`, `StartAutoShot`, `CastRaptorStrike`, `Wait`,
+`ContinueCurrentAction`, `Flee`, `Loot`, and `ContinueRoute`. Existing input,
+casting, approach, and navigation code execute them.
+
+Read-only diagnostic commands:
+
+```powershell
+dotnet run --project CoreTests/CoreTests.csproj -- decision
+dotnet run --project CoreTests/CoreTests.csproj -- decision watch
+dotnet run --project CoreTests/CoreTests.csproj -- decision --file CoreTests/states/hunter_combat.json
+dotnet run --project CoreTests/CoreTests.csproj -- decision selftest
+```
+
+Live diagnostics and the offline JSON file send a read-only `AIObservation` to
+Laya. They do not execute the returned action.
+
 ## BlazorServer Dashboard
 
 ## Optional - Running HeadlessServer

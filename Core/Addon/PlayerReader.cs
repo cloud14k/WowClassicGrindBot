@@ -278,6 +278,9 @@ public sealed partial class PlayerReader : IMouseOverReader, IReader
         if (UIMapId.Updated(reader) && UIMapId.Value != 0 &&
             worldMapAreaDB.TryGet(UIMapId.Value, out WorldMapArea wma))
         {
+            // The addon reports map X/Y but no player height. Height inferred on the
+            // previous map must not be reused after a zone/map transition.
+            WorldPosZ = 0;
             WorldMapArea = wma;
             MapId = wma.MapID;
 

@@ -25,6 +25,10 @@
 
         <ActionBarValidationBadge />
     </div>
+    @if (!string.IsNullOrEmpty(LoadError))
+    {
+        <div class="card-body text-danger small">@LoadError</div>
+    }
 </div>
 
 @code {
@@ -36,6 +40,7 @@
 
     private string Selected { get; set; } = string.Empty;
     private bool DisableLoadButton { get; set; } = true;
+    private string? LoadError;
 
     private FileSystemWatcher watcher = null!;
 
@@ -84,7 +89,9 @@
         if (string.IsNullOrEmpty(Selected))
             return;
 
-        botController.LoadClassProfile(Selected);
+        LoadError = botController.LoadClassProfile(Selected)
+            ? null
+            : "Class profile failed to load. Check the BaoServer log for details.";
     }
 
     private void OnListBoxChanged(ChangeEventArgs changeEventArgs)

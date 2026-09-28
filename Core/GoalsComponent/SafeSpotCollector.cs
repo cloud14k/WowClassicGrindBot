@@ -36,11 +36,14 @@ public sealed class SafeSpotCollector : IDisposable
         if (bits.Combat())
             return;
 
-        if (MapLocations.TryPeek(out Vector3 lastMapPos) &&
-            lastMapPos == playerReader.MapPosNoZ)
-            return;
+        lock (MapLocations)
+        {
+            if (MapLocations.TryPeek(out Vector3 lastMapPos) &&
+                lastMapPos == playerReader.MapPosNoZ)
+                return;
 
-        MapLocations.Push(playerReader.MapPosNoZ);
+            MapLocations.Push(playerReader.MapPosNoZ);
+        }
     }
 
     public void Reduce(Vector3 mapPosition)

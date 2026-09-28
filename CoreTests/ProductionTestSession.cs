@@ -1,4 +1,5 @@
 using Core;
+using Core.Decision;
 using Core.GOAP;
 using Core.Goals;
 
@@ -100,7 +101,8 @@ internal sealed class ProductionTestSession : IDisposable
         ILoggerFactory loggerFactory,
         bool useDxgi,
         out ProductionTestSession? session,
-        out string reason)
+        out string reason,
+        DecisionConfiguration? decisionOverride = null)
     {
         session = null;
         GameTestEnvironment? environment = null;
@@ -189,13 +191,24 @@ internal sealed class ProductionTestSession : IDisposable
 
             ServiceCollection registrations = new();
             registrations.AddScoped<ClassConfiguration>(_ => classConfig);
-            GoalFactory.Create(registrations, root, classConfig);
 
-            // Match BotController.CreateSession: RouteInfo and GoapAgent are
-            // production session services, not test replacements.
+            // GoalFactory validates the AI action services while building its
+            // temporary provider, so route services must be registered first.
             registrations.AddScoped<IEnumerable<IRouteProvider>>(sp =>
                 sp.GetServices<GoapGoal>().OfType<IRouteProvider>());
             registrations.AddScoped<RouteInfo>();
+            GoalFactory.Create(registrations, root, classConfig);
+
+            // Live AI integration tests use their explicit endpoint and mode,
+            // independent of appsettings and the interactive settings page.
+            if (decisionOverride is not null)
+            {
+                registrations.AddSingleton(new DecisionSettings(decisionOverride));
+                registrations.AddSingleton<AIServiceStatus>();
+            }
+
+            // Match BotController.CreateSession: GoapAgent is the production
+            // session worker, not a test replacement.
             registrations.AddScoped<GoapAgent>();
 
             services = registrations.BuildServiceProvider(

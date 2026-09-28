@@ -558,10 +558,13 @@ public sealed partial class BotController : IBotController, IDisposable
         // lets the test session use a private path override without touching disk.
         s.AddScoped<ClassConfiguration>(_ => config);
 
-        GoalFactory.Create(s, serviceProvider, config, testModules);
-
+        // GoalFactory validates AI capabilities while building its provider.
+        // Register their route dependency before that validation runs.
         s.AddScoped<IEnumerable<IRouteProvider>>(GetPathProviders);
         s.AddScoped<RouteInfo>();
+
+        GoalFactory.Create(s, serviceProvider, config, testModules);
+
         s.AddScoped<GoapAgent>();
 
         ServiceProvider provider = s.BuildServiceProvider(

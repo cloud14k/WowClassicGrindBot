@@ -119,6 +119,19 @@ public static class Program
         services.AddSingleton(new TrainingCollectionSettings(
             configuration.GetValue<bool>(TrainingCollectionSettings.ConfigurationKey),
             Path.Combine(contentRootPath, "appsettings.json")));
+        services.AddSingleton(new Core.Decision.DecisionSettings(
+            new Core.Decision.DecisionConfiguration
+            {
+                Mode = Enum.TryParse(configuration["Decision:Mode"], true, out Core.Decision.DecisionMode mode)
+                    ? mode : Core.Decision.DecisionMode.Local,
+                Laya = new Core.Decision.LayaSettings
+                {
+                    BaseUrl = configuration["Decision:Laya:BaseUrl"] ?? "http://127.0.0.1:8000",
+                    TimeoutMs = configuration.GetValue("Decision:Laya:TimeoutMs", 250),
+                    MinimumConfidence = configuration.GetValue("Decision:Laya:MinimumConfidence", 0.7),
+                    MinimumIntervalMs = configuration.GetValue("Decision:Laya:MinimumIntervalMs", 300)
+                }
+            }, Path.Combine(contentRootPath, "decision-settings.json")));
 
         bool gameEnvironmentReady = services.AddWoWProcess(log);
 

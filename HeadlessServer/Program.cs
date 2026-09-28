@@ -96,6 +96,19 @@ public sealed class Program
         services.AddStartupConfigFactories();
         services.AddSingleton(new TrainingCollectionSettings(
             configuration.GetValue<bool>(TrainingCollectionSettings.ConfigurationKey)));
+        services.AddSingleton(new Core.Decision.DecisionSettings(
+            new Core.Decision.DecisionConfiguration
+            {
+                Mode = Enum.TryParse(configuration["Decision:Mode"], true, out Core.Decision.DecisionMode mode)
+                    ? mode : Core.Decision.DecisionMode.Local,
+                Laya = new Core.Decision.LayaSettings
+                {
+                    BaseUrl = configuration["Decision:Laya:BaseUrl"] ?? "http://127.0.0.1:8000",
+                    TimeoutMs = configuration.GetValue("Decision:Laya:TimeoutMs", 250),
+                    MinimumConfidence = configuration.GetValue("Decision:Laya:MinimumConfidence", 0.7),
+                    MinimumIntervalMs = configuration.GetValue("Decision:Laya:MinimumIntervalMs", 300)
+                }
+            }));
 
         // Navmesh / follower tunables bind from the same configuration the host
         // already built (json + env + command line).

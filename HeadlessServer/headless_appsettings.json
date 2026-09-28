@@ -12,6 +12,15 @@
       }
     }
   },
+  "Decision": {
+    "Mode": "Local",
+    "Laya": {
+      "BaseUrl": "http://127.0.0.1:8000",
+      "TimeoutMs": 250,
+      "MinimumConfidence": 0.7,
+      "MinimumIntervalMs": 300
+    }
+  },
   "Training": {
     "EnableTrainingDataCollection": false
   },

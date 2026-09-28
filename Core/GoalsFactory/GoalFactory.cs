@@ -5,6 +5,7 @@ using Core.GOAP;
 using Core.Session;
 
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 
 using SharedLib;
@@ -34,6 +35,18 @@ public static class GoalFactory
         TestModules? testModules = null)
     {
         services.AddStartupIoC(sp);
+
+        // Standalone callers may not create a route service themselves. The AI
+        // capability graph still needs one during ValidateOnBuild.
+        services.TryAddScoped<RouteInfo>();
+
+        services.AddScoped<Core.Decision.LayaDecisionProvider>();
+        services.AddScoped<Core.Decision.DecisionManager>();
+        services.AddScoped<Core.Decision.AiController>();
+        services.AddScoped<Core.Decision.CapabilityExecutor>();
+        services.AddScoped<Core.Decision.AiLootExecutor>();
+        services.AddScoped<Core.Decision.ActionValidator>();
+        services.AddSingleton(new System.Net.Http.HttpClient());
 
         // session scoped services
 
@@ -479,12 +492,16 @@ public static class GoalFactory
         setting.Path = DeserializeObject<Vector3[]>(
             ReadAllText(setting.PathFilename))!;
 
-        // TODO: there could be saved user routes where
-        //       the Z component not 0
-        for (int i = 0; i < setting.Path.Length; i++)
+        if (logger.IsEnabled(LogLevel.Information))
         {
-            if (setting.Path[i].Z != 0)
-                setting.Path[i].Z = 0;
+            logger.LogInformation("Route loaded: File={RouteFile} WaypointCount={WaypointCount}",
+                setting.PathFilename, setting.Path.Length);
+            for (int i = 0; i < Math.Min(3, setting.Path.Length); i++)
+            {
+                Vector3 point = setting.Path[i];
+                logger.LogInformation("Waypoint[{WaypointIndex}] = X={X}, Y={Y}, Z={Z} (file coordinates)",
+                    i, point.X, point.Y, point.Z);
+            }
         }
 
         if (setting.PathReduceSteps)

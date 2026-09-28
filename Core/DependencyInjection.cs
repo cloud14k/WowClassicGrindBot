@@ -140,6 +140,8 @@ public static class DependencyInjection
         // Live CoreTests construct a child GOAP container without BotController.
         // Production sessions already pass their root recorder, so these are fallbacks.
         s.TryAddSingleton<TrainingCollectionSettings>();
+        s.ForwardSingleton<Core.Decision.DecisionSettings>(sp);
+        s.ForwardSingleton<Core.Decision.AIServiceStatus>(sp);
         s.TryAddSingleton<TrainingRecorder>();
         s.ForwardSingleton<ILoggerFactory>(sp);
         s.ForwardSingleton<ILogger>(sp);
@@ -399,6 +401,8 @@ public static class DependencyInjection
 
     public static IServiceCollection AddCoreBase(this IServiceCollection s, ILogger log)
     {
+        s.TryAddSingleton<Core.Decision.DecisionSettings>();
+        s.TryAddSingleton<Core.Decision.AIServiceStatus>();
         s.TryAddSingleton<InputBackendSettings>();
         s.AddSingleton<ManualResetEventSlim>(x => new(false));
         s.AddSingleton<Wait>();

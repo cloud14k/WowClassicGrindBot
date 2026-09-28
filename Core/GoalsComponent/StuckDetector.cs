@@ -119,6 +119,15 @@ public sealed partial class StuckDetector
         attemptCount = 0;
     }
 
+    /// <summary>Starts a new route without inheriting the previous target's progress clock.</summary>
+    public void ResetForNewRoute()
+    {
+        worldTarget = Vector3.Zero;
+        bestDistance = MAX_RANGE;
+        bestTime = GetTimestamp();
+        Reset();
+    }
+
     public void Update(CancellationToken token = default)
     {
         if (bits.Falling())

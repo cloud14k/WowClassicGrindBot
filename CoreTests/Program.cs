@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace CoreTests;
 
@@ -60,7 +61,7 @@ internal sealed class Program
     private static readonly HashSet<string> offlineSuites =
         new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "npc-regression", "state", "keybindings", "record" };
 
-    public static void Main(string[] args)
+    public static async Task Main(string[] args)
     {
         var logConfig = new LoggerConfiguration()
             .WriteTo.File("names.log")
@@ -115,6 +116,22 @@ internal sealed class Program
         if (remaining.Count > 0 && remaining[0].Equals("spline-sim", StringComparison.OrdinalIgnoreCase))
         {
             SplineSim.SplineSim.Run(logger);
+            Log.CloseAndFlush();
+            return;
+        }
+
+        if (remaining.Count > 0 && remaining[0].Equals("decision", StringComparison.OrdinalIgnoreCase))
+        {
+            await Test_Decision.RunAsync(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
+            Log.CloseAndFlush();
+            return;
+        }
+
+        if (remaining.Count > 0 && remaining[0].Equals("ai-test", StringComparison.OrdinalIgnoreCase))
+        {
+            await Test_AiTest.RunAsync(logger, loggerFactory, UseDxgi,
+                remaining.GetRange(1, remaining.Count - 1).ToArray());
             Log.CloseAndFlush();
             return;
         }
@@ -201,6 +218,9 @@ internal sealed class Program
         {
             Log.Logger.Information("Available suites: {Suites}", string.Join(", ", suites.Keys));
             Log.Logger.Information("State commands: state | state watch | state bindings");
+            Log.Logger.Information("Decision commands: decision | decision watch | decision --file <state.json>");
+            Log.Logger.Information("AI live test: ai-test --ai-name <name> --endpoint <predict-url>");
+            Log.Logger.Information("AI offline evaluation: ai-test --offline --ai-name <name> --endpoint <url> [--subset overall|<json-file>]");
             Log.Logger.Information("Global flags: --log-times, --no-gpu, --no-log-update, --dxgi, --delay <ms>");
             Log.Logger.Information("Example: dotnet run -c Release -- --log-times npc enemy neutral 10000");
         }

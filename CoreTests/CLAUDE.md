@@ -27,6 +27,45 @@ The project uses `<OutputType>WinExe</OutputType>` which detaches stdout from th
 
 ## Suites
 
+### decision - Read-only decision diagnostics
+
+```powershell
+.\run.ps1 decision
+.\run.ps1 decision watch
+.\run.ps1 decision --file states\hunter_combat.json
+.\run.ps1 decision selftest
+```
+
+The file and selftest variants run without WoW. Live `decision` captures a
+read-only AI observation and calls Laya for a preview. No variant sends input.
+
+### ai-test - Live AI one-mob kill and loot
+
+Runs the production bot using the supplied AI endpoint until it finds one
+hostile mob, kills it, and confirms the corpse was looted. The command-line
+endpoint overrides AI connection settings in this test session.
+AI mode obtains each next action from Laya and executes it through capabilities;
+the local GOAP planner and goal OnEnter/Update methods do not choose or perform
+these actions.
+Ready skills from the selected class profile's Combat, Pull and Adhoc sections
+are offered as individual AI choices. The one-mob test disables Flee and keeps
+the killed corpse pending until the AI chooses Loot and the bot completes it.
+
+Start WoW with the normal addon/profile setup, stand alive and out of combat, clear the current
+target, and ensure Loot is enabled in the selected class profile. Keep the Laya
+`/predict` service running. This is a live gameplay command and can control the
+character until success or timeout.
+
+```powershell
+.\run.ps1 ai-test --ai-name Laya --endpoint http://127.0.0.1:8000/predict
+```
+
+The static endpoint/subset evaluation remains available with `--offline`:
+
+```powershell
+.\run.ps1 ai-test --offline --ai-name MyAI --endpoint https://example.test/decision --subset .\my-subset.json
+```
+
 ### Help
 
 ```powershell
