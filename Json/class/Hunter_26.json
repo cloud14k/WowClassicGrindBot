@@ -92,7 +92,7 @@
         "Key": "4",
         "WhenUsable": true,
         "AfterCastWaitSwing": true,
-        "AfterCastStepBack": 1000,
+        "AfterCastStepBack": 2000,
         "Requirements": [
           "MainHandSwing > -400",
           "InMeleeRange",

@@ -590,6 +590,26 @@ public sealed partial class Navigation : IDisposable
         return wayPoints.Count != 0;
     }
 
+    /// <summary>Skip the current route anchor and make the next anchor the active destination.</summary>
+    public bool SkipCurrentWaypoint()
+    {
+        if (wayPoints.Count == 0)
+            return false;
+
+        routeGeneration++;
+        routeBlocked = false;
+        wayPoints.Pop();
+        routeToNextWaypoint.Clear();
+        spline.Clear();
+        ReleaseTurnKeys();
+        ResetStuckParameters();
+        UpdateTotalRoute();
+
+        logger.LogWarning("Skipping blocked route waypoint; {WaypointsRemaining} waypoint(s) remain.",
+            wayPoints.Count);
+        return true;
+    }
+
     public bool HasNext()
     {
         return routeToNextWaypoint.Count != 0;

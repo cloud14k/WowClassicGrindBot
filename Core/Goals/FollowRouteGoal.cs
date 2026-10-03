@@ -24,7 +24,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private readonly float cost;
     public override float Cost => cost;
-    public override bool CanRun() => pathSettings.CanRun();
+    public override bool CanRun() => pathSettings.CanRun() &&
+        (!bits.Combat() || threatFinder.RouteFallbackActive);
 
     private const bool debug = false;
 
@@ -36,6 +37,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
     private readonly ClassConfiguration classConfig;
     private readonly IMountHandler mountHandler;
     private readonly Navigation navigation;
+    private readonly ThreatFinder threatFinder;
 
     private readonly IBlacklist targetBlacklist;
     private readonly TargetFinder targetFinder;
@@ -96,6 +98,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         AddonBits bits,
         ClassConfiguration classConfig,
         Navigation navigation,
+        ThreatFinder threatFinder,
         IMountHandler mountHandler, TargetFinder targetFinder,
         IBlacklist targetBlacklist,
         RouteGenerator routeGenerator,
@@ -113,6 +116,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         this.classConfig = classConfig;
         this.playerReader = playerReader;
         this.bits = bits;
+        this.threatFinder = threatFinder;
         this.pathSettings = pathSettings;
         this.pathOnly = pathOnly;
         this.mountHandler = mountHandler;
@@ -147,11 +151,6 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         else
         {
-            if (classConfig.Loot)
-            {
-                AddPrecondition(GoapKey.incombat, false);
-            }
-
             AddPrecondition(GoapKey.damagedone, false);
             AddPrecondition(GoapKey.damagetaken, false);
 
@@ -232,6 +231,9 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Resume()
     {
+        bool skippedFallbackWaypoint = threatFinder.ConsumeRouteFallbackSkip() &&
+            navigation.SkipCurrentWaypoint();
+
         SendGoapEvent(FollowRouteChanged.Instance);
 
         EnsureGenerated();
@@ -242,7 +244,15 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
         }
         sideActivityManualReset.Set();
 
-        if (!navigation.HasWaypoint() || refillByOther)
+        if (skippedFallbackWaypoint)
+        {
+            refillByOther = false;
+            if (navigation.HasWaypoint())
+                navigation.Resume();
+            else
+                RefillWaypoints(false, skipClosest: true);
+        }
+        else if (!navigation.HasWaypoint() || refillByOther)
         {
             refillByOther = false;
             RefillWaypoints(true);
@@ -306,7 +316,8 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             input.PressJumpAscend();
         }
 
-        if (bits.Combat() && !classConfig.GatheringMode) { return; }
+        if (bits.Combat() && !classConfig.GatheringMode &&
+            !threatFinder.RouteFallbackActive) { return; }
 
         if (!sideActivityCts.IsCancellationRequested)
         {
@@ -453,6 +464,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
 
     private void Navigation_OnWayPointReached()
     {
+        threatFinder.OnRouteWaypointReached();
         MountIfPossible();
     }
 
@@ -504,7 +516,7 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
             pathSettings.Generate != null && !pathSettings.RouteIsDense;
     }
 
-    public void RefillWaypoints(bool onlyClosest)
+    public void RefillWaypoints(bool onlyClosest, bool skipClosest = false)
     {
         Log($"{nameof(RefillWaypoints)} - findClosest:{onlyClosest} - ThereAndBack:{pathSettings.PathThereAndBack}");
 
@@ -568,6 +580,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                 return;
             }
 
+            if (skipClosest)
+            {
+                int nextIndex = Math.Min(closestIndex + 1, path.Length);
+                navigation.SetWayPoints(path[nextIndex..]);
+                return;
+            }
+
             if (closestPoint == path[0] || closestPoint == path[^1])
             {
                 if (pathSettings.PathThereAndBack)
@@ -616,6 +635,13 @@ public sealed class FollowRouteGoal : GoapGoal, IGoapEventListener, IRouteProvid
                     LogDebug($"{nameof(RefillWaypoints)}: Closest wayPoint: {mapClosestPoint}");
 
                 navigation.SetWayPoints(stackalloc Vector3[1] { mapClosestPoint });
+                return;
+            }
+
+            if (skipClosest)
+            {
+                int nextIndex = Math.Min(closestIndex + 1, path.Length);
+                navigation.SetWayPoints(path[nextIndex..]);
                 return;
             }
 

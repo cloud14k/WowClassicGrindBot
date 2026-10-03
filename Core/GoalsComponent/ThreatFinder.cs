@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 
 using System;
+using System.Threading;
 
 using static System.MathF;
 
@@ -19,12 +20,31 @@ namespace Core.Goals;
 /// </summary>
 public sealed class ThreatFinder
 {
+    private const int FAILED_SEARCHES_BEFORE_ROUTE_FALLBACK = 2;
+    private const int ROUTE_FALLBACK_TIMEOUT_MS = 120_000;
+
     private readonly ILogger<ThreatFinder> logger;
     private readonly ConfigurableInput input;
     private readonly Wait wait;
     private readonly PlayerReader playerReader;
     private readonly AddonBits bits;
     private readonly CombatLog combatLog;
+    private int failedSearches;
+    private long routeFallbackUntil;
+    private int skipWaypointPending;
+
+    public bool RouteFallbackActive =>
+        Environment.TickCount64 < Interlocked.Read(ref routeFallbackUntil);
+
+    public bool ConsumeRouteFallbackSkip() =>
+        Interlocked.Exchange(ref skipWaypointPending, 0) != 0;
+
+    public void OnRouteWaypointReached()
+    {
+        failedSearches = 0;
+        Interlocked.Exchange(ref routeFallbackUntil, 0);
+        Interlocked.Exchange(ref skipWaypointPending, 0);
+    }
 
     public ThreatFinder(ILogger<ThreatFinder> logger,
         ConfigurableInput input, Wait wait,
@@ -46,28 +66,29 @@ public sealed class ThreatFinder
     /// </param>
     public void FindPossibleThreats(ReadOnlySpan<KeyAction> resetOnNewTarget)
     {
-        if (bits.Pet_Defensive())
+        if (bits.Pet() && playerReader.PetAlive() && bits.Pet_Defensive() &&
+            playerReader.PetTarget() && bits.PetTarget_Alive())
         {
-            float elapsedPetFoundTarget = wait.Until(CastingHandler.GCD,
-                () => playerReader.PetTarget() && bits.PetTarget_Alive());
-
-            if (elapsedPetFoundTarget < 0)
-            {
-                logger.LogWarning("Pet not found target!");
-                input.PressClearTarget();
-                return;
-            }
-
-            ResetCooldowns(resetOnNewTarget);
-
             input.PressTargetPet();
             wait.Update();
             input.PressTargetOfTarget();
             wait.Update();
 
-            logger.LogWarning("Found new target by pet. {ElapsedMs}ms", elapsedPetFoundTarget);
+            if (bits.Target_Alive() && bits.Target_Hostile() &&
+                playerReader.TargetGuid != playerReader.PetGuid)
+            {
+                ResetCooldowns(resetOnNewTarget);
+                ResetSearchFallback();
+                logger.LogInformation("Found new target by pet.");
+                return;
+            }
 
-            return;
+            logger.LogInformation("Pet target acquisition failed; falling back to Tab.");
+            if (bits.Target())
+            {
+                input.PressClearTarget();
+                wait.Update();
+            }
         }
 
         // FindThreatGoal can own many consecutive ticks, unlike CombatGoal which
@@ -85,17 +106,13 @@ public sealed class ThreatFinder
 
         if (bits.Target() && !bits.Target_Dead() && bits.Target_Hostile())
         {
-            if (!bits.Target_Combat())
-            {
-                logger.LogWarning("Dont pull non-hostile target!");
-                input.PressClearTarget();
-                wait.Update();
-                return;
-            }
-
-            if (bits.TargetTarget_PlayerOrPet() || combatLog.DamageTaken.Contains(playerReader.TargetGuid))
+            // Only keep a threat to us or the pet. A nearby mob fighting
+            // somebody else must not become the next combat goal's target.
+            if (bits.TargetTarget_PlayerOrPet() ||
+                combatLog.DamageTaken.Contains(playerReader.TargetGuid))
             {
                 ResetCooldowns(resetOnNewTarget);
+                ResetSearchFallback();
 
                 logger.LogWarning("Found new target!");
                 wait.Update();
@@ -105,10 +122,37 @@ public sealed class ThreatFinder
 
         logger.LogWarning("Possible threats {DamageTakenCount}!", combatLog.DamageTakenCount());
 
+        if (bits.Target())
+        {
+            input.PressClearTarget();
+            wait.Update();
+        }
+
         if (bits.SoftInteract_Enabled())
         {
             UnstuckDeadSoftTargetLock();
         }
+
+        if (combatLog.PlayerOrPetCombat() && !bits.Dead() && !bits.Target_Alive())
+        {
+            failedSearches++;
+            if (failedSearches >= FAILED_SEARCHES_BEFORE_ROUTE_FALLBACK && !RouteFallbackActive)
+            {
+                Interlocked.Exchange(ref routeFallbackUntil,
+                    Environment.TickCount64 + ROUTE_FALLBACK_TIMEOUT_MS);
+                Interlocked.Exchange(ref skipWaypointPending, 1);
+                logger.LogWarning(
+                    "No target after {FailedSearches} searches; yielding combat recovery and skipping to the next route waypoint.",
+                    failedSearches);
+            }
+        }
+    }
+
+    private void ResetSearchFallback()
+    {
+        failedSearches = 0;
+        Interlocked.Exchange(ref routeFallbackUntil, 0);
+        Interlocked.Exchange(ref skipWaypointPending, 0);
     }
 
     private static void ResetCooldowns(ReadOnlySpan<KeyAction> span)
