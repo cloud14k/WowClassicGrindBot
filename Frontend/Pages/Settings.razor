@@ -4,6 +4,8 @@
 @inject IJSRuntime JSRuntime
 @inject IServiceProvider Services
 @inject WowProcessInput wowInput
+@inject InputBackendSettings inputSettings
+@inject ILogger<Settings> Logger
 @implements IDisposable
 @using Core.Training
 @using Core.Decision
@@ -17,6 +19,11 @@
             <option value="Windows">普通键鼠</option>
             <option value="Hid">ESP32 HID</option>
         </select>
+        <div class="small mb-2">当前实际输入：@(wowInput.IsHidBackend ? $"ESP32 HID（{BotHidPort}）" : "普通键鼠")</div>
+        @if (InputSelectionPending)
+        {
+            <div class="text-warning small mb-2">选择尚未保存，bot 仍使用上方显示的实际输入。请点击“保存”使选择生效。</div>
+        }
         @if (inputBackend == "Hid")
         {
             <div class="d-flex flex-wrap align-items-end gap-2">
@@ -49,6 +56,7 @@
         <div><button class="btn btn-primary mt-2" @onclick="SaveInputBackend">保存</button></div>
         <div class="text-muted small">保存后立即切换输入后端，无需重启程序。HID 模式仅在 WoW 位于前台时发送新输入；切到后台会释放已按键并等待恢复。</div>
         @if (inputError is not null) { <div class="text-danger small">@inputError</div> }
+        @if (inputSaveMessage is not null && !InputSelectionPending) { <div class="text-success small">@inputSaveMessage</div> }
     </CardBody>
 </Card>
 
@@ -148,7 +156,6 @@
             return active?.Mode.ToString() ?? "Local";
         }
     }
-    private InputBackendSettings? inputSettings;
     private string inputBackend = "Windows";
     private string hidPort = "COM3";
     private string[] hidPorts = [];
@@ -156,6 +163,17 @@
     private bool hidTestSucceeded;
     private string? hidTestMessage;
     private string? inputError;
+    private string? inputSaveMessage;
+
+    private bool InputSelectionPending => inputBackend != inputSettings.Backend ||
+        (inputBackend == "Hid" && !string.Equals(hidPort, inputSettings.Port, StringComparison.OrdinalIgnoreCase));
+
+    protected override void OnInitialized()
+    {
+        inputBackend = inputSettings.Backend;
+        hidPort = inputSettings.Port;
+        RefreshHidPorts();
+    }
 
     private bool BotHidConnected => wowInput.IsHidBackend && wowInput.IsHidConnected;
     private string BotHidPort => wowInput.HidPort ?? hidPort;
@@ -178,10 +196,6 @@
                 layaIntervalMs = decision.Laya.MinimumIntervalMs;
                 layaMinimumConfidence = decision.Laya.MinimumConfidence;
             }
-            inputSettings = Services.GetService(typeof(InputBackendSettings)) as InputBackendSettings;
-            inputBackend = inputSettings?.Backend ?? "Windows";
-            hidPort = inputSettings?.Port ?? "COM3";
-            RefreshHidPorts();
             trainingEnabled = trainingSettings?.EnableTrainingDataCollection ?? false;
             selectedRegion = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.getCdnRegion");
             int detected = await JSRuntime.InvokeAsync<int>("LocalStorageHelper.detectCdnRegion");
@@ -242,8 +256,20 @@
 
     private void SaveInputBackend()
     {
-        try { inputSettings?.Save(inputBackend, hidPort); inputError = null; }
-        catch (Exception ex) { inputError = ex.Message; }
+        inputSaveMessage = null;
+        try
+        {
+            inputSettings.Save(inputBackend, hidPort);
+            inputError = null;
+            inputSaveMessage = wowInput.IsHidBackend
+                ? $"已保存，bot 当前使用 ESP32 HID（{BotHidPort}）。"
+                : "已保存，bot 当前使用普通键鼠。";
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to save input backend {Backend} (port {Port})", inputBackend, hidPort);
+            inputError = $"保存失败：{ex.Message}。当前配置仍为 {inputSettings.Backend}。";
+        }
     }
 
     private void RefreshHidPorts()

@@ -314,15 +314,17 @@ public sealed partial class GoapAgent : IDisposable
 
     public void Dispose()
     {
-        // A session may be replaced without the UI Stop button. Release its
-        // input before the scoped goals and input wrapper are torn down.
-        if (Active)
-            Active = false;
-
+        // Stop the worker before Active=false waits for controlSync and releases
+        // input. The worker may be inside a slow input operation during shutdown.
         cts.Cancel();
         aiRequest?.Cancel();
         sessionPauseEvent.Set();
         controlWakeEvent.Set();
+
+        // A session may be replaced without the UI Stop button. Release its
+        // input before the scoped goals and input wrapper are torn down.
+        if (Active)
+            Active = false;
 
         // The session scope owns the cancellation source and disposes it as soon
         // as this method returns. Wait for the worker to finish before that can

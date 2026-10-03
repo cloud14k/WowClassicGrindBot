@@ -150,6 +150,8 @@ public static class Program
 
         services.AddCoreFrontend();
 
+        services.AddHostedService<GlobalBotHotkeyService>();
+
         services.AddSingleton(provider =>
             provider.GetRequiredService<IOptions<JsonOptions>>().Value.SerializerOptions);
 

@@ -42,6 +42,46 @@ public static partial class NativeMethods
     [LibraryImport("user32.dll")]
     public static partial nint GetForegroundWindow();
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG
+    {
+        public nint hwnd;
+        public uint message;
+        public nuint wParam;
+        public nint lParam;
+        public uint time;
+        public int ptX;
+        public int ptY;
+    }
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool RegisterHotKey(nint hWnd, int id, uint fsModifiers, uint vk);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool UnregisterHotKey(nint hWnd, int id);
+
+    [LibraryImport("user32.dll", EntryPoint = "GetMessageA")]
+    public static partial int GetMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [LibraryImport("user32.dll", EntryPoint = "PeekMessageA")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PeekMessage(out MSG lpMsg, nint hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+    [LibraryImport("user32.dll", EntryPoint = "PostThreadMessageA", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostThreadMessage(uint idThread, uint msg, nuint wParam, nint lParam);
+
+    [LibraryImport("kernel32.dll")]
+    public static partial uint GetCurrentThreadId();
+
+    public const uint PM_NOREMOVE = 0x0000;
+    public const uint WM_QUIT = 0x0012;
+    public const uint WM_HOTKEY = 0x0312;
+    public const uint MOD_ALT = 0x0001;
+    public const uint VK_F1 = 0x0070;
+
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool SetForegroundWindow(nint hWnd);

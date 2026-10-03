@@ -13,6 +13,7 @@ namespace Game;
 /// <summary>Bot HID backend. Physical input is sent only while the selected WoW process is foreground.</summary>
 public sealed class Esp32HidInput : IInput, IDisposable
 {
+    private static readonly TimeSpan ShutdownReleaseTimeout = TimeSpan.FromMilliseconds(500);
     private readonly HidClient client;
     private readonly WowProcess process;
     private readonly CancellationTokenSource stopping;
@@ -278,12 +279,22 @@ public sealed class Esp32HidInput : IInput, IDisposable
         disposed = true;
         CancelPending();
         try { focusWatch.GetAwaiter().GetResult(); } catch (OperationCanceledException) { }
-        try { client.ReleaseAllAsync().GetAwaiter().GetResult(); }
+        try
+        {
+            // Releasing held keys is best effort. A missing ESP32 ACK must not
+            // hold up process shutdown for all serial retries or abort cleanup.
+            using CancellationTokenSource timeout = new(ShutdownReleaseTimeout);
+            try { client.ReleaseAllAsync(timeout.Token).GetAwaiter().GetResult(); }
+            catch (Exception) { /* The device may be disconnected or unresponsive. */ }
+        }
         finally
         {
-            client.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            focusLost.Dispose();
-            stopping.Dispose();
+            try { client.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+            finally
+            {
+                focusLost.Dispose();
+                stopping.Dispose();
+            }
         }
     }
 }

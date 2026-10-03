@@ -1,5 +1,6 @@
 /build
 /build-codex
+/cli-flasher
 /.vscode
 /sdkconfig
 /sdkconfig.old

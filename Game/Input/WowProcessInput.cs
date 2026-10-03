@@ -54,7 +54,7 @@ public sealed partial class WowProcessInput : IMouseInput, IDisposable
         keysDown = new((int)ConsoleKey.OemClear);
 
         InputBackendSettings settings = inputSettings ?? new InputBackendSettings();
-        nativeInput = new InputBackendRouter(process, cts, settings);
+        nativeInput = new InputBackendRouter(process, cts, settings, logger);
         if (settings.Backend == "Hid")
         {
             if (logger.IsEnabled(LogLevel.Information))

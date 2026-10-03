@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 
 namespace Game;
 
@@ -8,19 +9,26 @@ namespace Game;
 internal sealed class InputBackendRouter : IInput, IDisposable
 {
     private readonly object gate = new();
-    private readonly WowProcess process;
-    private readonly CancellationTokenSource stopping;
+    private readonly Func<string, string, IInput> createBackend;
+    private readonly ILogger logger;
     private readonly InputBackendSettings settings;
     private IInput active;
     private IInputExecutionObserver? observer;
     private bool disposed;
 
-    public InputBackendRouter(WowProcess process, CancellationTokenSource stopping, InputBackendSettings settings)
+    public InputBackendRouter(WowProcess process, CancellationTokenSource stopping, InputBackendSettings settings, ILogger logger)
+        : this(settings, (backend, port) => backend == "Hid"
+            ? new Esp32HidInput(port, process, stopping.Token)
+            : new InputWindowsNative(process, stopping, InputDuration.FastPress), logger)
     {
-        this.process = process;
-        this.stopping = stopping;
+    }
+
+    internal InputBackendRouter(InputBackendSettings settings, Func<string, string, IInput> createBackend, ILogger logger)
+    {
+        this.createBackend = createBackend;
+        this.logger = logger;
         this.settings = settings;
-        active = Create(settings.Backend, settings.Port);
+        active = createBackend(settings.Backend, settings.Port);
         settings.Changed += OnSettingsChanged;
     }
 
@@ -62,13 +70,6 @@ internal sealed class InputBackendRouter : IInput, IDisposable
         }
     }
 
-    private IInput Create(string backend, string port)
-    {
-        if (backend == "Hid")
-            return new Esp32HidInput(port, process, stopping.Token);
-        return new InputWindowsNative(process, stopping, InputDuration.FastPress);
-    }
-
     private void OnSettingsChanged()
     {
         // An HID action can be waiting indefinitely for WoW to regain focus.
@@ -79,19 +80,24 @@ internal sealed class InputBackendRouter : IInput, IDisposable
         {
             if (disposed) return;
 
-            IInput next = Create(settings.Backend, settings.Port);
+            IInput next = createBackend(settings.Backend, settings.Port);
             try
             {
                 ApplyObserver(next, observer);
-                IInput previous = active;
-                active = next;
-                DisposeBackend(previous);
             }
             catch
             {
                 DisposeBackend(next);
                 throw;
             }
+            IInput previous = active;
+            active = next;
+            // The replacement is usable. Failure to clean up an unresponsive
+            // old device must not dispose it or roll back the saved selection.
+            try { DisposeBackend(previous); }
+            catch (Exception ex) { logger.LogWarning(ex, "Previous input backend cleanup failed after switching to {Backend}", settings.Backend); }
+            if (logger.IsEnabled(LogLevel.Information))
+                logger.LogInformation("Input backend switched to {Backend} (port {Port})", settings.Backend, settings.Port);
         }
     }
 

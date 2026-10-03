@@ -606,10 +606,11 @@ public sealed partial class BotController : IBotController, IDisposable
     public void Dispose()
     {
         KeyReader.GameBindingChanged -= OnGameBindingChanged;
-        if (GoapAgent?.Active == true)
-            GoapAgent.Active = false;
-
+        // Signal cancellation before session cleanup. Stopping an active GOAP
+        // session can wait on its worker and on synchronous HID reports; the
+        // worker must see shutdown first so it can leave its current tick.
         cts.Cancel();
+
         npcNameOverlay?.Dispose();
         sessionScope?.Dispose();
         sessionProvider?.Dispose();
