@@ -328,3 +328,6 @@ CoreTests/routegen-out/
 **/training-data/
 **/decision-settings.json
 *.7z
+
+# Local offline-map experiments and their generated data
+/tmp/
