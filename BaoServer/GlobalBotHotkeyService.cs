@@ -13,7 +13,7 @@ using WinAPI;
 namespace BlazorServer;
 
 /// <summary>
-/// Owns the process-wide Alt+F1 hotkey. RegisterHotKey delivers WM_HOTKEY to
+/// Owns the process-wide Alt+F2 hotkey. RegisterHotKey delivers WM_HOTKEY to
 /// the registering thread, so this service keeps a small dedicated message loop
 /// instead of depending on the browser having focus.
 /// </summary>
@@ -42,7 +42,7 @@ public sealed class GlobalBotHotkeyService : IHostedService, IDisposable
     {
         if (!OperatingSystem.IsWindows())
         {
-            logger.LogWarning("Global Alt+F1 bot hotkey is only available on Windows.");
+            logger.LogWarning("Global Alt+F2 bot hotkey is only available on Windows.");
             return Task.CompletedTask;
         }
 
@@ -97,18 +97,18 @@ public sealed class GlobalBotHotkeyService : IHostedService, IDisposable
                 nint.Zero,
                 HotkeyId,
                 NativeMethods.MOD_ALT,
-                NativeMethods.VK_F1);
+                NativeMethods.VK_F2);
 
             if (!registered)
             {
                 int error = Marshal.GetLastWin32Error();
                 logger.LogWarning(
-                    "Unable to register global Alt+F1 bot hotkey. Win32 error: {Error}.",
+                    "Unable to register global Alt+F2 bot hotkey. Win32 error: {Error}.",
                     error);
                 return;
             }
 
-            logger.LogInformation("Global bot hotkey registered: Alt+F1.");
+            logger.LogInformation("Global bot hotkey registered: Alt+F2.");
         }
         catch (Exception ex)
         {
@@ -140,7 +140,7 @@ public sealed class GlobalBotHotkeyService : IHostedService, IDisposable
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "Global Alt+F1 bot toggle failed.");
+                    logger.LogError(ex, "Global Alt+F2 bot toggle failed.");
                 }
             }
         }

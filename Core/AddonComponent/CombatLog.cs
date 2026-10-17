@@ -6,6 +6,10 @@ namespace Core;
 public sealed class CombatLog : IReader
 {
     private const int PLAYER_DEATH_EVENT = 16777215;
+    // A pet can keep its last target selected after combat ends. Damage history
+    // is cleared on combat exit, so PetEngaged must also expire independently or
+    // that stale target/history pair can keep GOAP in Combat forever.
+    private const int PET_ENGAGEMENT_TIMEOUT_MS = 10_000;
 
     private readonly AddonBits bits;
 
@@ -64,6 +68,8 @@ public sealed class CombatLog : IReader
         bits.Pet() &&
         petTargetGuid != 0 &&
         !bits.PetTarget_Dead() &&
+        (LastDamageDoneTime.ElapsedMs() < PET_ENGAGEMENT_TIMEOUT_MS ||
+        DamageTakenGuid.ElapsedMs() < PET_ENGAGEMENT_TIMEOUT_MS) &&
         (DamageDone.Contains(petTargetGuid) ||
         DamageTaken.Contains(petTargetGuid));
 

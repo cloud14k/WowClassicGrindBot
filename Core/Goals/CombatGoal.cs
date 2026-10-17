@@ -5,12 +5,15 @@ using Game;
 using Microsoft.Extensions.Logging;
 
 using System;
+using System.Diagnostics;
 using static System.MathF;
 
 namespace Core.Goals;
 
 public sealed class CombatGoal : GoapGoal
 {
+    public const int COMBAT_TIMEOUT_MS = 180_000;
+
     public override float Cost => 4f;
 
     private readonly ILogger<CombatGoal> logger;
@@ -30,6 +33,8 @@ public sealed class CombatGoal : GoapGoal
     private float lastDirection;
     private float lastMinDistance;
     private float lastMaxDistance;
+    private long combatStartedAt;
+    private bool timeoutHandled;
 
     public CombatGoal(ILogger<CombatGoal> logger, ConfigurableInput input,
         Wait wait, PlayerReader playerReader, StopMoving stopMoving, AddonBits bits,
@@ -91,6 +96,9 @@ public sealed class CombatGoal : GoapGoal
 
     public override void OnEnter()
     {
+        combatStartedAt = Stopwatch.GetTimestamp();
+        timeoutHandled = false;
+
         if (mountHandler.IsMounted())
         {
             mountHandler.Dismount();
@@ -112,6 +120,11 @@ public sealed class CombatGoal : GoapGoal
     public override void Update()
     {
         wait.Update();
+
+        if (HandleCombatTimeout())
+        {
+            return;
+        }
 
         if (Abs(lastDirection - playerReader.Direction) > PI / 2)
         {
@@ -195,6 +208,36 @@ public sealed class CombatGoal : GoapGoal
                 wait.Update();
             }
         }
+    }
+
+    private bool HandleCombatTimeout()
+    {
+        if (timeoutHandled ||
+            Stopwatch.GetElapsedTime(combatStartedAt).TotalMilliseconds < COMBAT_TIMEOUT_MS)
+        {
+            return timeoutHandled;
+        }
+
+        timeoutHandled = true;
+        logger.LogWarning(
+            "Combat exceeded {TimeoutMs}ms for target {TargetGuid}; clearing target to replan",
+            COMBAT_TIMEOUT_MS, playerReader.TargetGuid);
+
+        stopMoving.Stop();
+        if (bits.Target())
+        {
+            if (playerReader.PetTarget() ||
+                playerReader.IsCasting() ||
+                bits.Any_AutoAttack())
+            {
+                input.PressStopAttack();
+            }
+
+            input.PressClearTarget();
+            wait.Update();
+        }
+
+        return true;
     }
 
     private System.Numerics.Vector3 GetCorpseLocation(float distance)

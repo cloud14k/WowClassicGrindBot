@@ -80,7 +80,7 @@ public static partial class NativeMethods
     public const uint WM_QUIT = 0x0012;
     public const uint WM_HOTKEY = 0x0312;
     public const uint MOD_ALT = 0x0001;
-    public const uint VK_F1 = 0x0070;
+    public const uint VK_F2 = 0x0071;
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -1,0 +1,19 @@
+{
+  "InstallRoot": "",
+  "WinScpPath": "",
+  "WinScpSession": "Twinkle14kUpdates",
+  "RemoteApplicationDirectory": "/FTP/DATAS/share/Twinkle14k/app",
+  "ApplicationRelativePath": "app/espidf.exe",
+  "ApplicationArguments": [],
+  "BrowserUrl": "http://localhost:5000",
+  "PreservedPaths": [
+    "appsettings.json",
+    "addon_config.json",
+    "frame_config.json",
+    "data_config.json",
+    "decision-settings.json",
+    "input-backend.json",
+    "training-data/",
+    "logs/"
+  ]
+}
