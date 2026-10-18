@@ -1,6 +1,8 @@
 using DataConfigNamespace = global::DataConfig;
 
 using System;
+using System.Globalization;
+using System.IO;
 
 using Microsoft.Extensions.Logging;
 
@@ -59,6 +61,43 @@ internal static class P45Regression
             throw new InvalidOperationException("Forever Build and bake settings must both partition the navmesh cache.");
         }
 
+        string dotRecastVersion = typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0";
+        NavmeshBakeOptions defaults = new();
+        ForeverNavmeshBakeProfile profileA = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, defaults);
+        ForeverNavmeshBakeProfile profileB = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, new NavmeshBakeOptions());
+        CultureInfo previousCulture = CultureInfo.CurrentCulture;
+        string frenchCultureHash;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("fr-FR");
+            frenchCultureHash = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, new NavmeshBakeOptions()).SettingsHash;
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+        }
+        NavmeshBakeOptions filteredOptions = new() { MinWorldZ = new() { ["Azeroth"] = -700f } };
+        ForeverNavmeshBakeProfile filteredProfile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, filteredOptions);
+        ForeverNavmeshBakeProfile nextBuildProfile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70095, new NavmeshBakeOptions());
+        if (profileA.SettingsHash != profileB.SettingsHash || profileA.SettingsHash != frenchCultureHash ||
+            profileA.SettingsHash == filteredProfile.SettingsHash ||
+            profileA.SettingsHash == nextBuildProfile.SettingsHash || defaults.ResolveMinWorldZ("Azeroth") is not null)
+        {
+            throw new InvalidOperationException("The shared Forever bake profile is not deterministic or does not partition MinWorldZ and Build identity.");
+        }
+
+        NavmeshBakeOptions explicitNull = new() { MinWorldZ = new() { ["Azeroth"] = null } };
+        ExpectFailure(() => ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, explicitNull),
+            "An explicitly null MinWorldZ was silently treated as absent.");
+        string legacyNoFloor = NavmeshSettings.ComputeSettingsHash("wrath", dotRecastVersion, 0.5f, 1.6f, 48f);
+        string legacyNullFloor = NavmeshSettings.ComputeSettingsHash("wrath", dotRecastVersion, 0.5f, 1.6f, 48f, minWorldZ: null);
+        if (legacyNoFloor != legacyNullFloor)
+        {
+            throw new InvalidOperationException("Default MinWorldZ changed the existing Wrath cache hash path.");
+        }
+
+        RunBuildInfoResolverRegression();
+
         if (args.Length > 0)
         {
             WowClientBuildInfo? info = WowClientBuildInfo.Read(args[0], new Version(1, 60, 1, 70094));
@@ -66,11 +105,74 @@ internal static class P45Regression
             {
                 throw new InvalidOperationException("The local CASC .build.info did not resolve to wow_cn_beta Build 70094.");
             }
+
+            WowClientBuildInfo foreverInfo = WowClientBuildInfo.ReadForever(args[0]);
+            if (foreverInfo.Product != StartupClientVersion.ForeverProductId || foreverInfo.Build != 70094)
+            {
+                throw new InvalidOperationException("The PathingAPI Forever identity resolver did not match the local client Product/Build.");
+            }
         }
 
         P45GeometryRegression.Run();
 
         logger.LogInformation("P4.5 client identity and cache isolation checks passed.");
+    }
+
+    private static void RunBuildInfoResolverRegression()
+    {
+        string outputRoot = Environment.GetEnvironmentVariable("WOW_TEST_OUTPUT_ROOT")
+            ?? Path.Combine(Environment.CurrentDirectory, "tmp");
+        Directory.CreateDirectory(outputRoot);
+        string root = Path.Combine(outputRoot, $"wow-build-info-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(root);
+        try
+        {
+            string path = Path.Combine(root, ".build.info");
+            File.WriteAllText(path, "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_cn_beta\n");
+            WowClientBuildInfo info = WowClientBuildInfo.ReadForever(root);
+            WowClientBuildInfo configuredInfo = WowClientBuildInfo.ReadForeverConfigured(root, null);
+            if (info.Product != "wow_cn_beta" || info.Build != 70094)
+            {
+                throw new InvalidOperationException("The Forever client identity resolver parsed the fixture incorrectly.");
+            }
+            if (configuredInfo != info)
+            {
+                throw new InvalidOperationException("PathingAPI's configured-root resolver did not use the configured client identity.");
+            }
+
+            WowClientBuildInfo environmentInfo = WowClientBuildInfo.ReadForeverConfigured(" ", root);
+            if (environmentInfo != info)
+            {
+                throw new InvalidOperationException("PathingAPI's environment-root fallback did not resolve the configured client identity.");
+            }
+            ExpectFailure(() => WowClientBuildInfo.ReadForeverConfigured(null, null),
+                "PathingAPI accepted exp=forever without a configured client root.");
+
+            File.WriteAllText(path, "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_classic\n");
+            ExpectFailure(() => WowClientBuildInfo.ReadForever(root),
+                "PathingAPI's Forever identity resolver accepted a non-Forever Product.");
+            File.Delete(path);
+            ExpectFailure(() => WowClientBuildInfo.ReadForever(root),
+                "PathingAPI's Forever identity resolver accepted a missing .build.info.");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void ExpectFailure(Action action, string message)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
     }
 
     private static void CheckVersion(Version executableVersion, string product, int? build,

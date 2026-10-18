@@ -439,7 +439,10 @@ internal sealed class Program
     private static int Test_CostZoneValidation(Microsoft.Extensions.Logging.ILogger logger)
     {
         int failures = 0;
-        string root = System.IO.Path.Join(System.IO.Path.GetTempPath(), "costzone_validation_" + Guid.NewGuid().ToString("N"));
+        string testOutputRoot = Environment.GetEnvironmentVariable("WOW_TEST_OUTPUT_ROOT")
+            ?? System.IO.Path.Join(Environment.CurrentDirectory, "tmp");
+        System.IO.Directory.CreateDirectory(testOutputRoot);
+        string root = System.IO.Path.Join(testOutputRoot, "costzone_validation_" + Guid.NewGuid().ToString("N"));
         string continent = "Azeroth";
         string dir = System.IO.Path.Join(root, continent);
         System.IO.Directory.CreateDirectory(dir);

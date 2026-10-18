@@ -2,11 +2,18 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
+using DotRecast.Core;
+using DotRecast.Detour;
+using DotRecast.Detour.Io;
+using DotRecast.Recast;
 using ForeverGeometryTool;
 using PPather.Navmesh;
+using SharedLib;
 
 namespace CoreTests;
 
@@ -14,7 +21,10 @@ internal static class P45GeometryRegression
 {
     public static void Run()
     {
-        string root = Path.Combine(Path.GetTempPath(), $"wowclassicgrindbot-p45-{Guid.NewGuid():N}");
+        string testOutputRoot = Environment.GetEnvironmentVariable("WOW_TEST_OUTPUT_ROOT")
+            ?? Path.Combine(Environment.CurrentDirectory, "tmp");
+        Directory.CreateDirectory(testOutputRoot);
+        string root = Path.Combine(testOutputRoot, $"wowclassicgrindbot-p45-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
 
         string leftPath = WriteFixture(root, "adt33_46.rawgeo.json", 33, 46, 70094, 100f, false);
@@ -29,13 +39,17 @@ internal static class P45GeometryRegression
             forward.DuplicateTrianglesRemoved.Total <= 0 ||
             !forward.Tiles.Any(static tile => tile.SourceAdtsXY.Length == 2 &&
                                                tile.DuplicateTrianglesRemoved.Collision > 0 &&
-                                               tile.TileCounts.CollisionTriangles >= 2))
+                                               tile.TileCounts.CollisionTriangles >= 3))
         {
             throw new InvalidOperationException("The multi-ADT merge did not combine and identify exact duplicate collision triangles.");
         }
 
         ForeverGeometryTile shared = forward.Tiles.First(static tile => tile.SourceAdtsXY.Length == 2 &&
-            tile.DuplicateTrianglesRemoved.Collision > 0 && tile.TileCounts.CollisionTriangles >= 2);
+            tile.DuplicateTrianglesRemoved.Collision > 0 && tile.TileCounts.CollisionTriangles >= 3);
+        if (shared.TileCounts.CollisionTriangles != 3)
+        {
+            throw new InvalidOperationException("The opposite-winding duplicate was removed or an exact same-winding duplicate was retained.");
+        }
         float[] collisionHeights = Enumerable.Range(0, shared.CollisionVerticesRc.Length / 3)
             .Select(index => shared.CollisionVerticesRc[index * 3 + 1]).Distinct().ToArray();
         if (!collisionHeights.Contains(100f) || !collisionHeights.Contains(105f))
@@ -47,6 +61,17 @@ internal static class P45GeometryRegression
             shared.CollisionVerticesRc[2] != -1067f)
         {
             throw new InvalidOperationException("Geometry aggregation changed source triangle order or coordinates.");
+        }
+
+        GeometryAggregate filtered = ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
+            0, [left, right], expected, MinWorldZ: 101f, Continent: "Azeroth"));
+        ForeverGeometryTile filteredTile = filtered.Tiles.First(static tile => tile.SourceAdtsXY.Length == 2);
+        string runtimeEquivalentHash = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+            new NavmeshBakeOptions { MinWorldZ = new() { ["Azeroth"] = 101f } }).SettingsHash;
+        if (filtered.SettingsHash != runtimeEquivalentHash || filteredTile.TileCounts.CollisionTriangles != 1 ||
+            filteredTile.TileCounts.LiquidTriangles != 0)
+        {
+            throw new InvalidOperationException("MinWorldZ did not filter WoW world-Z before tile aggregation or resolve the same profile hash used by runtime.");
         }
 
         if (!shared.LiquidAreas.Contains(8) || !shared.LiquidAreas.Contains(9) ||
@@ -87,39 +112,444 @@ internal static class P45GeometryRegression
             0, [new GeometryInputFile(Path.Combine(root, "missing.rawgeo.json"), 33, 46)], [new(33, 46)])),
             "A missing raw ADT file was not rejected.");
 
-        string cacheDir = Path.Combine(root, "cache-manifest");
-        Directory.CreateDirectory(cacheDir);
-        string cacheTilePath = Path.Combine(cacheDir, "tile_1_2.dnm");
-        byte[] cacheTile = [1, 3, 3, 7];
-        File.WriteAllBytes(cacheTilePath, cacheTile);
-        string cacheTileHash = Convert.ToHexString(SHA256.HashData(cacheTile)).ToLowerInvariant();
-        File.WriteAllText(Path.Combine(cacheDir, "manifest.json"), JsonSerializer.Serialize(new
+        RunWindingClassificationRegression();
+        RunCacheManifestRegression(root);
+        RunBatchRunnerRegression(root);
+    }
+
+    private static void RunCacheManifestRegression(string root)
+    {
+        const string product = "wow_cn_beta";
+        const int build = 70094;
+        const int mapId = 0;
+        const string settingsHash = "test-settings";
+        const string continent = "Azeroth";
+        (int X, int Y)[] expectedAdts = [(0, 0)];
+        (int X, int Z)[] expectedTiles = [(1, 2)];
+
+        string selectedDir = Path.Combine(root, "cache-selected");
+        WriteCache(selectedDir, product, build, mapId, settingsHash, "explicit_adt_and_tile_set",
+            completeForRequested: true, publishable: false, continent: null);
+        ForeverNavmeshCacheManifest.ValidateSelectedPackForTest(selectedDir, product, build, settingsHash, mapId);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                selectedDir, product, build, settingsHash, mapId, continent),
+            "A selected-scope test cache was accepted by the official runtime entry.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForPublication(
+                selectedDir, product, build, settingsHash, mapId, continent, expectedAdts, expectedTiles),
+            "A selected-scope test cache was accepted for continent publication.");
+
+        string incompleteDir = Path.Combine(root, "cache-incomplete-continent");
+        WriteCache(incompleteDir, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: false, continent);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                incompleteDir, product, build, settingsHash, mapId, continent),
+            "complete_for_requested_sources_and_tiles was treated as complete continent coverage.");
+
+        string missingRequestedCompletenessDir = Path.Combine(root, "cache-missing-request-completeness");
+        WriteCache(missingRequestedCompletenessDir, product, build, mapId, settingsHash, "continent",
+            completeForRequested: false, publishable: true, continent);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                missingRequestedCompletenessDir, product, build, settingsHash, mapId, continent),
+            "A continent marker missing complete_for_requested_sources_and_tiles was accepted.");
+
+        string validDir = Path.Combine(root, "cache-continent");
+        WriteCache(validDir, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent);
+        ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build, settingsHash, mapId, continent);
+        ForeverNavmeshCacheManifest.ValidateForPublication(validDir, product, build, settingsHash, mapId,
+            continent, expectedAdts, expectedTiles);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForPublication(validDir, product, build,
+                settingsHash, mapId, continent, [(0, 1)], expectedTiles),
+            "Publication accepted a WDT ADT set different from the manifest coverage proof.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForPublication(validDir, product, build,
+                settingsHash, mapId, continent, expectedAdts, [(1, 3)]),
+            "Publication accepted a target tile set different from the manifest coverage proof.");
+
+        string continentManifestPath = Path.Combine(validDir, "manifest.json");
+        string completeCoverageManifest = File.ReadAllText(continentManifestPath);
+        JsonObject incompleteCoverage = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        incompleteCoverage["coverage"]!.AsObject()["wdt_tile_list_sha256"] = null;
+        File.WriteAllText(continentManifestPath, incompleteCoverage.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a continent marker without a hashed WDT tile-list proof.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, "wow_classic", build, settingsHash, mapId, continent),
+            "A cache manifest for another Product was not rejected.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build + 1, settingsHash, mapId, continent),
+            "A cache manifest for another Build was not rejected.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId + 1, continent),
+            "A cache manifest for another MapID was not rejected.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, "different-settings", mapId, continent),
+            "A cache manifest for another bake settings hash was not rejected.");
+
+        string manifestPath = Path.Combine(validDir, "manifest.json");
+        string savedManifest = File.ReadAllText(manifestPath);
+        File.Delete(manifestPath);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId, continent),
+            "A cache with no manifest was accepted.");
+        File.WriteAllText(manifestPath, "{ broken json");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId, continent),
+            "A corrupt manifest was accepted.");
+        File.WriteAllText(manifestPath, savedManifest);
+
+        string tilePath = Path.Combine(validDir, "tile_1_2.dnm");
+        byte[] validTile = File.ReadAllBytes(tilePath);
+        File.WriteAllBytes(tilePath, [.. validTile, 0x42]);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId, continent),
+            "A modified .dnm file was not rejected by its manifest hash.");
+        File.WriteAllBytes(tilePath, validTile);
+
+        File.Delete(tilePath);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId, continent),
+            "A deleted .dnm file was accepted.");
+        File.WriteAllBytes(tilePath, validTile);
+
+        File.Copy(tilePath, Path.Combine(validDir, "tile_1_3.dnm"));
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                validDir, product, build, settingsHash, mapId, continent),
+            "An unlisted extra .dnm tile was accepted.");
+    }
+
+    private static void WriteCache(string directory, string product, int build, int mapId,
+        string settingsHash, string scope, bool completeForRequested, bool publishable, string? continent)
+    {
+        Directory.CreateDirectory(directory);
+        if (Directory.EnumerateFileSystemEntries(directory).Any())
         {
-            format = ForeverNavmeshCacheManifest.Format,
+            throw new IOException($"Test cache directory is not empty: {directory}");
+        }
+
+        string tilePath = Path.Combine(directory, "tile_1_2.dnm");
+        using (FileStream stream = File.Create(tilePath))
+        using (BinaryWriter writer = new(stream))
+        {
+            DtMeshData data = CreateGroundTileData(1, 2);
+            new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
+        }
+
+        string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(tilePath))).ToLowerInvariant();
+        Dictionary<string, object?> manifest = new()
+        {
+            ["format"] = ForeverNavmeshCacheManifest.Format,
+            ["client_product"] = product,
+            ["client_build"] = build,
+            ["data_set_id"] = $"{product}-{build}",
+            ["map_id"] = mapId,
+            ["settings_hash"] = settingsHash,
+            ["scope"] = scope,
+            ["complete_for_requested_sources_and_tiles"] = completeForRequested,
+            ["complete_for_continent"] = publishable,
+            ["publishable_as_continent_cache"] = publishable,
+            ["source_adts"] = new[] { new { adt_xy = new[] { 0, 0 }, file_name = "adt00_00.rawgeo.json", sha256 = new string('a', 64) } },
+            ["tiles"] = new[] { new { dt_tile_x = 1, dt_tile_z = 2, file = "tile_1_2.dnm", sha256 = hash } },
+        };
+        if (continent is not null)
+        {
+            manifest["continent"] = continent;
+            manifest["coverage_provenance"] = "wdt_tile_list";
+            manifest["coverage"] = new
+            {
+                wdt_tile_list_file = "0000-list-tiles.log",
+                wdt_tile_list_sha256 = new string('b', 64),
+                wdt_client_product = product,
+                wdt_client_build = build,
+                wdt_map_id = mapId,
+                expected_source_adts_xy = new[] { new[] { 0, 0 } },
+                processed_source_adts_xy = new[] { new[] { 0, 0 } },
+                expected_tile_indices = new[] { new[] { 1, 2 } },
+                completed_tile_indices = new[] { new[] { 1, 2 } },
+            };
+        }
+
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest));
+    }
+
+    private static void RunBatchRunnerRegression(string root)
+    {
+        string inputRoot = Path.Combine(root, "batch-input");
+        string adtFolder = Path.Combine(inputRoot, "adt33_46", "raw-geometry");
+        Directory.CreateDirectory(adtFolder);
+        string rawPath = Path.Combine(adtFolder, "map0000_adt33_46.rawgeo.json");
+        WriteBatchFixture(rawPath);
+        string outputRoot = Path.Combine(root, "batch-state");
+        string dnmRoot = Path.Combine(root, "batch-dnm");
+        ForeverGeometryBatchRequest request = new(0, 33, 46, 33, 46,
+            inputRoot, outputRoot, dnmRoot, "Azeroth");
+
+        ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
+        if (first.SourceCount != 1 || first.TileCount != 1 || first.FailedTaskCount != 0 ||
+            first.Verification.AddTileCount != 1 || !first.Verification.HeightQuerySucceeded ||
+            !first.Verification.ConnectedPathSucceeded)
+        {
+            throw new InvalidOperationException("The explicit single-ADT batch did not bake and verify its one selected tile.");
+        }
+
+        string batchSettingsHash = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+            new NavmeshBakeOptions()).SettingsHash;
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
+                "wow_cn_beta", 70094, batchSettingsHash, 0, "Azeroth"),
+            "The batch runner's selected-scope manifest was accepted by the official runtime validator.");
+
+        _ = ForeverGeometryBatchRunner.VerifyState(first.StateFile);
+        ForeverGeometryBatchResult resumed = ForeverGeometryBatchRunner.Run(request with { Resume = true });
+        if (resumed.ReusedSourceCount != 1 || resumed.ReusedTileCount != 1)
+        {
+            throw new InvalidOperationException("The batch resume path repeated successful unchanged source/tile tasks.");
+        }
+
+        File.AppendAllText(rawPath, Environment.NewLine);
+        ForeverGeometryBatchResult sourceChanged = ForeverGeometryBatchRunner.Run(request with { Resume = true });
+        if (sourceChanged.ReusedSourceCount != 0 || sourceChanged.ReusedTileCount != 0)
+        {
+            throw new InvalidOperationException("A source SHA change did not invalidate its source and dependent tile tasks.");
+        }
+
+        _ = ForeverGeometryBatchRunner.VerifyState(sourceChanged.StateFile);
+        ForeverGeometryBatchResult configChanged = ForeverGeometryBatchRunner.Run(request with
+        {
+            AgentRadius = 0.6f,
+            Resume = true,
+        });
+        if (configChanged.ReusedSourceCount != 0 || configChanged.ReusedTileCount != 0)
+        {
+            throw new InvalidOperationException("A bake configuration change did not invalidate the batch's dependent results.");
+        }
+
+        _ = ForeverGeometryBatchRunner.VerifyState(configChanged.StateFile);
+
+        string missingInputRoot = Path.Combine(root, "batch-missing-input");
+        string failedOutputRoot = Path.Combine(root, "batch-failed-state");
+        string failedDnmRoot = Path.Combine(root, "batch-failed-dnm");
+        ForeverGeometryBatchRequest failedRequest = new(0, 12, 12, 12, 12,
+            missingInputRoot, failedOutputRoot, failedDnmRoot, "Azeroth");
+        ExpectFailure(() => ForeverGeometryBatchRunner.Run(failedRequest),
+            "A batch with a missing source ADT did not fail.");
+        using (JsonDocument failedState = JsonDocument.Parse(File.ReadAllText(Path.Combine(failedOutputRoot, "batch-state.json"))))
+        {
+            JsonElement state = failedState.RootElement;
+            JsonElement source = state.GetProperty("SourceTasks")[0];
+            if (state.GetProperty("Status").GetString() != "failed" ||
+                state.GetProperty("FailedTaskCount").GetInt32() != 1 ||
+                string.IsNullOrWhiteSpace(source.GetProperty("FailureReason").GetString()) ||
+                state.GetProperty("ElapsedMilliseconds").GetInt64() < 0 ||
+                state.GetProperty("OutputFileCount").GetInt64() == 0)
+            {
+                throw new InvalidOperationException("A failed batch did not persist its status, reason, and resource metrics.");
+            }
+        }
+
+        string clientRoot = Path.Combine(root, "batch-client");
+        Directory.CreateDirectory(clientRoot);
+        File.WriteAllText(Path.Combine(clientRoot, ".build.info"),
+            "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_cn_beta\n");
+        string wdtListLog = Path.Combine(root, "full-wdt-tile-list.log");
+        string cascDataPath = Path.Combine(clientRoot, "Data");
+        File.WriteAllText(wdtListLog,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(configChanged.StateFile,
+                clientRoot, wdtListLog),
+            "A partial batch was sealed despite an extra ADT in the independent WDT tile list.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
+                "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+                    new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
+            "A failed publication gate changed the selected batch manifest.");
+
+        File.WriteAllText(wdtListLog,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
+        ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublication(
+            configChanged.StateFile, clientRoot, wdtListLog);
+        if (sealedBatch.SourceCount != 1 || sealedBatch.TileCount != 1)
+        {
+            throw new InvalidOperationException("The complete fixture WDT coverage did not seal the verified batch.");
+        }
+        ForeverNavmeshBakeProfile sealedProfile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+            new NavmeshBakeOptions { AgentRadius = 0.6f });
+        ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
+            sealedProfile.SettingsHash, 0, "Azeroth");
+    }
+
+    private static void WriteBatchFixture(string path)
+    {
+        float[][] terrain =
+        [
+            [-1050f, 100f, -7800f],
+            [-1050f, 100f, -7760f],
+            [-1010f, 100f, -7800f],
+            [-1010f, 100f, -7760f],
+        ];
+        var raw = new
+        {
+            format = "wow-raw-geometry-v1",
+            map_id = 0,
+            adt_xy = new[] { 33, 46 },
+            mmap_xy = new[] { 46, 33 },
             client_product = "wow_cn_beta",
             client_build = 70094,
-            map_id = 0,
-            settings_hash = "test-settings",
-            scope = "explicit_adt_and_tile_set",
-            complete_for_requested_sources_and_tiles = true,
-            publishable_as_continent_cache = false,
-            tiles = new[] { new { dt_tile_x = 1, dt_tile_z = 2, file = "tile_1_2.dnm", sha256 = cacheTileHash } },
-        }));
-        ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_cn_beta", 70094, "test-settings", 0);
-        ExpectFailure(() => ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_cn_beta", 70094, "test-settings", 1),
-            "A cache manifest for another MapID was not rejected.");
-        ExpectFailure(() => ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_classic", 70094, "test-settings", 0),
-            "A cache manifest for another Product was not rejected.");
-        ExpectFailure(() => ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_cn_beta", 70095, "test-settings", 0),
-            "A cache manifest for another Build was not rejected.");
-        ExpectFailure(() => ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_cn_beta", 70094, "different-settings", 0),
-            "A cache manifest for another bake settings hash was not rejected.");
-        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForPublication(
-            cacheDir, "wow_cn_beta", 70094, "test-settings", 0),
-            "A selected-scope test cache was accepted for continent publication.");
-        File.WriteAllBytes(cacheTilePath, [1, 3, 3, 8]);
-        ExpectFailure(() => ForeverNavmeshCacheManifest.Validate(cacheDir, "wow_cn_beta", 70094, "test-settings", 0),
-            "A modified .dnm file was not rejected by its manifest hash.");
+            units = "yard",
+            coordinates = "[WoW_X,WoW_Z,WoW_Y]",
+            target_rc_transform = "[raw_Z,raw_Y,raw_X]",
+            terrain_vertex_count = terrain.Length,
+            terrain_triangle_count = 2,
+            collision_vertex_count = 0,
+            collision_triangle_count = 0,
+            wmo_triangle_count = 0,
+            m2_triangle_count = 0,
+            liquid_vertex_count = 0,
+            liquid_triangle_count = 0,
+            liquid_type_count = 0,
+            terrain_vertices = terrain,
+            terrain_triangles = new[] { new[] { 0, 2, 1 }, new[] { 2, 1, 3 } },
+            collision_vertices = Array.Empty<float[]>(),
+            collision_triangles = Array.Empty<int[]>(),
+            liquid_vertices = Array.Empty<float[]>(),
+            liquid_triangles = Array.Empty<int[]>(),
+            liquid_types = Array.Empty<int>(),
+        };
+        File.WriteAllText(path, JsonSerializer.Serialize(raw));
+    }
+
+    private static DtMeshData CreateGroundTileData(int tileX, int tileZ)
+    {
+        float tileMinX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float tileMinZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        float[] verts =
+        [
+            tileMinX + 20, 10, tileMinZ + 20,
+            tileMinX + 20, 10, tileMinZ + 60,
+            tileMinX + 60, 10, tileMinZ + 20,
+            tileMinX + 60, 10, tileMinZ + 60,
+        ];
+        TileGeometry geometry = new()
+        {
+            GroundVerts = verts,
+            GroundTris = [0, 1, 2, 2, 1, 3],
+            LiquidVerts = [],
+            LiquidTris = [],
+            LiquidAreas = [],
+            BMin = new Vector3(tileMinX, 0, tileMinZ),
+            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+        };
+        return NavmeshTileBuilder.Bake(geometry, tileX, tileZ, new NavmeshBakeOptions())
+            ?? throw new InvalidOperationException("Test ground geometry did not produce a real DNM tile.");
+    }
+
+    private static void RunWindingClassificationRegression()
+    {
+        float[] upward = [0, 10, 0, 0, 10, 40, 40, 10, 0];
+        float[] reversed = [0, 10, 0, 40, 10, 0, 0, 10, 40];
+        float[] wall = [0, 0, 0, 40, 0, 0, 0, 40, 0];
+        float[] ramp30 = [0, 0, 0, 0, 20, 40, 40, 0, 0];
+        float[] ramp60 = [0, 0, 0, 0, 40, 20, 40, 0, 0];
+        float[] stairs =
+        [
+            0, 0, 0, 0, 0, 20, 20, 0, 0,
+            0, 1, 20, 0, 1, 40, 20, 1, 20,
+            20, 0, 0, 20, 0, 20, 20, 1, 20,
+            0, 0, 20, 20, 1, 20, 20, 0, 20,
+        ];
+        int[] oneTriangle = [0, 1, 2];
+        RcContext context = new();
+        RcAreaModification ground = new(NavmeshSettings.AreaGround);
+        int upArea = RcRecast.MarkWalkableTriangles(context, 48, upward, oneTriangle, 1, ground)[0];
+        int reverseArea = RcRecast.MarkWalkableTriangles(context, 48, reversed, oneTriangle, 1, ground)[0];
+        int wallArea = RcRecast.MarkWalkableTriangles(context, 48, wall, oneTriangle, 1, ground)[0];
+        int ramp30Area = RcRecast.MarkWalkableTriangles(context, 48, ramp30, oneTriangle, 1, ground)[0];
+        int ramp60Area = RcRecast.MarkWalkableTriangles(context, 48, ramp60, oneTriangle, 1, ground)[0];
+        if (upArea != NavmeshSettings.AreaGround || reverseArea == upArea ||
+            wallArea == NavmeshSettings.AreaGround || ramp30Area != NavmeshSettings.AreaGround ||
+            ramp60Area == NavmeshSettings.AreaGround)
+        {
+            throw new InvalidOperationException("Recast winding or slope classification did not match the controlled ground/wall/ramp cases.");
+        }
+
+        int[] stairTriangles = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+        int[] stairAreas = RcRecast.MarkWalkableTriangles(context, 48, stairs, stairTriangles, 4, ground);
+        if (stairAreas[0] != NavmeshSettings.AreaGround || stairAreas[1] != NavmeshSettings.AreaGround ||
+            stairAreas[2] == NavmeshSettings.AreaGround || stairAreas[3] == NavmeshSettings.AreaGround)
+        {
+            throw new InvalidOperationException("Recast stair treads and risers were not classified independently.");
+        }
+
+        // A two-level pair stays distinct in the aggregator's exact coordinate key;
+        // it is also classified as two valid horizontal surfaces by Recast.
+        float[] twoLevels = [.. upward, 0, 15, 0, 0, 15, 40, 40, 15, 0];
+        int[] twoFloors = [0, 1, 2, 3, 4, 5];
+        int[] levels = RcRecast.MarkWalkableTriangles(context, 48, twoLevels, twoFloors, 2, ground);
+        if (levels.Length != 2 || levels.Any(area => area != NavmeshSettings.AreaGround))
+        {
+            throw new InvalidOperationException("Recast did not preserve both controlled stacked walkable surfaces.");
+        }
+
+        _ = CreateGroundTileData(1, 2);
+        if (NavmeshTileBuilder.Bake(CreateReversedFloorGeometry(1, 2), 1, 2, new NavmeshBakeOptions()) is not null)
+        {
+            throw new InvalidOperationException("A reversed floor produced a walkable navmesh polygon.");
+        }
+
+        DtMeshData stacked = NavmeshTileBuilder.Bake(CreateStackedFloorGeometry(1, 2), 1, 2, new NavmeshBakeOptions())
+            ?? throw new InvalidOperationException("Stacked floor geometry produced no navmesh tile.");
+        float[] outputHeights = Enumerable.Range(0, stacked.verts.Length / 3)
+            .Select(index => stacked.verts[index * 3 + 1]).Distinct().ToArray();
+        if (outputHeights.Length < 2)
+        {
+            throw new InvalidOperationException("The final navmesh bake collapsed two separated walkable floors into one layer.");
+        }
+    }
+
+    private static TileGeometry CreateReversedFloorGeometry(int tileX, int tileZ)
+    {
+        float minX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float minZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        float[] verts =
+        [
+            minX + 20, 10, minZ + 20,
+            minX + 20, 10, minZ + 60,
+            minX + 60, 10, minZ + 20,
+            minX + 60, 10, minZ + 60,
+        ];
+        return new TileGeometry
+        {
+            GroundVerts = verts,
+            GroundTris = [0, 2, 1, 2, 3, 1],
+            LiquidVerts = [],
+            LiquidTris = [],
+            LiquidAreas = [],
+            BMin = new Vector3(minX, 0, minZ),
+            BMax = new Vector3(minX + NavmeshSettings.TileWorldSize, 100, minZ + NavmeshSettings.TileWorldSize),
+        };
+    }
+
+    private static TileGeometry CreateStackedFloorGeometry(int tileX, int tileZ)
+    {
+        float minX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float minZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        float[] verts =
+        [
+            minX + 20, 10, minZ + 20, minX + 20, 10, minZ + 60,
+            minX + 60, 10, minZ + 20, minX + 60, 10, minZ + 60,
+            minX + 20, 15, minZ + 20, minX + 20, 15, minZ + 60,
+            minX + 60, 15, minZ + 20, minX + 60, 15, minZ + 60,
+        ];
+        return new TileGeometry
+        {
+            GroundVerts = verts,
+            GroundTris = [0, 1, 2, 2, 1, 3, 4, 5, 6, 6, 5, 7],
+            LiquidVerts = [],
+            LiquidTris = [],
+            LiquidAreas = [],
+            BMin = new Vector3(minX, 0, minZ),
+            BMax = new Vector3(minX + NavmeshSettings.TileWorldSize, 100, minZ + NavmeshSettings.TileWorldSize),
+        };
     }
 
     private static GeometryAggregate Export(IReadOnlyList<GeometryInputFile> inputs, IReadOnlyList<AdtCoordinate> expected) =>
@@ -144,11 +574,14 @@ internal static class P45GeometryRegression
         if (adtX == 34)
         {
             collision = [.. sharedCollision,
+                -1067f, firstCollisionHeight, -7800f,
+                -1066.8f, firstCollisionHeight, -7799.9f,
+                -1066.9f, firstCollisionHeight, -7800f,
                 -1067f, 105f, -7800f,
                 -1066.9f, 105f, -7800f,
                 -1066.8f, 105f, -7799.9f];
-            collisionTriangles = [[0, 1, corruptIndex ? 99 : 2], [3, 4, 5]];
-            wmoTriangles = 1;
+            collisionTriangles = [[1, corruptIndex ? 99 : 2, 0], [3, 4, 5], [6, 7, 8]];
+            wmoTriangles = 2;
             m2Triangles = 1;
         }
 

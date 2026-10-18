@@ -2,6 +2,8 @@ using System;
 using System.IO;
 using System.Linq;
 
+using SharedLib;
+
 namespace Game;
 
 /// <summary>
@@ -27,6 +29,43 @@ public sealed record WowClientBuildInfo(string Product, string Version, int Buil
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Reads the CASC identity for an independent Forever pathing process. It
+    /// fails closed when .build.info is absent, ambiguous, or belongs to a
+    /// different product; callers must not supply a guessed Build.
+    /// </summary>
+    public static WowClientBuildInfo ReadForever(string clientRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientRoot);
+        WowClientBuildInfo? info = Read(clientRoot);
+        if (info is null)
+        {
+            throw new InvalidDataException(
+                $"Could not resolve one active Product/Version from '{Path.Combine(clientRoot, ".build.info")}'. Configure Pathing:ForeverClientRoot to the installed Forever client with an unambiguous .build.info.");
+        }
+
+        if (!string.Equals(info.Product, StartupClientVersion.ForeverProductId, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"PathingAPI exp=forever requires Product '{StartupClientVersion.ForeverProductId}', but '{clientRoot}' reports '{info.Product}'.");
+        }
+
+        return info;
+    }
+
+    /// <summary>Resolves PathingAPI's explicit configuration/env fallback and client identity.</summary>
+    public static WowClientBuildInfo ReadForeverConfigured(string? configuredRoot, string? environmentRoot)
+    {
+        string? root = !string.IsNullOrWhiteSpace(configuredRoot) ? configuredRoot : environmentRoot;
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new InvalidOperationException(
+                "PathingAPI exp=forever requires Pathing:ForeverClientRoot or PATHING_FOREVER_CLIENT_ROOT pointing to the Forever CASC client directory; Product/Build are read from its .build.info.");
+        }
+
+        return ReadForever(root);
     }
 
     private static WowClientBuildInfo? ReadFile(string path, Version? executableVersion)

@@ -15,7 +15,7 @@ public sealed record GeometryAggregateRequest(int MapId, IReadOnlyList<GeometryI
     IReadOnlyList<AdtCoordinate> ExpectedAdts,
     float AgentRadius = 0.5f, float AgentMaxClimb = 1.6f,
     float PaddingYards = TileGeometryExtractor.PaddingYd, float WalkableSlope = 48f,
-    float? MinWorldZ = null);
+    float? MinWorldZ = null, string? Continent = null);
 
 public sealed record GeometrySourceRecord(
     [property: JsonPropertyName("adt_xy")] int[] AdtXY,
@@ -37,6 +37,8 @@ public sealed class GeometryAggregate
     public required float PaddingYards { get; init; }
     public required float WalkableSlope { get; init; }
     public required float? MinWorldZ { get; init; }
+    public string? Continent { get; init; }
+    public string? SettingsHash { get; init; }
     public int SourceTerrainTriangles => Sources.Sum(static source => source.Counts.TerrainTriangles);
     public int SourceCollisionTriangles => Sources.Sum(static source => source.Counts.CollisionTriangles);
     public int SourceLiquidTriangles => Sources.Sum(static source => source.Counts.LiquidTriangles);
@@ -149,6 +151,22 @@ public static class ForeverGeometryAggregator
         }
 
         GeometryDuplicateCounts duplicates = SumDuplicates(tiles.Select(static tile => tile.DuplicateTrianglesRemoved));
+        string? settingsHash = null;
+        if (!string.IsNullOrWhiteSpace(request.Continent))
+        {
+            ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(request.Continent,
+                expectedProduct!, expectedBuild!.Value, new SharedLib.NavmeshBakeOptions
+                {
+                    AgentRadius = request.AgentRadius,
+                    AgentMaxClimb = request.AgentMaxClimb,
+                    WalkableSlope = request.WalkableSlope,
+                    MinWorldZ = request.MinWorldZ.HasValue
+                        ? new Dictionary<string, float?> { [request.Continent] = request.MinWorldZ.Value }
+                        : [],
+                });
+            settingsHash = profile.SettingsHash;
+        }
+
         return new GeometryAggregate
         {
             MapId = request.MapId,
@@ -163,6 +181,8 @@ public static class ForeverGeometryAggregator
             PaddingYards = request.PaddingYards,
             WalkableSlope = request.WalkableSlope,
             MinWorldZ = request.MinWorldZ,
+            Continent = request.Continent,
+            SettingsHash = settingsHash,
         };
     }
 
@@ -189,6 +209,8 @@ public static class ForeverGeometryAggregator
             map_id = aggregate.MapId,
             client_product = aggregate.ClientProduct,
             client_build = aggregate.ClientBuild,
+            continent = aggregate.Continent,
+            settings_hash = aggregate.SettingsHash,
             scope = "explicit_adt_set",
             complete_for_requested_sources = true,
             publishable_as_continent_cache = false,
@@ -427,10 +449,25 @@ public static class ForeverGeometryAggregator
             PointKey first = PointKey.From(a);
             PointKey second = PointKey.From(b);
             PointKey third = PointKey.From(c);
-            if (first.CompareTo(second) > 0) (first, second) = (second, first);
-            if (second.CompareTo(third) > 0) (second, third) = (third, second);
-            if (first.CompareTo(second) > 0) (first, second) = (second, first);
-            return new TriangleKey(first, second, third, area);
+
+            // A cyclic rotation preserves the face normal; swapping any pair
+            // reverses it. Recast uses that normal for walkable-slope marking,
+            // so only compare the three cyclic forms and retain reverse winding.
+            (PointKey A, PointKey B, PointKey C) canonical = (first, second, third);
+            (PointKey A, PointKey B, PointKey C) rotateOnce = (second, third, first);
+            (PointKey A, PointKey B, PointKey C) rotateTwice = (third, first, second);
+            if (Compare(rotateOnce, canonical) < 0) canonical = rotateOnce;
+            if (Compare(rotateTwice, canonical) < 0) canonical = rotateTwice;
+            return new TriangleKey(canonical.A, canonical.B, canonical.C, area);
+        }
+
+        private static int Compare((PointKey A, PointKey B, PointKey C) left,
+            (PointKey A, PointKey B, PointKey C) right)
+        {
+            int result = left.A.CompareTo(right.A);
+            if (result != 0) return result;
+            result = left.B.CompareTo(right.B);
+            return result != 0 ? result : left.C.CompareTo(right.C);
         }
     }
 }

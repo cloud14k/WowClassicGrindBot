@@ -26,9 +26,201 @@ public sealed record BakeVerification(int TileCount, int AddTileCount, int Cross
     bool HeightQuerySucceeded, bool ConnectedPathSucceeded, int PathPolyCount,
     float[] StartWow, float[] EndWow, string SettingsHash, IReadOnlyList<BakedTileRecord> Tiles);
 
+public sealed record DnmSetVerification(int TileCount, int AddTileCount, int CrossTileLinkCount,
+    bool HeightQuerySucceeded, bool ConnectedPathSucceeded, int PathPolyCount,
+    IReadOnlyList<BakedTileRecord> Tiles);
+
 public static class ForeverGeometryBakeVerifier
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+    /// <summary>
+    /// Independently validates an already-baked explicit DNM set. Used by the
+    /// resumable batch tool after per-tile writes and by its separate verify
+    /// command; it does not read or bake geometry.
+    /// </summary>
+    public static DnmSetVerification VerifyDnmFiles(string dnmDirectory,
+        IReadOnlyCollection<(int X, int Z)> expectedTiles, bool requireExactFileSet = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(dnmDirectory);
+        ArgumentNullException.ThrowIfNull(expectedTiles);
+        if (!Directory.Exists(dnmDirectory) || expectedTiles.Count == 0 ||
+            expectedTiles.Distinct().Count() != expectedTiles.Count)
+        {
+            throw new InvalidDataException("DNM verification requires an existing directory and a non-empty unique explicit tile set.");
+        }
+
+        HashSet<string> expectedFiles = expectedTiles
+            .Select(static tile => $"tile_{tile.X}_{tile.Z}.dnm")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> actualFiles = Directory.EnumerateFiles(dnmDirectory, "*.dnm")
+            .Select(Path.GetFileName).Where(static name => name is not null).Cast<string>()
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (requireExactFileSet && !actualFiles.SetEquals(expectedFiles) ||
+            !requireExactFileSet && expectedFiles.Any(file => !actualFiles.Contains(file)))
+        {
+            throw new InvalidDataException("The DNM output file set does not match the explicit expected tile set.");
+        }
+
+        List<(int X, int Z, DtMeshData Data, string File, string Hash)> loaded = [];
+        foreach ((int x, int z) in expectedTiles.OrderBy(static item => item.X).ThenBy(static item => item.Z))
+        {
+            if (!NavmeshCoords.IsValidTile(x, z))
+            {
+                throw new InvalidDataException($"Invalid Detour tile coordinate ({x},{z}).");
+            }
+
+            string file = $"tile_{x}_{z}.dnm";
+            string path = Path.Combine(dnmDirectory, file);
+            DtMeshData data;
+            try
+            {
+                using FileStream stream = File.OpenRead(path);
+                using BinaryReader reader = new(stream);
+                data = new DtMeshDataReader().Read(reader, NavmeshSettings.VertsPerPoly);
+            }
+            catch (Exception ex) when (ex is IOException or ArgumentException or InvalidOperationException or IndexOutOfRangeException)
+            {
+                throw new InvalidDataException($"DNM tile is unreadable or malformed: {path}", ex);
+            }
+
+            if (data.header.x != x || data.header.y != z || data.header.polyCount <= 0 || data.header.vertCount <= 0)
+            {
+                throw new InvalidDataException($"DNM header is empty or has the wrong tile identity: {path}");
+            }
+
+            loaded.Add((x, z, data, file,
+                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant()));
+        }
+
+        DtNavMesh navMesh = new();
+        DtStatus initStatus = navMesh.Init(new DtNavMeshParams
+        {
+            orig = new Vector3(NavmeshCoords.Origin, 0, NavmeshCoords.Origin),
+            tileWidth = NavmeshSettings.TileWorldSize,
+            tileHeight = NavmeshSettings.TileWorldSize,
+            maxTiles = NavmeshSettings.MaxTiles,
+            maxPolys = NavmeshSettings.MaxPolysPerTile,
+        }, NavmeshSettings.VertsPerPoly);
+        if (!initStatus.Succeeded())
+        {
+            throw new InvalidOperationException($"DtNavMesh.Init failed for the explicit DNM set: {initStatus}");
+        }
+
+        Dictionary<(int X, int Z), DtMeshTile> meshTiles = [];
+        foreach ((int x, int z, DtMeshData data, _, _) in loaded)
+        {
+            DtStatus addStatus = navMesh.AddTile(data, 0, 0, out long tileRef);
+            if (!addStatus.Succeeded() || tileRef == 0)
+            {
+                throw new InvalidOperationException($"DtNavMesh.AddTile failed for ({x},{z}): {addStatus}");
+            }
+
+            meshTiles.Add((x, z), navMesh.GetTileByRef(tileRef)
+                ?? throw new InvalidOperationException("DtNavMesh.AddTile succeeded but the tile could not be read back."));
+        }
+
+        DtNavMeshQuery query = new(navMesh);
+        WowQueryFilter filter = new();
+        filter.BeginQuery();
+        bool heightSucceeded = false;
+        bool pathSucceeded = false;
+        int pathPolyCount = 0;
+        int crossTileLinks = 0;
+        foreach (DtMeshTile tile in meshTiles.Values)
+        {
+            long baseRef = navMesh.GetPolyRefBase(tile);
+            for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
+            {
+                DtPoly poly = tile.data.polys[polyIndex];
+                if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND ||
+                    (poly.flags & WowQueryFilter.IncludeFlags) == 0)
+                {
+                    continue;
+                }
+
+                long startRef = baseRef | (long)poly.index;
+                Vector3 center = navMesh.GetPolyCenter(startRef);
+                if (!heightSucceeded && query.ClosestPointOnPoly(startRef, center, out _, out _).Succeeded())
+                {
+                    heightSucceeded = true;
+                }
+
+                for (int linkIndex = poly.firstLink; linkIndex != DtDetour.DT_NULL_LINK; linkIndex = tile.links[linkIndex].next)
+                {
+                    long endRef = tile.links[linkIndex].refs;
+                    if (endRef == 0 || endRef == startRef || !navMesh.IsValidPolyRef(endRef) ||
+                        !navMesh.GetTileAndPolyByRef(endRef, out DtMeshTile endTile, out _).Succeeded())
+                    {
+                        continue;
+                    }
+
+                    bool crossTile = endTile.data.header.x != tile.data.header.x || endTile.data.header.y != tile.data.header.y;
+                    if (crossTile)
+                    {
+                        crossTileLinks++;
+                    }
+
+                    if (pathSucceeded || expectedTiles.Count > 1 && !crossTile)
+                    {
+                        continue;
+                    }
+
+                    Vector3 end = navMesh.GetPolyCenter(endRef);
+                    long[] path = new long[64];
+                    DtStatus status = query.FindPath(startRef, endRef, center, end, filter,
+                        path, out int count, path.Length);
+                    if (status.Succeeded() && count >= 2 && path[count - 1] == endRef)
+                    {
+                        pathSucceeded = true;
+                        pathPolyCount = count;
+                    }
+                }
+            }
+        }
+
+        // A one-tile batch may legitimately bake to a single polygon, which
+        // has no neighbour link. Still prove Detour can query a path between
+        // two points on that loaded ground polygon.
+        if (!pathSucceeded && expectedTiles.Count == 1)
+        {
+            DtMeshTile tile = meshTiles.Values.Single();
+            long baseRef = navMesh.GetPolyRefBase(tile);
+            for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
+            {
+                DtPoly poly = tile.data.polys[polyIndex];
+                if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND ||
+                    (poly.flags & WowQueryFilter.IncludeFlags) == 0) continue;
+                long polyRef = baseRef | (long)poly.index;
+                Vector3 center = navMesh.GetPolyCenter(polyRef);
+                long[] path = new long[4];
+                DtStatus status = query.FindPath(polyRef, polyRef, center, center, filter,
+                    path, out int count, path.Length);
+                if (status.Succeeded() && count == 1 && path[0] == polyRef)
+                {
+                    pathSucceeded = true;
+                    pathPolyCount = count;
+                    break;
+                }
+            }
+        }
+
+        if (expectedTiles.Count > 1 && crossTileLinks == 0)
+        {
+            throw new InvalidDataException("Multiple DNM tiles loaded, but no cross-tile links were established.");
+        }
+
+        if (!heightSucceeded || !pathSucceeded)
+        {
+            throw new InvalidDataException("The DNM set failed its ground-height or connected-path query.");
+        }
+
+        BakedTileRecord[] records = loaded.Select(static item => new BakedTileRecord(
+            item.X, item.Z, item.File, item.Hash, item.Data.header.polyCount, item.Data.header.vertCount,
+            0, 0, 0)).ToArray();
+        return new DnmSetVerification(loaded.Count, loaded.Count, crossTileLinks,
+            heightSucceeded, pathSucceeded, pathPolyCount, records);
+    }
 
     public static BakeVerification BakeAndVerify(GeometryAggregate aggregate,
         IReadOnlyCollection<(int X, int Z)> requestedTiles, string outputDirectory)
@@ -68,7 +260,22 @@ public static class ForeverGeometryBakeVerifier
             AgentRadius = aggregate.AgentRadius,
             AgentMaxClimb = aggregate.AgentMaxClimb,
             WalkableSlope = aggregate.WalkableSlope,
+            MinWorldZ = aggregate.MinWorldZ.HasValue && aggregate.Continent is not null
+                ? new Dictionary<string, float?> { [aggregate.Continent] = aggregate.MinWorldZ.Value }
+                : [],
         };
+        if (string.IsNullOrWhiteSpace(aggregate.Continent))
+        {
+            throw new InvalidDataException("Baking DNM tiles requires an explicit --continent so the shared Forever bake profile can resolve MinWorldZ and cache identity.");
+        }
+
+        ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(aggregate.Continent,
+            aggregate.ClientProduct, aggregate.ClientBuild, bake);
+        if (!string.Equals(aggregate.SettingsHash, profile.SettingsHash, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException("The aggregate settings hash does not match the DNM bake profile; regenerate geometry with the same continent and bake settings.");
+        }
+
         List<(ForeverGeometryTile Source, DtMeshData Data, string Path, string Sha256)> loadedTiles = [];
         foreach (ForeverGeometryTile source in selected)
         {
@@ -216,11 +423,7 @@ public static class ForeverGeometryBakeVerifier
             throw new InvalidDataException("The loaded .dnm set failed the ground-height or cross-tile path query.");
         }
 
-        string dotRecastVersion = typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0";
-        string settingsHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
-            bake.AgentRadius, bake.AgentMaxClimb, bake.WalkableSlope,
-            minWorldZ: aggregate.MinWorldZ,
-            dataSetIdentity: $"{StartupClientVersion.ForeverProductId}-{aggregate.ClientBuild}");
+        string settingsHash = profile.SettingsHash;
         BakedTileRecord[] records = loadedTiles.Select(static item => new BakedTileRecord(
             item.Source.DtTileX, item.Source.DtTileZ, Path.GetFileName(item.Path), item.Sha256,
             item.Data.header.polyCount, item.Data.header.vertCount,
@@ -231,9 +434,10 @@ public static class ForeverGeometryBakeVerifier
             format = "wow-forever-dnm-manifest-v1",
             client_product = aggregate.ClientProduct,
             client_build = aggregate.ClientBuild,
-            data_set_id = $"{StartupClientVersion.ForeverProductId}-{aggregate.ClientBuild}",
+            data_set_id = profile.DataSetIdentity,
             settings_hash = settingsHash,
             map_id = aggregate.MapId,
+            continent = profile.Continent,
             scope = "explicit_adt_and_tile_set",
             complete_for_requested_sources_and_tiles = true,
             publishable_as_continent_cache = false,
@@ -244,13 +448,13 @@ public static class ForeverGeometryBakeVerifier
                 agent_radius = bake.AgentRadius,
                 agent_max_climb = bake.AgentMaxClimb,
                 walkable_slope = bake.WalkableSlope,
-                min_world_z = aggregate.MinWorldZ,
+                min_world_z = profile.MinWorldZ,
                 cell_size = NavmeshSettings.CellSize,
                 cell_height = NavmeshSettings.CellHeight,
                 tile_world_size = NavmeshSettings.TileWorldSize,
                 verts_per_poly = NavmeshSettings.VertsPerPoly,
                 format_version = NavmeshSettings.FormatVersion,
-                dot_recast_version = dotRecastVersion,
+                dot_recast_version = profile.DotRecastVersion,
             },
             query_verification = new
             {

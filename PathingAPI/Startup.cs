@@ -1,5 +1,7 @@
 using Core.Database;
 
+using Game;
+
 using Frontend;
 
 using MatBlazor;
@@ -93,7 +95,19 @@ public sealed class Startup
         services.AddRazorPages();
         services.AddServerSideBlazor();
         services.AddSingleton<CancellationTokenSource>();
-        services.AddSingleton<DataConfig>(x => DataConfig.Load(exp));
+        DataConfig dataConfig = DataConfig.Load(exp);
+        if (DataConfig.ClientEra(exp) == "forever")
+        {
+            WowClientBuildInfo clientIdentity = WowClientBuildInfo.ReadForeverConfigured(
+                configuration["Pathing:ForeverClientRoot"],
+                Environment.GetEnvironmentVariable("PATHING_FOREVER_CLIENT_ROOT"));
+            dataConfig.ClientProduct = clientIdentity.Product;
+            dataConfig.ClientBuild = clientIdentity.Build;
+            Log.Information("Forever pathing client identity: {Product} Build {Build}",
+                clientIdentity.Product, clientIdentity.Build);
+        }
+
+        services.AddSingleton(dataConfig);
         services.AddSingleton<WorldMapAreaDB>();
 
         services.Configure<NavmeshBakeOptions>(configuration.GetSection(NavmeshBakeOptions.Position));

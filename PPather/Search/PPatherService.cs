@@ -892,29 +892,26 @@ public sealed class PPatherService : IDisposable
     {
         // The era, not the client name: som, tbc and wrath share one bake.
         string era = DataConfig.ClientEra(dataConfig.Exp);
-        string? dataSetIdentity = null;
+        string hash;
         if (era == "forever")
         {
-            if (!string.Equals(dataConfig.ClientProduct, StartupClientVersion.ForeverProductId,
-                    StringComparison.OrdinalIgnoreCase) || !dataConfig.ClientBuild.HasValue)
-            {
-                throw new InvalidOperationException(
-                    "Forever navmesh data requires a verified wow_cn_beta Product and Build from the client install metadata.");
-            }
-
-            dataSetIdentity = dataConfig.NavmeshDataSetId;
+            ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(continent,
+                dataConfig.ClientProduct, dataConfig.ClientBuild ?? 0, bakeOptions);
+            hash = profile.SettingsHash;
         }
-
-        string hash = NavmeshSettings.ComputeSettingsHash(
-            era,
-            typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0",
-            bakeOptions.AgentRadius, bakeOptions.AgentMaxClimb, bakeOptions.WalkableSlope,
-            bakeOptions.ResolveMinWorldZ(continent), dataSetIdentity);
+        else
+        {
+            hash = NavmeshSettings.ComputeSettingsHash(
+                era,
+                typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0",
+                bakeOptions.AgentRadius, bakeOptions.AgentMaxClimb, bakeOptions.WalkableSlope,
+                bakeOptions.ResolveMinWorldZ(continent));
+        }
 
         return System.IO.Path.Join(dataConfig.Navmesh, continent, hash);
     }
 
-    private void ValidateForeverNavmeshCache(string cacheDir, float expectedMapId)
+    private void ValidateForeverNavmeshCache(string cacheDir, float expectedMapId, string continent)
     {
         if (DataConfig.ClientEra(dataConfig.Exp) != "forever")
         {
@@ -927,9 +924,10 @@ public sealed class PPatherService : IDisposable
             throw new InvalidOperationException($"Forever navmesh cache requires an integer MapID, received {expectedMapId}.");
         }
 
-        string settingsHash = System.IO.Path.GetFileName(cacheDir);
-        ForeverNavmeshCacheManifest.Validate(cacheDir, dataConfig.ClientProduct,
-            dataConfig.ClientBuild!.Value, settingsHash, (int)expectedMapId);
+        ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(continent,
+            dataConfig.ClientProduct, dataConfig.ClientBuild!.Value, bakeOptions);
+        ForeverNavmeshCacheManifest.ValidateForRuntime(cacheDir, profile.ClientProduct,
+            profile.ClientBuild, profile.SettingsHash, (int)expectedMapId, profile.Continent);
     }
 
     /// <summary>
@@ -990,7 +988,7 @@ public sealed class PPatherService : IDisposable
 
         string continent = ContinentDB.IdToName[activeMapId];
         string cacheDir = NavmeshCacheDir(continent);
-        ValidateForeverNavmeshCache(cacheDir, activeMapId);
+        ValidateForeverNavmeshCache(cacheDir, activeMapId, continent);
 
         navmeshPathfinder = new NavmeshPathfinder(logger, TriangleWorld, cacheDir, bakeOptions, queryOptions,
             bakeOptions.ResolveMinWorldZ(continent));
@@ -1279,7 +1277,7 @@ public sealed class PPatherService : IDisposable
                 return null;
             }
 
-            ValidateForeverNavmeshCache(cacheDir, mapId);
+            ValidateForeverNavmeshCache(cacheDir, mapId, continent);
 
             nav = new NavmeshPathfinder(logger, null, cacheDir, bakeOptions, queryOptions,
                 bakeOptions.ResolveMinWorldZ(continent));

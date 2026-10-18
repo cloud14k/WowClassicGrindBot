@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System;
 
 namespace SharedLib;
 
@@ -46,7 +47,7 @@ public sealed class NavmeshBakeOptions
     public int? BakeWorkers { get; set; }
 
     /// <summary>
-    /// Per-continent world-Z floor, yards: geometry whose highest vertex sits
+    /// Per-continent WoW world-Z floor, yards: geometry whose highest vertex sits
     /// below it is dropped for that continent only. Keyed by continent name
     /// (e.g. "Expansion01"), so a floor set for one continent never disturbs
     /// another's cache. Empty (default) keeps everything everywhere.
@@ -58,10 +59,37 @@ public sealed class NavmeshBakeOptions
     /// base and the lowest real ground. The resolved value feeds the settings
     /// hash, so a filtered continent bakes into its own cache directory while
     /// unlisted continents keep their existing hash.
+    /// An absent key means no floor. A present key with a null value is an
+    /// invalid explicit configuration and throws during profile resolution.
     /// </summary>
-    public Dictionary<string, float> MinWorldZ { get; set; } = [];
+    public Dictionary<string, float?> MinWorldZ { get; set; } = [];
 
-    /// <summary>The world-Z floor configured for <paramref name="continent"/>, or null if none.</summary>
-    public float? ResolveMinWorldZ(string continent) =>
-        MinWorldZ.TryGetValue(continent, out float z) ? z : null;
+    /// <summary>
+    /// Resolves the configured WoW world-Z floor for this continent. The raw
+    /// geometry contract is [WoW_X, WoW_Z, WoW_Y]; filtering happens before
+    /// Recast tile slicing and retains a triangle when its maximum WoW-Z vertex
+    /// reaches the floor. It is not an Recast-Y value (the same axis after the
+    /// [WoW_Y, WoW_Z, WoW_X] transform).
+    /// </summary>
+    public float? ResolveMinWorldZ(string continent)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(continent);
+        if (!MinWorldZ.TryGetValue(continent, out float? configured))
+        {
+            return null;
+        }
+
+        if (!configured.HasValue)
+        {
+            throw new InvalidOperationException(
+                $"Navmesh:Bake:MinWorldZ contains an explicit null for '{continent}'. Remove the key to disable the floor or set a finite WoW world-Z value.");
+        }
+
+        if (!float.IsFinite(configured.Value))
+        {
+            throw new InvalidOperationException($"Navmesh:Bake:MinWorldZ for '{continent}' must be finite.");
+        }
+
+        return configured.Value;
+    }
 }
