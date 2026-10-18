@@ -17,7 +17,9 @@ namespace PPather.Navmesh;
 /// </summary>
 public static class ForeverNavmeshCacheManifest
 {
-    public const string Format = "wow-forever-dnm-manifest-v1";
+    public const string Format = "wow-forever-dnm-manifest-v2";
+    public const string WdtCoverageEvidenceFormat = "wow-forever-wdt-coverage-v1";
+    public const string WdtCoverageEvidenceRelativePath = "coverage/wdt-coverage.json";
 
     /// <summary>Explicit test entry for packs that are intentionally incomplete.</summary>
     public static void ValidateSelectedPackForTest(string cacheDirectory, string expectedProduct,
@@ -104,13 +106,16 @@ public static class ForeverNavmeshCacheManifest
                 $"MapID {expectedMapId}, continent '{expectedContinent ?? "<selected-test>"}' and settings {expectedSettingsHash}: {manifestPath}");
         }
 
+        ValidateGeometryBakeIdentity(root, manifestPath);
+
         bool completeForRequested = ReadOptionalBool(root, "complete_for_requested_sources_and_tiles");
         bool completeForContinent = ReadOptionalBool(root, "complete_for_continent");
         bool publishable = ReadOptionalBool(root, "publishable_as_continent_cache");
         HashSet<(int X, int Y)> sourceAdts = ReadSourceAdts(root, manifestPath);
         TileRecord[] tiles = ReadAndValidateTiles(cacheDirectory, root, manifestPath);
         (string tileListFile, string tileListSha256, string tileListProduct, int tileListBuild,
-            int tileListMapId) = ReadCoverageTileList(root, manifestPath);
+            int tileListMapId, HashSet<(int X, int Y)> wdtAdts) = ReadCoverageTileList(cacheDirectory,
+                root, manifestPath, product, build, mapId);
         if (tileListProduct.Length > 0 &&
             (!string.Equals(tileListProduct, product, StringComparison.OrdinalIgnoreCase) ||
              tileListBuild != build || tileListMapId != mapId))
@@ -120,7 +125,7 @@ public static class ForeverNavmeshCacheManifest
 
         return new ManifestSnapshot(scope, continent, completeForRequested, completeForContinent,
             publishable, ReadOptionalString(root, "coverage_provenance"), tileListFile, tileListSha256,
-            tileListProduct, tileListBuild, tileListMapId, sourceAdts,
+            tileListProduct, tileListBuild, tileListMapId, sourceAdts, wdtAdts,
             ReadOptionalCoverageAdts(root, "expected_source_adts_xy", manifestPath),
             ReadOptionalCoverageAdts(root, "processed_source_adts_xy", manifestPath),
             ReadOptionalCoverageTiles(root, "expected_tile_indices", manifestPath),
@@ -144,7 +149,8 @@ public static class ForeverNavmeshCacheManifest
                 "publishable_as_continent_cache=true and a hashed WDT tile-list coverage proof.");
         }
 
-        if (manifest.ExpectedAdts.Count == 0 || !manifest.ExpectedAdts.SetEquals(manifest.ProcessedAdts) ||
+        if (manifest.ExpectedAdts.Count == 0 || !manifest.ExpectedAdts.SetEquals(manifest.WdtAdts) ||
+            !manifest.ExpectedAdts.SetEquals(manifest.ProcessedAdts) ||
             !manifest.ExpectedAdts.SetEquals(manifest.SourceAdts) ||
             manifest.ExpectedTiles.Count == 0 || !manifest.ExpectedTiles.SetEquals(manifest.CompletedTiles) ||
             !manifest.ExpectedTiles.SetEquals(manifest.ManifestTiles))
@@ -329,40 +335,125 @@ public static class ForeverNavmeshCacheManifest
         return result;
     }
 
-    private static (string File, string Sha256, string Product, int Build, int MapId) ReadCoverageTileList(
-        JsonElement root, string manifestPath)
+    private static void ValidateGeometryBakeIdentity(JsonElement root, string manifestPath)
+    {
+        if (!root.TryGetProperty("bake_settings", out JsonElement settings) || settings.ValueKind != JsonValueKind.Object ||
+            !settings.TryGetProperty("padding_yards", out JsonElement paddingValue) ||
+            !paddingValue.TryGetSingle(out float padding) || padding != TileGeometryExtractor.PaddingYd ||
+            !string.Equals(ReadOptionalString(settings, "geometry_export_version"),
+                NavmeshSettings.ForeverGeometryExportAlgorithmVersion, StringComparison.Ordinal) ||
+            !string.Equals(ReadOptionalString(settings, "raw_geometry_format"),
+                NavmeshSettings.ForeverRawGeometryFormat, StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"Forever manifest geometry settings are missing or incompatible; regenerate raw geometry and DNM tiles: {manifestPath}");
+        }
+    }
+
+    private static (string File, string Sha256, string Product, int Build, int MapId,
+        HashSet<(int X, int Y)> Adts) ReadCoverageTileList(string cacheDirectory, JsonElement root,
+        string manifestPath, string product, int build, int mapId)
     {
         if (!root.TryGetProperty("coverage", out JsonElement coverage) || coverage.ValueKind != JsonValueKind.Object)
         {
-            return ("", "", "", 0, -1);
+            return ("", "", "", 0, -1, []);
         }
 
         string file = ReadOptionalString(coverage, "wdt_tile_list_file");
         string sha256 = ReadOptionalString(coverage, "wdt_tile_list_sha256");
-        string product = ReadOptionalString(coverage, "wdt_client_product");
-        int build = coverage.TryGetProperty("wdt_client_build", out JsonElement buildValue) &&
+        string proofProduct = ReadOptionalString(coverage, "wdt_client_product");
+        int proofBuild = coverage.TryGetProperty("wdt_client_build", out JsonElement buildValue) &&
                     buildValue.TryGetInt32(out int parsedBuild) ? parsedBuild : 0;
-        int mapId = coverage.TryGetProperty("wdt_map_id", out JsonElement mapValue) &&
+        int proofMapId = coverage.TryGetProperty("wdt_map_id", out JsonElement mapValue) &&
                     mapValue.TryGetInt32(out int parsedMapId) ? parsedMapId : -1;
-        if (file.Length > 0 && (!string.Equals(file, Path.GetFileName(file), StringComparison.Ordinal) ||
-                                file is "." or ".."))
+        bool anyProofField = file.Length > 0 || sha256.Length > 0 || proofProduct.Length > 0 || proofBuild > 0 || proofMapId >= 0;
+        if (!anyProofField)
         {
-            throw new InvalidDataException($"WDT tile-list evidence file name is unsafe: {manifestPath}");
+            return ("", "", "", 0, -1, []);
         }
 
-        if (sha256.Length > 0 && !IsSha256(sha256))
+        if (file.Length == 0 || !string.Equals(file, WdtCoverageEvidenceRelativePath, StringComparison.Ordinal) ||
+            Path.IsPathRooted(file) || file.Contains('\\'))
+        {
+            throw new InvalidDataException($"WDT coverage evidence path is missing, non-canonical, or unsafe: {manifestPath}");
+        }
+
+        if (!IsSha256(sha256))
         {
             throw new InvalidDataException($"WDT tile-list evidence SHA-256 is malformed: {manifestPath}");
         }
 
-        bool anyIdentity = product.Length > 0 || build > 0 || mapId >= 0;
-        bool completeIdentity = product.Length > 0 && build > 0 && mapId >= 0;
-        if (anyIdentity && !completeIdentity)
+        if (proofProduct.Length == 0 || proofBuild <= 0 || proofMapId < 0 ||
+            !string.Equals(proofProduct, product, StringComparison.OrdinalIgnoreCase) ||
+            proofBuild != build || proofMapId != mapId)
         {
-            throw new InvalidDataException($"WDT tile-list evidence identity is incomplete: {manifestPath}");
+            throw new InvalidDataException($"WDT tile-list evidence identity is incomplete or differs from the cache manifest: {manifestPath}");
         }
 
-        return (file, sha256, product, build, mapId);
+        string cacheRoot = Path.GetFullPath(cacheDirectory);
+        string evidencePath = Path.GetFullPath(Path.Combine(cacheRoot,
+            file.Replace('/', Path.DirectorySeparatorChar)));
+        if (!IsSameOrChild(evidencePath, cacheRoot) ||
+            !Directory.Exists(Path.GetDirectoryName(evidencePath)!) || !File.Exists(evidencePath) ||
+            (File.GetAttributes(Path.GetDirectoryName(evidencePath)!) & FileAttributes.ReparsePoint) != 0 ||
+            (File.GetAttributes(evidencePath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"WDT coverage evidence is missing or resolves outside the cache directory: {evidencePath}");
+        }
+
+        string actualHash;
+        using (FileStream evidenceStream = File.OpenRead(evidencePath))
+        {
+            actualHash = Convert.ToHexString(SHA256.HashData(evidenceStream)).ToLowerInvariant();
+        }
+        if (!actualHash.Equals(sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"WDT coverage evidence hash does not match the manifest: {evidencePath}");
+        }
+
+        using JsonDocument evidenceDocument = JsonDocument.Parse(File.ReadAllBytes(evidencePath));
+        JsonElement evidence = evidenceDocument.RootElement;
+        string evidenceProduct = ReadRequiredString(evidence, "client_product", evidencePath);
+        int evidenceBuild = ReadRequiredInt(evidence, "client_build", evidencePath);
+        int evidenceMap = ReadRequiredInt(evidence, "map_id", evidencePath);
+        if (ReadRequiredString(evidence, "format", evidencePath) != WdtCoverageEvidenceFormat ||
+            !string.Equals(ReadRequiredString(evidence, "source", evidencePath), "mapextractor --list-tiles", StringComparison.Ordinal) ||
+            !string.Equals(evidenceProduct, proofProduct, StringComparison.OrdinalIgnoreCase) || evidenceBuild != proofBuild ||
+            evidenceMap != proofMapId ||
+            !string.Equals(ReadRequiredString(evidence, "source_log_file", evidencePath),
+                Path.GetFileName(ReadRequiredString(evidence, "source_log_file", evidencePath)), StringComparison.Ordinal) ||
+            !IsSha256(ReadRequiredString(evidence, "source_log_sha256", evidencePath)))
+        {
+            throw new InvalidDataException($"WDT coverage evidence format or client identity is invalid: {evidencePath}");
+        }
+
+        if (!evidence.TryGetProperty("adt_xy", out JsonElement adtValues) || adtValues.ValueKind != JsonValueKind.Array ||
+            adtValues.GetArrayLength() == 0)
+        {
+            throw new InvalidDataException($"WDT coverage evidence has no ADT coordinate list: {evidencePath}");
+        }
+        HashSet<(int X, int Y)> adts = [];
+        (int X, int Y)? previous = null;
+        foreach (JsonElement pair in adtValues.EnumerateArray())
+        {
+            if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2 ||
+                !pair[0].TryGetInt32(out int x) || !pair[1].TryGetInt32(out int y) ||
+                x is < 0 or >= 64 || y is < 0 or >= 64 || !adts.Add((x, y)) ||
+                previous.HasValue && (y < previous.Value.Y || y == previous.Value.Y && x <= previous.Value.X))
+            {
+                throw new InvalidDataException($"WDT coverage evidence has an invalid, duplicate, or non-normalized ADT record: {evidencePath}");
+            }
+            previous = (x, y);
+        }
+
+        return (file, sha256, proofProduct, proofBuild, proofMapId, adts);
+    }
+
+    private static bool IsSameOrChild(string path, string parent)
+    {
+        string relative = Path.GetRelativePath(parent, path);
+        return relative != "." && !Path.IsPathRooted(relative) && relative != ".." &&
+               !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
@@ -392,6 +483,7 @@ public static class ForeverNavmeshCacheManifest
         bool CompleteForRequestedSourcesAndTiles, bool CompleteForContinent, bool PublishableAsContinentCache,
         string CoverageProvenance, string WdtTileListFile, string WdtTileListSha256,
         string WdtTileListProduct, int WdtTileListBuild, int WdtTileListMapId, HashSet<(int X, int Y)> SourceAdts,
+        HashSet<(int X, int Y)> WdtAdts,
         HashSet<(int X, int Y)> ExpectedAdts, HashSet<(int X, int Y)> ProcessedAdts,
         HashSet<(int X, int Z)> ExpectedTiles, HashSet<(int X, int Z)> CompletedTiles,
         HashSet<(int X, int Z)> ManifestTiles);

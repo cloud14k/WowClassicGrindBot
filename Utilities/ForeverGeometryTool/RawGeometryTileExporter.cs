@@ -11,13 +11,16 @@ public sealed record GeometryExportRequest(int MapId, int AdtX, int AdtY, float 
     float PaddingYards = TileGeometryExtractor.PaddingYd,
     float? MinWorldZ = null);
 
+internal sealed record RawGeometryTileExportResult(IReadOnlyList<ForeverGeometryTile> Tiles,
+    IReadOnlyCollection<(int X, int Z)> IndependentlyExpectedTiles);
+
 /// <summary>
 /// Converts one raw Forever ADT export into per-tile, rc-space triangle soup.
 /// It follows TileGeometryExtractor's horizontal AABB padding and tile bounds.
 /// </summary>
 public static class RawGeometryTileExporter
 {
-    private const string ExpectedInputFormat = "wow-raw-geometry-v1";
+    private const string ExpectedInputFormat = NavmeshSettings.ForeverRawGeometryFormat;
     private const string ExpectedCoordinates = "[WoW_X,WoW_Z,WoW_Y]";
     private const string ExpectedTransform = "[raw_Z,raw_Y,raw_X]";
     private const int MaximumTilesPerInput = 256;
@@ -29,6 +32,10 @@ public static class RawGeometryTileExporter
     };
 
     public static IReadOnlyList<ForeverGeometryTile> Export(string inputPath, GeometryExportRequest request)
+        => ExportWithIndependentCoverage(inputPath, request).Tiles;
+
+    internal static RawGeometryTileExportResult ExportWithIndependentCoverage(string inputPath,
+        GeometryExportRequest request)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
         ArgumentNullException.ThrowIfNull(request);
@@ -58,6 +65,7 @@ public static class RawGeometryTileExporter
         }
 
         ValidateInput(raw, request);
+        HashSet<(int X, int Z)> independentCoverage = RawGeometryTileCoverageVerifier.Calculate(raw, request);
         string sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(inputPath))).ToLowerInvariant();
         GeometryCounts sourceCounts = new()
         {
@@ -131,7 +139,18 @@ public static class RawGeometryTileExporter
             throw new InvalidDataException("The selected raw geometry contained no ground triangles in valid navmesh tiles.");
         }
 
-        return result;
+        HashSet<(int X, int Z)> exportedCoverage = result.Select(static tile => (tile.DtTileX, tile.DtTileZ)).ToHashSet();
+        if (!independentCoverage.SetEquals(exportedCoverage))
+        {
+            string missing = string.Join(',', independentCoverage.Except(exportedCoverage).OrderBy(static tile => tile.X)
+                .ThenBy(static tile => tile.Z).Select(static tile => $"({tile.X},{tile.Z})"));
+            string extra = string.Join(',', exportedCoverage.Except(independentCoverage).OrderBy(static tile => tile.X)
+                .ThenBy(static tile => tile.Z).Select(static tile => $"({tile.X},{tile.Z})"));
+            throw new InvalidDataException(
+                $"Independent raw-geometry tile coverage does not match the tile exporter for ADT ({request.AdtX},{request.AdtY}); missing=[{missing}], extra=[{extra}].");
+        }
+
+        return new RawGeometryTileExportResult(result, independentCoverage);
     }
 
     private static void ValidateInput(RawGeometryDocument raw, GeometryExportRequest request)

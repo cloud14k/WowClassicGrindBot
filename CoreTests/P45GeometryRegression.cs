@@ -175,6 +175,84 @@ internal static class P45GeometryRegression
             "The runtime accepted a continent marker without a hashed WDT tile-list proof.");
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
+        string evidencePath = Path.Combine(validDir, ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath
+            .Replace('/', Path.DirectorySeparatorChar));
+        byte[] completeEvidence = File.ReadAllBytes(evidencePath);
+        File.Delete(evidencePath);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a cache after its WDT coverage evidence file was deleted.");
+        File.WriteAllBytes(evidencePath, completeEvidence);
+
+        File.WriteAllBytes(evidencePath, [.. completeEvidence, 0x20]);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted modified WDT evidence without a matching hash.");
+        File.WriteAllBytes(evidencePath, completeEvidence);
+
+        JsonObject changedEvidenceHashManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        changedEvidenceHashManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] = new string('c', 64);
+        File.WriteAllText(continentManifestPath, changedEvidenceHashManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a manifest hash that does not match its WDT evidence file.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject wrongBuildEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+        wrongBuildEvidence["client_build"] = build + 1;
+        File.WriteAllText(evidencePath, wrongBuildEvidence.ToJsonString());
+        JsonObject wrongBuildManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        wrongBuildManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
+        File.WriteAllText(continentManifestPath, wrongBuildManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted WDT evidence from a different Build when its file hash was updated.");
+        File.WriteAllBytes(evidencePath, completeEvidence);
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject wrongMapEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+        wrongMapEvidence["map_id"] = mapId + 1;
+        File.WriteAllText(evidencePath, wrongMapEvidence.ToJsonString());
+        JsonObject wrongMapManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        wrongMapManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
+        File.WriteAllText(continentManifestPath, wrongMapManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted WDT evidence from a different MapID when its file hash was updated.");
+        File.WriteAllBytes(evidencePath, completeEvidence);
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        foreach (int[][] changedAdts in new[]
+                 {
+                     Array.Empty<int[]>(),
+                     new[] { new[] { 0, 0 }, new[] { 0, 0 } },
+                     new[] { new[] { 0, 0 }, new[] { 0, 1 } },
+                 })
+        {
+            JsonObject changedSetEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+            changedSetEvidence["adt_xy"] = JsonSerializer.SerializeToNode(changedAdts);
+            File.WriteAllText(evidencePath, changedSetEvidence.ToJsonString());
+            JsonObject changedSetManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+            changedSetManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
+                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
+            File.WriteAllText(continentManifestPath, changedSetManifest.ToJsonString());
+            ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                    settingsHash, mapId, continent),
+                "The runtime accepted deleted, duplicated, or extra ADTs in WDT evidence.");
+            File.WriteAllBytes(evidencePath, completeEvidence);
+            File.WriteAllText(continentManifestPath, completeCoverageManifest);
+        }
+
+        JsonObject escapedEvidenceManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        escapedEvidenceManifest["coverage"]!.AsObject()["wdt_tile_list_file"] = "../outside.json";
+        File.WriteAllText(continentManifestPath, escapedEvidenceManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a WDT evidence path that escapes the cache directory.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
                 validDir, "wow_classic", build, settingsHash, mapId, continent),
             "A cache manifest for another Product was not rejected.");
@@ -238,6 +316,21 @@ internal static class P45GeometryRegression
         }
 
         string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(tilePath))).ToLowerInvariant();
+        string evidenceRelativePath = ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath;
+        string evidencePath = Path.Combine(directory, evidenceRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
+        File.WriteAllText(evidencePath, JsonSerializer.Serialize(new
+        {
+            format = ForeverNavmeshCacheManifest.WdtCoverageEvidenceFormat,
+            client_product = product,
+            client_build = build,
+            map_id = mapId,
+            source = "mapextractor --list-tiles",
+            source_log_file = "test-list-tiles.log",
+            source_log_sha256 = new string('b', 64),
+            adt_xy = new[] { new[] { 0, 0 } },
+        }));
+        string evidenceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
         Dictionary<string, object?> manifest = new()
         {
             ["format"] = ForeverNavmeshCacheManifest.Format,
@@ -250,6 +343,12 @@ internal static class P45GeometryRegression
             ["complete_for_requested_sources_and_tiles"] = completeForRequested,
             ["complete_for_continent"] = publishable,
             ["publishable_as_continent_cache"] = publishable,
+            ["bake_settings"] = new
+            {
+                padding_yards = TileGeometryExtractor.PaddingYd,
+                geometry_export_version = NavmeshSettings.ForeverGeometryExportAlgorithmVersion,
+                raw_geometry_format = NavmeshSettings.ForeverRawGeometryFormat,
+            },
             ["source_adts"] = new[] { new { adt_xy = new[] { 0, 0 }, file_name = "adt00_00.rawgeo.json", sha256 = new string('a', 64) } },
             ["tiles"] = new[] { new { dt_tile_x = 1, dt_tile_z = 2, file = "tile_1_2.dnm", sha256 = hash } },
         };
@@ -259,8 +358,8 @@ internal static class P45GeometryRegression
             manifest["coverage_provenance"] = "wdt_tile_list";
             manifest["coverage"] = new
             {
-                wdt_tile_list_file = "0000-list-tiles.log",
-                wdt_tile_list_sha256 = new string('b', 64),
+                wdt_tile_list_file = evidenceRelativePath,
+                wdt_tile_list_sha256 = evidenceHash,
                 wdt_client_product = product,
                 wdt_client_build = build,
                 wdt_map_id = mapId,
@@ -285,6 +384,9 @@ internal static class P45GeometryRegression
         string dnmRoot = Path.Combine(root, "batch-dnm");
         ForeverGeometryBatchRequest request = new(0, 33, 46, 33, 46,
             inputRoot, outputRoot, dnmRoot, "Azeroth");
+        ExpectFailure(() => ForeverGeometryBatchRunner.Run(request with
+            { PaddingYards = TileGeometryExtractor.PaddingYd + 0.5f }),
+            "The batch runner accepted custom padding that runtime cannot identify.");
 
         ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
         if (first.SourceCount != 1 || first.TileCount != 1 || first.FailedTaskCount != 0 ||
@@ -358,7 +460,7 @@ internal static class P45GeometryRegression
             $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
         ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(configChanged.StateFile,
                 clientRoot, wdtListLog),
-            "A partial batch was sealed despite an extra ADT in the independent WDT tile list.");
+            "A rectangle batch was accepted for continent publication.");
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
                 "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
                     new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
@@ -366,8 +468,43 @@ internal static class P45GeometryRegression
 
         File.WriteAllText(wdtListLog,
             $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
+        ForeverGeometryBatchRequest explicitRequest = request with
+        {
+            AgentRadius = 0.6f,
+            Resume = true,
+            AdtList = [new AdtCoordinate(33, 46)],
+        };
+        ForeverGeometryBatchResult explicitBatch = ForeverGeometryBatchRunner.Run(explicitRequest);
+        using (JsonDocument explicitState = JsonDocument.Parse(File.ReadAllText(explicitBatch.StateFile)))
+        {
+            if (explicitState.RootElement.GetProperty("AdtSelectionMode").GetString() != "explicit_list" ||
+                explicitState.RootElement.GetProperty("RequestedAdts").GetArrayLength() != 1)
+            {
+                throw new InvalidOperationException("The normalized explicit ADT list was not recorded in batch state.");
+            }
+        }
+
+        File.WriteAllText(wdtListLog,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(explicitBatch.StateFile,
+                clientRoot, wdtListLog),
+            "A requested ADT set different from the matching WDT list was published.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
+                "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+                    new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
+            "A rejected WDT coverage mismatch changed the selected manifest.");
+
+        File.WriteAllText(wdtListLog,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
+        File.AppendAllText(wdtListLog, "Detected client build: 70095\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(explicitBatch.StateFile,
+                clientRoot, wdtListLog),
+            "The publication gate accepted contradictory Build markers in the WDT coverage log.");
+
+        File.WriteAllText(wdtListLog,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
         ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublication(
-            configChanged.StateFile, clientRoot, wdtListLog);
+            explicitBatch.StateFile, clientRoot, wdtListLog);
         if (sealedBatch.SourceCount != 1 || sealedBatch.TileCount != 1)
         {
             throw new InvalidOperationException("The complete fixture WDT coverage did not seal the verified batch.");
@@ -376,23 +513,110 @@ internal static class P45GeometryRegression
             new NavmeshBakeOptions { AgentRadius = 0.6f });
         ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
             sealedProfile.SettingsHash, 0, "Azeroth");
+
+        RunSparseAdtBatchRegression(root, clientRoot);
+        RunCrossTileBoundaryRegression(root);
     }
 
-    private static void WriteBatchFixture(string path)
+    private static void RunSparseAdtBatchRegression(string root, string clientRoot)
     {
+        string inputRoot = Path.Combine(root, "sparse-batch-input");
+        foreach (AdtCoordinate adt in new[] { new AdtCoordinate(33, 46), new AdtCoordinate(35, 46) })
+        {
+            string folder = Path.Combine(inputRoot, $"adt{adt.X:D2}_{adt.Y:D2}", "raw-geometry");
+            Directory.CreateDirectory(folder);
+            WriteBatchFixture(Path.Combine(folder, $"map0000_adt{adt.X:D2}_{adt.Y:D2}.rawgeo.json"), adt.X, adt.Y);
+        }
+
+        string tileListPath = Path.Combine(root, "sparse-mapextractor-list.log");
+        string cascDataPath = Path.Combine(clientRoot, "Data");
+        File.WriteAllText(tileListPath,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 35 46\ntile 0 33 46\n");
+        AdtCoordinate[] adts = ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0);
+        if (!adts.SequenceEqual([new AdtCoordinate(33, 46), new AdtCoordinate(35, 46)]))
+        {
+            throw new InvalidOperationException("The mapextractor ADT list was not de-duplicated and normalized by Y/X.");
+        }
+        ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 1),
+            "The ADT list parser accepted a mapextractor record for a different MapID.");
+        File.WriteAllText(tileListPath, "33,46\n33,46\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0),
+            "The ADT list parser accepted a duplicate ADT coordinate.");
+        File.WriteAllText(tileListPath, "64,46\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0),
+            "The ADT list parser accepted an out-of-range ADT coordinate.");
+        File.WriteAllText(tileListPath,
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 35 46\ntile 0 33 46\n");
+
+        string outputRoot = Path.Combine(root, "sparse-batch-state");
+        string dnmRoot = Path.Combine(root, "sparse-batch-dnm");
+        ForeverGeometryBatchRequest request = new(0, 0, 0, 0, 0, inputRoot,
+            outputRoot, dnmRoot, "Azeroth", AdtList: [new(35, 46), new(33, 46)]);
+        ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
+        if (first.SourceCount != 2 || first.TileCount < 2 || first.FailedTaskCount != 0 ||
+            !first.Verification.HeightQuerySucceeded || !first.Verification.ConnectedPathSucceeded ||
+            first.Verification.CrossTileLinkCount != 0)
+        {
+            throw new InvalidOperationException("Sparse ADTs with a legal missing coordinate did not bake as separate valid regions.");
+        }
+        _ = ForeverGeometryBatchRunner.VerifyState(first.StateFile);
+
+        ForeverGeometryBatchResult reorderedResume = ForeverGeometryBatchRunner.Run(request with
+        {
+            AdtList = [new(33, 46), new(35, 46)],
+            Resume = true,
+        });
+        if (reorderedResume.ReusedSourceCount != 2 || reorderedResume.ReusedTileCount != first.TileCount)
+        {
+            throw new InvalidOperationException("A reordered but equivalent normalized ADT set did not resume its successful tasks.");
+        }
+
+        ForeverGeometryBatchResult changedSet = ForeverGeometryBatchRunner.Run(request with
+        {
+            AdtList = [new(33, 46)],
+            Resume = true,
+        });
+        if (changedSet.SourceCount != 1 || changedSet.ReusedSourceCount != 0)
+        {
+            throw new InvalidOperationException("Changing the requested ADT list did not invalidate the prior batch signature.");
+        }
+
+        ForeverGeometryBatchResult restoredSet = ForeverGeometryBatchRunner.Run(request with { Resume = true });
+        if (restoredSet.SourceCount != 2 || restoredSet.ReusedSourceCount != 0)
+        {
+            throw new InvalidOperationException("Restoring the sparse ADT set did not rebuild the changed batch state.");
+        }
+
+        ForeverGeometryPublicationResult publication = ForeverGeometryBatchRunner.SealForPublication(
+            restoredSet.StateFile, clientRoot, tileListPath);
+        if (publication.SourceCount != 2 || publication.TileCount != restoredSet.TileCount)
+        {
+            throw new InvalidOperationException("A matching sparse WDT list did not seal the complete sparse batch.");
+        }
+        ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+            new NavmeshBakeOptions());
+        ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
+            profile.SettingsHash, 0, "Azeroth");
+    }
+
+    private static void WriteBatchFixture(string path, int adtX = 33, int adtY = 46)
+    {
+        float adtSize = NavmeshSettings.TileWorldSize * 4f;
+        float offsetX = (33 - adtX) * adtSize;
+        float offsetY = (46 - adtY) * adtSize;
         float[][] terrain =
         [
-            [-1050f, 100f, -7800f],
-            [-1050f, 100f, -7760f],
-            [-1010f, 100f, -7800f],
-            [-1010f, 100f, -7760f],
+            [-1050f + offsetX, 100f, -7800f + offsetY],
+            [-1050f + offsetX, 100f, -7760f + offsetY],
+            [-1010f + offsetX, 100f, -7800f + offsetY],
+            [-1010f + offsetX, 100f, -7760f + offsetY],
         ];
         var raw = new
         {
             format = "wow-raw-geometry-v1",
             map_id = 0,
-            adt_xy = new[] { 33, 46 },
-            mmap_xy = new[] { 46, 33 },
+            adt_xy = new[] { adtX, adtY },
+            mmap_xy = new[] { adtY, adtX },
             client_product = "wow_cn_beta",
             client_build = 70094,
             units = "yard",
@@ -416,6 +640,55 @@ internal static class P45GeometryRegression
             liquid_types = Array.Empty<int>(),
         };
         File.WriteAllText(path, JsonSerializer.Serialize(raw));
+    }
+
+    private static void RunCrossTileBoundaryRegression(string root)
+    {
+        string directory = Path.Combine(root, "adjacent-dnm");
+        Directory.CreateDirectory(directory);
+        foreach (int tileX in new[] { 1, 2 })
+        {
+            const int tileZ = 2;
+            TileGeometry geometry = CreateBoundaryCrossingGeometry(tileX, tileZ);
+            DtMeshData data = NavmeshTileBuilder.Bake(geometry, tileX, tileZ, new NavmeshBakeOptions())
+                ?? throw new InvalidOperationException($"Adjacent test tile ({tileX},{tileZ}) did not bake.");
+            string path = Path.Combine(directory, $"tile_{tileX}_{tileZ}.dnm");
+            using FileStream stream = File.Create(path);
+            using BinaryWriter writer = new(stream);
+            new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
+        }
+
+        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(directory, [(1, 2), (2, 2)]);
+        if (verification.TileCount != 2 || !verification.HeightQuerySucceeded ||
+            !verification.ConnectedPathSucceeded || verification.CrossTileLinkCount == 0)
+        {
+            throw new InvalidOperationException("Matching walkable tile boundaries did not produce a verified cross-tile Detour connection.");
+        }
+    }
+
+    private static TileGeometry CreateBoundaryCrossingGeometry(int tileX, int tileZ)
+    {
+        float minX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float minZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        float maxX = minX + NavmeshSettings.TileWorldSize;
+        float maxZ = minZ + NavmeshSettings.TileWorldSize;
+        float[] verts =
+        [
+            minX - 5, 10, minZ + 10,
+            minX - 5, 10, maxZ - 10,
+            maxX + 5, 10, minZ + 10,
+            maxX + 5, 10, maxZ - 10,
+        ];
+        return new TileGeometry
+        {
+            GroundVerts = verts,
+            GroundTris = [0, 1, 2, 2, 1, 3],
+            LiquidVerts = [],
+            LiquidTris = [],
+            LiquidAreas = [],
+            BMin = new Vector3(minX, 0, minZ),
+            BMax = new Vector3(maxX, 100, maxZ),
+        };
     }
 
     private static DtMeshData CreateGroundTileData(int tileX, int tileZ)

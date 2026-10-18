@@ -123,13 +123,17 @@ public static class ForeverGeometryBakeVerifier
         DtNavMeshQuery query = new(navMesh);
         WowQueryFilter filter = new();
         filter.BeginQuery();
-        bool heightSucceeded = false;
-        bool pathSucceeded = false;
+        HashSet<(int X, int Z)> locallyVerifiedTiles = [];
+        HashSet<(int Ax, int Az, int Bx, int Bz)> checkedCrossTilePairs = [];
+        HashSet<(int Ax, int Az, int Bx, int Bz)> actualPortalPairs = [];
+        bool invalidCrossTilePath = false;
         int pathPolyCount = 0;
         int crossTileLinks = 0;
         foreach (DtMeshTile tile in meshTiles.Values)
         {
             long baseRef = navMesh.GetPolyRefBase(tile);
+            bool tileHeightSucceeded = false;
+            bool tilePathSucceeded = false;
             for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
             {
                 DtPoly poly = tile.data.polys[polyIndex];
@@ -141,14 +145,26 @@ public static class ForeverGeometryBakeVerifier
 
                 long startRef = baseRef | (long)poly.index;
                 Vector3 center = navMesh.GetPolyCenter(startRef);
-                if (!heightSucceeded && query.ClosestPointOnPoly(startRef, center, out _, out _).Succeeded())
+                if (!tileHeightSucceeded && query.ClosestPointOnPoly(startRef, center, out _, out _).Succeeded())
                 {
-                    heightSucceeded = true;
+                    tileHeightSucceeded = true;
+                }
+                if (!tilePathSucceeded)
+                {
+                    long[] localPath = new long[4];
+                    DtStatus localStatus = query.FindPath(startRef, startRef, center, center, filter,
+                        localPath, out int localCount, localPath.Length);
+                    if (localStatus.Succeeded() && localCount == 1 && localPath[0] == startRef)
+                    {
+                        tilePathSucceeded = true;
+                        pathPolyCount = Math.Max(pathPolyCount, localCount);
+                    }
                 }
 
                 for (int linkIndex = poly.firstLink; linkIndex != DtDetour.DT_NULL_LINK; linkIndex = tile.links[linkIndex].next)
                 {
-                    long endRef = tile.links[linkIndex].refs;
+                    DtLink link = tile.links[linkIndex];
+                    long endRef = link.refs;
                     if (endRef == 0 || endRef == startRef || !navMesh.IsValidPolyRef(endRef) ||
                         !navMesh.GetTileAndPolyByRef(endRef, out DtMeshTile endTile, out _).Succeeded())
                     {
@@ -159,12 +175,23 @@ public static class ForeverGeometryBakeVerifier
                     if (crossTile)
                     {
                         crossTileLinks++;
+                        if (link.edge < poly.vertCount && link.side is 0 or 2 or 4 or 6)
+                        {
+                            actualPortalPairs.Add(NormalizeTilePair(tile.data.header.x, tile.data.header.y,
+                                endTile.data.header.x, endTile.data.header.y));
+                        }
                     }
 
-                    if (pathSucceeded || expectedTiles.Count > 1 && !crossTile)
+                    if (!crossTile)
                     {
                         continue;
                     }
+
+                    (int Ax, int Az, int Bx, int Bz) pair = tile.data.header.x < endTile.data.header.x ||
+                        tile.data.header.x == endTile.data.header.x && tile.data.header.y < endTile.data.header.y
+                        ? (tile.data.header.x, tile.data.header.y, endTile.data.header.x, endTile.data.header.y)
+                        : (endTile.data.header.x, endTile.data.header.y, tile.data.header.x, tile.data.header.y);
+                    if (!checkedCrossTilePairs.Add(pair)) continue;
 
                     Vector3 end = navMesh.GetPolyCenter(endRef);
                     long[] path = new long[64];
@@ -172,47 +199,35 @@ public static class ForeverGeometryBakeVerifier
                         path, out int count, path.Length);
                     if (status.Succeeded() && count >= 2 && path[count - 1] == endRef)
                     {
-                        pathSucceeded = true;
-                        pathPolyCount = count;
+                        pathPolyCount = Math.Max(pathPolyCount, count);
+                    }
+                    else
+                    {
+                        invalidCrossTilePath = true;
                     }
                 }
             }
-        }
-
-        // A one-tile batch may legitimately bake to a single polygon, which
-        // has no neighbour link. Still prove Detour can query a path between
-        // two points on that loaded ground polygon.
-        if (!pathSucceeded && expectedTiles.Count == 1)
-        {
-            DtMeshTile tile = meshTiles.Values.Single();
-            long baseRef = navMesh.GetPolyRefBase(tile);
-            for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
+            if (tileHeightSucceeded && tilePathSucceeded)
             {
-                DtPoly poly = tile.data.polys[polyIndex];
-                if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND ||
-                    (poly.flags & WowQueryFilter.IncludeFlags) == 0) continue;
-                long polyRef = baseRef | (long)poly.index;
-                Vector3 center = navMesh.GetPolyCenter(polyRef);
-                long[] path = new long[4];
-                DtStatus status = query.FindPath(polyRef, polyRef, center, center, filter,
-                    path, out int count, path.Length);
-                if (status.Succeeded() && count == 1 && path[0] == polyRef)
-                {
-                    pathSucceeded = true;
-                    pathPolyCount = count;
-                    break;
-                }
+                locallyVerifiedTiles.Add((tile.data.header.x, tile.data.header.y));
             }
         }
 
-        if (expectedTiles.Count > 1 && crossTileLinks == 0)
+        (int Ax, int Az, int Bx, int Bz)[] missingBoundaryLinks = FindExpectedBoundaryLinks(meshTiles)
+            .Where(pair => !actualPortalPairs.Contains(pair)).ToArray();
+        if (missingBoundaryLinks.Length > 0)
         {
-            throw new InvalidDataException("Multiple DNM tiles loaded, but no cross-tile links were established.");
+            throw new InvalidDataException("Expected adjacent walkable tile boundaries have no Detour portal link: " +
+                string.Join(", ", missingBoundaryLinks.Select(static pair => $"({pair.Ax},{pair.Az})-({pair.Bx},{pair.Bz})")));
         }
 
+        bool heightSucceeded = locallyVerifiedTiles.Count == expectedTiles.Count;
+        bool pathSucceeded = heightSucceeded && !invalidCrossTilePath;
         if (!heightSucceeded || !pathSucceeded)
         {
-            throw new InvalidDataException("The DNM set failed its ground-height or connected-path query.");
+            throw new InvalidDataException(
+                $"The DNM set failed local height/path verification for {expectedTiles.Count - locallyVerifiedTiles.Count} tile(s), " +
+                $"or an established cross-tile link failed path verification. Disconnected terrain components are permitted.");
         }
 
         BakedTileRecord[] records = loaded.Select(static item => new BakedTileRecord(
@@ -270,7 +285,7 @@ public static class ForeverGeometryBakeVerifier
         }
 
         ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(aggregate.Continent,
-            aggregate.ClientProduct, aggregate.ClientBuild, bake);
+            aggregate.ClientProduct, aggregate.ClientBuild, bake, aggregate.PaddingYards);
         if (!string.Equals(aggregate.SettingsHash, profile.SettingsHash, StringComparison.Ordinal))
         {
             throw new InvalidDataException("The aggregate settings hash does not match the DNM bake profile; regenerate geometry with the same continent and bake settings.");
@@ -338,8 +353,10 @@ public static class ForeverGeometryBakeVerifier
         DtNavMeshQuery query = new(navMesh);
         WowQueryFilter filter = new();
         filter.BeginQuery();
-        bool heightQuerySucceeded = false;
-        bool pathSucceeded = false;
+        HashSet<(int X, int Z)> locallyVerifiedTiles = [];
+        HashSet<(int Ax, int Az, int Bx, int Bz)> checkedCrossTilePairs = [];
+        HashSet<(int Ax, int Az, int Bx, int Bz)> actualPortalPairs = [];
+        bool invalidCrossTilePath = false;
         int pathPolyCount = 0;
         int crossTileLinks = 0;
         Vector3 startWow = Vector3.Zero;
@@ -349,6 +366,8 @@ public static class ForeverGeometryBakeVerifier
         {
             DtMeshTile tile = entry.Value;
             long baseRef = navMesh.GetPolyRefBase(tile);
+            bool tileHeightSucceeded = false;
+            bool tilePathSucceeded = false;
             for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
             {
                 DtPoly poly = tile.data.polys[polyIndex];
@@ -360,7 +379,7 @@ public static class ForeverGeometryBakeVerifier
 
                 long startRef = baseRef | (long)poly.index;
                 Vector3 center = navMesh.GetPolyCenter(startRef);
-                if (!heightQuerySucceeded && query.ClosestPointOnPoly(startRef, center, out Vector3 surface, out _).Succeeded())
+                if (!tileHeightSucceeded && query.ClosestPointOnPoly(startRef, center, out Vector3 surface, out _).Succeeded())
                 {
                     Vector3 wow = NavmeshCoords.ToWow(surface);
                     if (Vector3.Distance(NavmeshCoords.ToRc(wow), surface) > 0.01f)
@@ -369,12 +388,24 @@ public static class ForeverGeometryBakeVerifier
                     }
 
                     startWow = wow;
-                    heightQuerySucceeded = true;
+                    tileHeightSucceeded = true;
+                }
+                if (!tilePathSucceeded)
+                {
+                    long[] localPath = new long[4];
+                    DtStatus localStatus = query.FindPath(startRef, startRef, center, center,
+                        filter, localPath, out int localCount, localPath.Length);
+                    if (localStatus.Succeeded() && localCount == 1 && localPath[0] == startRef)
+                    {
+                        tilePathSucceeded = true;
+                        pathPolyCount = Math.Max(pathPolyCount, localCount);
+                    }
                 }
 
                 for (int linkIndex = poly.firstLink; linkIndex != DtDetour.DT_NULL_LINK; linkIndex = tile.links[linkIndex].next)
                 {
-                    long endRef = tile.links[linkIndex].refs;
+                    DtLink link = tile.links[linkIndex];
+                    long endRef = link.refs;
                     if (endRef == 0 || endRef == startRef || !navMesh.IsValidPolyRef(endRef))
                     {
                         continue;
@@ -389,12 +420,23 @@ public static class ForeverGeometryBakeVerifier
                     if (crossTile)
                     {
                         crossTileLinks++;
+                        if (link.edge < poly.vertCount && link.side is 0 or 2 or 4 or 6)
+                        {
+                            actualPortalPairs.Add(NormalizeTilePair(tile.data.header.x, tile.data.header.y,
+                                endTile.data.header.x, endTile.data.header.y));
+                        }
                     }
 
-                    if (pathSucceeded || loadedTiles.Count > 1 && !crossTile)
+                    if (!crossTile)
                     {
                         continue;
                     }
+
+                    (int Ax, int Az, int Bx, int Bz) pair = tile.data.header.x < endTile.data.header.x ||
+                        tile.data.header.x == endTile.data.header.x && tile.data.header.y < endTile.data.header.y
+                        ? (tile.data.header.x, tile.data.header.y, endTile.data.header.x, endTile.data.header.y)
+                        : (endTile.data.header.x, endTile.data.header.y, tile.data.header.x, tile.data.header.y);
+                    if (!checkedCrossTilePairs.Add(pair)) continue;
 
                     Vector3 endCenter = navMesh.GetPolyCenter(endRef);
                     long[] path = new long[64];
@@ -406,21 +448,35 @@ public static class ForeverGeometryBakeVerifier
                         Vector3 rcEnd = navMesh.GetPolyCenter(endRef);
                         startWow = NavmeshCoords.ToWow(rcStart);
                         endWow = NavmeshCoords.ToWow(rcEnd);
-                        pathPolyCount = count;
-                        pathSucceeded = true;
+                        pathPolyCount = Math.Max(pathPolyCount, count);
+                    }
+                    else
+                    {
+                        invalidCrossTilePath = true;
                     }
                 }
             }
+            if (tileHeightSucceeded && tilePathSucceeded)
+            {
+                locallyVerifiedTiles.Add(entry.Key);
+            }
         }
 
-        if (loadedTiles.Count > 1 && crossTileLinks == 0)
+        (int Ax, int Az, int Bx, int Bz)[] missingBoundaryLinks = FindExpectedBoundaryLinks(meshTiles)
+            .Where(pair => !actualPortalPairs.Contains(pair)).ToArray();
+        if (missingBoundaryLinks.Length > 0)
         {
-            throw new InvalidDataException("Multiple .dnm tiles loaded, but no cross-tile links were established.");
+            throw new InvalidDataException("Expected adjacent walkable tile boundaries have no Detour portal link: " +
+                string.Join(", ", missingBoundaryLinks.Select(static pair => $"({pair.Ax},{pair.Az})-({pair.Bx},{pair.Bz})")));
         }
 
+        bool heightQuerySucceeded = locallyVerifiedTiles.Count == loadedTiles.Count;
+        bool pathSucceeded = heightQuerySucceeded && !invalidCrossTilePath;
         if (!heightQuerySucceeded || !pathSucceeded)
         {
-            throw new InvalidDataException("The loaded .dnm set failed the ground-height or cross-tile path query.");
+            throw new InvalidDataException(
+                $"The loaded .dnm set failed local height/path verification for {loadedTiles.Count - locallyVerifiedTiles.Count} tile(s), " +
+                "or an established cross-tile link failed path verification. Disconnected terrain components are permitted.");
         }
 
         string settingsHash = profile.SettingsHash;
@@ -431,7 +487,7 @@ public static class ForeverGeometryBakeVerifier
             item.Source.TileCounts.LiquidTriangles)).ToArray();
         var manifest = new
         {
-            format = "wow-forever-dnm-manifest-v1",
+            format = ForeverNavmeshCacheManifest.Format,
             client_product = aggregate.ClientProduct,
             client_build = aggregate.ClientBuild,
             data_set_id = profile.DataSetIdentity,
@@ -455,6 +511,9 @@ public static class ForeverGeometryBakeVerifier
                 verts_per_poly = NavmeshSettings.VertsPerPoly,
                 format_version = NavmeshSettings.FormatVersion,
                 dot_recast_version = profile.DotRecastVersion,
+                padding_yards = profile.PaddingYards,
+                geometry_export_version = profile.GeometryExportVersion,
+                raw_geometry_format = profile.RawGeometryFormat,
             },
             query_verification = new
             {
@@ -475,4 +534,102 @@ public static class ForeverGeometryBakeVerifier
             heightQuerySucceeded, pathSucceeded, pathPolyCount,
             [startWow.X, startWow.Y, startWow.Z], [endWow.X, endWow.Y, endWow.Z], settingsHash, records);
     }
+
+    private static IEnumerable<(int Ax, int Az, int Bx, int Bz)> FindExpectedBoundaryLinks(
+        Dictionary<(int X, int Z), DtMeshTile> tiles)
+    {
+        foreach (((int x, int z), DtMeshTile tile) in tiles.OrderBy(static item => item.Key.X).ThenBy(static item => item.Key.Z))
+        {
+            if (tiles.TryGetValue((x + 1, z), out DtMeshTile? xNeighbor) &&
+                HasMatchingPortalEdges(tile, xNeighbor, sideA: 0, sideB: 4))
+            {
+                yield return (x, z, x + 1, z);
+            }
+
+            if (tiles.TryGetValue((x, z + 1), out DtMeshTile? zNeighbor) &&
+                HasMatchingPortalEdges(tile, zNeighbor, sideA: 2, sideB: 6))
+            {
+                yield return (x, z, x, z + 1);
+            }
+        }
+    }
+
+    private static (int Ax, int Az, int Bx, int Bz) NormalizeTilePair(int ax, int az, int bx, int bz) =>
+        ax < bx || ax == bx && az < bz ? (ax, az, bx, bz) : (bx, bz, ax, az);
+
+    private static bool HasMatchingPortalEdges(DtMeshTile first, DtMeshTile second, int sideA, int sideB)
+    {
+        List<BoundarySlab> firstSlabs = ReadPortalSlabs(first, sideA);
+        List<BoundarySlab> secondSlabs = ReadPortalSlabs(second, sideB);
+        float walkableClimb = Math.Max(first.data.header.walkableClimb, second.data.header.walkableClimb);
+        foreach (BoundarySlab a in firstSlabs)
+        foreach (BoundarySlab b in secondSlabs)
+        {
+            if (SlabsOverlap(a, b, walkableClimb)) return true;
+        }
+        return false;
+    }
+
+    private static List<BoundarySlab> ReadPortalSlabs(DtMeshTile tile, int side)
+    {
+        List<BoundarySlab> slabs = [];
+        foreach (DtPoly poly in tile.data.polys)
+        {
+            if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND ||
+                (poly.flags & WowQueryFilter.IncludeFlags) == 0) continue;
+            for (int edge = 0; edge < poly.vertCount; edge++)
+            {
+                if ((poly.neis[edge] & DtDetour.DT_EXT_LINK) == 0 ||
+                    (poly.neis[edge] & 0xff) != side ||
+                    !TryReadBoundarySlab(tile.data.verts, poly, edge, side, out BoundarySlab slab)) continue;
+                slabs.Add(slab);
+            }
+        }
+        return slabs;
+    }
+
+    private static bool TryReadBoundarySlab(float[] vertices, DtPoly poly, int edge, int side,
+        out BoundarySlab slab)
+    {
+        int start = poly.verts[edge] * 3;
+        int end = poly.verts[(edge + 1) % poly.vertCount] * 3;
+        bool xPlane = side is 0 or 4;
+        float planeA = vertices[start + (xPlane ? 0 : 2)];
+        float planeB = vertices[end + (xPlane ? 0 : 2)];
+        float tangentA = vertices[start + (xPlane ? 2 : 0)];
+        float tangentB = vertices[end + (xPlane ? 2 : 0)];
+        float heightA = vertices[start + 1];
+        float heightB = vertices[end + 1];
+        if (!float.IsFinite(planeA) || !float.IsFinite(planeB) || !float.IsFinite(tangentA) ||
+            !float.IsFinite(tangentB) || !float.IsFinite(heightA) || !float.IsFinite(heightB) ||
+            MathF.Abs(planeA - planeB) > 0.01f || MathF.Abs(tangentA - tangentB) < 1e-6f)
+        {
+            slab = default;
+            return false;
+        }
+
+        slab = new BoundarySlab(planeA, tangentA, tangentB, heightA, heightB);
+        return true;
+    }
+
+    private static bool SlabsOverlap(BoundarySlab a, BoundarySlab b, float walkableClimb)
+    {
+        if (MathF.Abs(a.Plane - b.Plane) > 0.01f) return false;
+        float minT = Math.Max(Math.Min(a.T0, a.T1) + 0.01f, Math.Min(b.T0, b.T1) + 0.01f);
+        float maxT = Math.Min(Math.Max(a.T0, a.T1) - 0.01f, Math.Max(b.T0, b.T1) - 0.01f);
+        if (minT > maxT) return false;
+
+        float deltaMin = Interpolate(b, minT) - Interpolate(a, minT);
+        float deltaMax = Interpolate(b, maxT) - Interpolate(a, maxT);
+        return deltaMin * deltaMax < 0 || MathF.Abs(deltaMin) <= walkableClimb * 2f ||
+               MathF.Abs(deltaMax) <= walkableClimb * 2f;
+    }
+
+    private static float Interpolate(BoundarySlab slab, float tangent)
+    {
+        float t = (tangent - slab.T0) / (slab.T1 - slab.T0);
+        return slab.Y0 + (slab.Y1 - slab.Y0) * t;
+    }
+
+    private readonly record struct BoundarySlab(float Plane, float T0, float T1, float Y0, float Y1);
 }

@@ -30,7 +30,8 @@ public sealed record ForeverGeometryBatchRequest(
     float WalkableSlope = 48f,
     float PaddingYards = TileGeometryExtractor.PaddingYd,
     float? MinWorldZ = null,
-    bool Resume = false);
+    bool Resume = false,
+    IReadOnlyCollection<AdtCoordinate>? AdtList = null);
 
 public sealed record ForeverGeometryBatchResult(string StateFile, int SourceCount, int TileCount,
     int ReusedSourceCount, int ReusedTileCount, int FailedTaskCount, long ElapsedMilliseconds,
@@ -63,8 +64,8 @@ public static class ForeverGeometryBatchRunner
         string dnmRoot = Path.GetFullPath(request.DnmOutputDirectory);
         EnsureDisjointDirectories(inputRoot, outputRoot, dnmRoot);
         string statePath = Path.Combine(outputRoot, "batch-state.json");
-        string signature = ComputeRequestSignature(request, inputRoot, dnmRoot);
         AdtCoordinate[] expectedAdts = EnumerateAdts(request);
+        string signature = ComputeRequestSignature(request, inputRoot, dnmRoot, expectedAdts);
         Stopwatch totalTimer = Stopwatch.StartNew();
         Directory.CreateDirectory(outputRoot);
         Directory.CreateDirectory(dnmRoot);
@@ -131,7 +132,8 @@ public static class ForeverGeometryBatchRunner
             }
             if (task.Status == "succeeded" && task.InputSha256 == sha &&
                 string.Equals(task.InputPath, inputPath, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(task.ClientProduct) && task.ClientBuild > 0 && task.Counts is not null)
+                !string.IsNullOrWhiteSpace(task.ClientProduct) && task.ClientBuild > 0 && task.Counts is not null &&
+                task.IndependentlyExpectedTiles.Length > 0)
             {
                 task.Status = "succeeded";
                 reusedSources++;
@@ -151,9 +153,10 @@ public static class ForeverGeometryBatchRunner
             Stopwatch timer = Stopwatch.StartNew();
             try
             {
-                IReadOnlyList<ForeverGeometryTile> exported = RawGeometryTileExporter.Export(inputPath,
+                RawGeometryTileExportResult exportResult = RawGeometryTileExporter.ExportWithIndependentCoverage(inputPath,
                     new GeometryExportRequest(request.MapId, adt.X, adt.Y, request.AgentRadius,
                         request.AgentMaxClimb, request.PaddingYards, request.MinWorldZ));
+                IReadOnlyList<ForeverGeometryTile> exported = exportResult.Tiles;
                 ForeverGeometryTile first = exported[0];
                 if (state.ClientProduct is not null &&
                     (!state.ClientProduct.Equals(first.ClientProduct, StringComparison.OrdinalIgnoreCase) || state.ClientBuild != first.ClientBuild))
@@ -163,7 +166,7 @@ public static class ForeverGeometryBatchRunner
                 }
 
                 ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(request.Continent,
-                    first.ClientProduct, first.ClientBuild, CreateOptions(request));
+                    first.ClientProduct, first.ClientBuild, CreateOptions(request), request.PaddingYards);
                 state.ClientProduct = first.ClientProduct;
                 state.ClientBuild = first.ClientBuild;
                 state.SettingsHash = profile.SettingsHash;
@@ -174,6 +177,9 @@ public static class ForeverGeometryBatchRunner
                 task.ContributingTiles = exported.Select(static tile => new[] { tile.DtTileX, tile.DtTileZ })
                     .Distinct(IntPairComparer.Instance)
                     .OrderBy(static pair => pair[0]).ThenBy(static pair => pair[1]).ToArray();
+                task.IndependentlyExpectedTiles = exportResult.IndependentlyExpectedTiles
+                    .OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
+                    .Select(static tile => new[] { tile.X, tile.Z }).ToArray();
                 task.OutputFiles = [];
                 task.Status = "succeeded";
             }
@@ -202,15 +208,25 @@ public static class ForeverGeometryBatchRunner
             throw new InvalidDataException(failure);
         }
 
+        try
+        {
+            state.ExpectedTiles = ValidateRecordedSourceCoverage(state, request);
+        }
+        catch (Exception ex)
+        {
+            RecordFailedBatch(statePath, state, outputRoot, dnmRoot, totalTimer, peakWorkingSet,
+                $"Independent source geometry coverage validation failed: {ex.Message}");
+            throw;
+        }
+
         ForeverNavmeshBakeProfile resolvedProfile = ForeverNavmeshBakeProfile.Create(request.Continent,
-            state.ClientProduct!, state.ClientBuild, CreateOptions(request));
+            state.ClientProduct!, state.ClientBuild, CreateOptions(request), request.PaddingYards);
         if (!string.Equals(state.SettingsHash, resolvedProfile.SettingsHash, StringComparison.Ordinal))
         {
             throw new InvalidDataException("Resolved source identity/settings differ from the batch's recorded profile.");
         }
 
-        HashSet<(int X, int Z)> availableTiles = state.SourceTasks
-            .SelectMany(static task => task.ContributingTiles)
+        HashSet<(int X, int Z)> availableTiles = state.ExpectedTiles
             .Select(static pair => (pair[0], pair[1])).ToHashSet();
         (int X, int Z)[] targetTiles = (request.TargetTiles is { Count: > 0 }
                 ? request.TargetTiles
@@ -374,6 +390,65 @@ public static class ForeverGeometryBatchRunner
             state.PeakSampledWorkingSetBytes, state.OutputFileCount, state.DiskBytes, verification);
     }
 
+    /// <summary>
+    /// Reads a normalized ADT coordinate list. It accepts either one X,Y pair
+    /// per line or the `tile MapID X Y` records emitted by mapextractor
+    /// --list-tiles. Full client identity is independently checked at seal time.
+    /// </summary>
+    public static AdtCoordinate[] ReadAdtList(string path, int mapId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        if (mapId < 0) throw new ArgumentOutOfRangeException(nameof(mapId));
+        string[] lines = File.ReadAllLines(path);
+        bool extractorLog = lines.Any(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault()?.Equals("tile", StringComparison.OrdinalIgnoreCase) == true);
+        HashSet<AdtCoordinate> seen = [];
+        foreach (string rawLine in lines)
+        {
+            string line = rawLine.Trim();
+            if (line.Length == 0 || line.StartsWith('#')) continue;
+            AdtCoordinate adt;
+            if (extractorLog)
+            {
+                string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (fields.Length == 0 || !fields[0].Equals("tile", StringComparison.OrdinalIgnoreCase)) continue;
+                if (fields.Length != 4 || !int.TryParse(fields[1], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int listedMap) || listedMap != mapId ||
+                    !int.TryParse(fields[2], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int x) ||
+                    !int.TryParse(fields[3], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int y))
+                {
+                    throw new InvalidDataException($"ADT list has a malformed or wrong-MapID tile record: {line}");
+                }
+                adt = new AdtCoordinate(x, y);
+            }
+            else
+            {
+                string[] fields = line.Contains(',')
+                    ? line.Split(',', StringSplitOptions.TrimEntries)
+                    : line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                if (fields.Length != 2 ||
+                    !int.TryParse(fields[0], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int x) ||
+                    !int.TryParse(fields[1], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out int y))
+                {
+                    throw new InvalidDataException($"ADT list line must be X,Y or X Y: {line}");
+                }
+                adt = new AdtCoordinate(x, y);
+            }
+
+            if (adt.X is < 0 or >= 64 || adt.Y is < 0 or >= 64 || !seen.Add(adt))
+            {
+                throw new InvalidDataException($"ADT list contains an out-of-range or duplicate coordinate ({adt.X},{adt.Y}).");
+            }
+        }
+
+        if (seen.Count == 0) throw new InvalidDataException($"ADT list contains no coordinates: {path}");
+        return seen.OrderBy(static adt => adt.Y).ThenBy(static adt => adt.X).ToArray();
+    }
+
     /// <summary>Read-only independent validation entry for `batch-verify`.</summary>
     public static ForeverGeometryBatchResult VerifyState(string stateFile)
     {
@@ -397,16 +472,32 @@ public static class ForeverGeometryBatchRunner
                 : [],
         };
         ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(state.Continent,
-            state.ClientProduct!, state.ClientBuild, options);
+            state.ClientProduct!, state.ClientBuild, options, state.PaddingYards);
         if (!string.Equals(profile.SettingsHash, state.SettingsHash, StringComparison.Ordinal))
         {
             throw new InvalidDataException("Batch settings hash does not match the recorded profile.");
         }
 
+        ValidateStateAdtSelection(state);
+        ForeverGeometryBatchRequest validationRequest = new(state.MapId, state.AdtMinX, state.AdtMinY,
+            state.AdtMaxX, state.AdtMaxY, state.InputDirectory, state.OutputDirectory,
+            state.DnmOutputDirectory, state.Continent,
+            state.TargetTiles.Select(static pair => (pair[0], pair[1])).ToArray(),
+            state.AgentRadius, state.AgentMaxClimb, state.WalkableSlope, state.PaddingYards,
+            state.MinWorldZ, Resume: true,
+            AdtList: state.AdtSelectionMode == "explicit_list"
+                ? state.RequestedAdts.Select(static pair => new AdtCoordinate(pair[0], pair[1])).ToArray()
+                : null);
+        int[][] recalculatedExpectedTiles = ValidateSourceCoverage(state, validationRequest);
+        if (!PairArraySetEquals(recalculatedExpectedTiles, state.ExpectedTiles, tileCoordinates: true))
+        {
+            throw new InvalidDataException("Recorded expected tile coverage differs from the independent raw-geometry calculation.");
+        }
+
         foreach (BatchSourceTask task in state.SourceTasks)
         {
             if (task.Status != "succeeded" || !File.Exists(task.InputPath) ||
-                HashFile(task.InputPath) != task.InputSha256 || task.ConfigHash != profile.SettingsHash)
+                task.ConfigHash != profile.SettingsHash)
             {
                 throw new InvalidDataException($"Source task for ADT ({task.AdtX},{task.AdtY}) is stale or incomplete.");
             }
@@ -434,6 +525,15 @@ public static class ForeverGeometryBatchRunner
             {
                 throw new InvalidDataException($"Tile task ({task.TileX},{task.TileZ}) has a stale contributor set.");
             }
+        }
+
+        int[][] targetTilePairs = state.TargetTiles;
+        if (targetTilePairs.Length == 0 || HasDuplicatePairs(targetTilePairs) ||
+            state.TileTasks.Count != targetTilePairs.Length || HasDuplicatePairs(state.TileTasks.Select(static tile => new[] { tile.TileX, tile.TileZ }).ToArray()) ||
+            !PairArraySetEquals(targetTilePairs,
+                state.TileTasks.Select(static tile => new[] { tile.TileX, tile.TileZ }).ToArray(), tileCoordinates: true))
+        {
+            throw new InvalidDataException("Batch tile task set is incomplete, duplicated, or differs from its recorded target set.");
         }
 
         (int X, int Z)[] tiles = state.TargetTiles.Select(static pair => (pair[0], pair[1])).ToArray();
@@ -470,6 +570,149 @@ public static class ForeverGeometryBatchRunner
             state.OutputFileCount, state.DiskBytes, verification);
     }
 
+    private static int[][] ValidateSourceCoverage(BatchState state, ForeverGeometryBatchRequest request)
+    {
+        AdtCoordinate[] requested = EnumerateAdts(request);
+        ValidateStateAdtSelection(state);
+        if (requested.Length != state.SourceTasks.Count || HasDuplicatePairs(state.SourceTasks
+                .Select(static task => new[] { task.AdtX, task.AdtY }).ToArray()) ||
+            !PairArraySetEquals(requested.Select(static adt => new[] { adt.X, adt.Y }).ToArray(),
+                state.SourceTasks.Select(static task => new[] { task.AdtX, task.AdtY }).ToArray(), tileCoordinates: false))
+        {
+            throw new InvalidDataException("Requested ADTs and source tasks are incomplete, duplicated, or inconsistent.");
+        }
+
+        HashSet<(int X, int Z)> expectedTiles = [];
+        foreach (AdtCoordinate adt in requested)
+        {
+            BatchSourceTask source = state.SourceTasks.Single(task => task.AdtX == adt.X && task.AdtY == adt.Y);
+            string path = ResolveInputPath(Path.GetFullPath(state.InputDirectory), state.MapId, adt);
+            if (source.Status != "succeeded" || !string.Equals(Path.GetFullPath(source.InputPath), path, StringComparison.OrdinalIgnoreCase) ||
+                !File.Exists(path))
+            {
+                throw new InvalidDataException($"Source ADT ({adt.X},{adt.Y}) is failed, missing, relocated, or has changed since extraction.");
+            }
+
+            RawGeometryTileExportResult result = RawGeometryTileExporter.ExportWithIndependentCoverage(path,
+                new GeometryExportRequest(state.MapId, adt.X, adt.Y, request.AgentRadius,
+                    request.AgentMaxClimb, request.PaddingYards, request.MinWorldZ));
+            ForeverGeometryTile first = result.Tiles[0];
+            if (!string.Equals(first.SourceSha256, source.InputSha256, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(first.ClientProduct, state.ClientProduct, StringComparison.OrdinalIgnoreCase) ||
+                first.ClientBuild != state.ClientBuild ||
+                !string.Equals(source.ClientProduct, first.ClientProduct, StringComparison.OrdinalIgnoreCase) ||
+                source.ClientBuild != first.ClientBuild || !CountsEqual(source.Counts, first.SourceCounts) ||
+                !string.Equals(source.ConfigHash, state.SettingsHash, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"Source ADT ({adt.X},{adt.Y}) identity or geometry metadata does not match the batch.");
+            }
+
+            int[][] calculated = result.IndependentlyExpectedTiles
+                .OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
+                .Select(static tile => new[] { tile.X, tile.Z }).ToArray();
+            int[][] exported = result.Tiles.Select(static tile => new[] { tile.DtTileX, tile.DtTileZ })
+                .Distinct(IntPairComparer.Instance).OrderBy(static pair => pair[0]).ThenBy(static pair => pair[1]).ToArray();
+            if (!PairArraySetEquals(calculated, exported, tileCoordinates: true) ||
+                !PairArraySetEquals(calculated, source.IndependentlyExpectedTiles, tileCoordinates: true) ||
+                !PairArraySetEquals(calculated, source.ContributingTiles, tileCoordinates: true))
+            {
+                throw new InvalidDataException($"Source ADT ({adt.X},{adt.Y}) recorded contribution tiles differ from independent triangle-bound coverage.");
+            }
+
+            foreach (int[] tile in calculated) expectedTiles.Add((tile[0], tile[1]));
+        }
+
+        return expectedTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
+            .Select(static tile => new[] { tile.X, tile.Z }).ToArray();
+    }
+
+    private static int[][] ValidateRecordedSourceCoverage(BatchState state, ForeverGeometryBatchRequest request)
+    {
+        AdtCoordinate[] requested = EnumerateAdts(request);
+        ValidateStateAdtSelection(state);
+        if (requested.Length != state.SourceTasks.Count || HasDuplicatePairs(state.SourceTasks
+                .Select(static task => new[] { task.AdtX, task.AdtY }).ToArray()) ||
+            !PairArraySetEquals(requested.Select(static adt => new[] { adt.X, adt.Y }).ToArray(),
+                state.SourceTasks.Select(static task => new[] { task.AdtX, task.AdtY }).ToArray(), tileCoordinates: false))
+        {
+            throw new InvalidDataException("Requested ADTs and source tasks are incomplete, duplicated, or inconsistent.");
+        }
+
+        HashSet<(int X, int Z)> expectedTiles = [];
+        foreach (BatchSourceTask source in state.SourceTasks)
+        {
+            int[][] actual = source.ContributingTiles;
+            int[][] independentlyExpected = source.IndependentlyExpectedTiles;
+            if (source.Status != "succeeded" || source.ClientBuild != state.ClientBuild ||
+                !string.Equals(source.ClientProduct, state.ClientProduct, StringComparison.OrdinalIgnoreCase) ||
+                source.ConfigHash != state.SettingsHash ||
+                !PairArraySetEquals(actual, independentlyExpected, tileCoordinates: true))
+            {
+                throw new InvalidDataException($"Source ADT ({source.AdtX},{source.AdtY}) has no matching independent tile coverage record.");
+            }
+
+            foreach (int[] pair in independentlyExpected) expectedTiles.Add((pair[0], pair[1]));
+        }
+        if (expectedTiles.Count == 0)
+        {
+            throw new InvalidDataException("Independent geometry coverage did not identify any expected Detour tiles.");
+        }
+        return expectedTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
+            .Select(static tile => new[] { tile.X, tile.Z }).ToArray();
+    }
+
+    private static void ValidateStateAdtSelection(BatchState state)
+    {
+        if (state.AdtSelectionMode is not ("rectangle" or "explicit_list") ||
+            state.RequestedAdts.Length is < 1 or > 4096 || HasDuplicatePairs(state.RequestedAdts) ||
+            state.RequestedAdts.Any(static pair => pair is not { Length: 2 } || pair[0] is < 0 or >= 64 || pair[1] is < 0 or >= 64))
+        {
+            throw new InvalidDataException("Batch state has a missing, duplicated, or invalid requested ADT set.");
+        }
+
+        if (state.AdtSelectionMode == "rectangle")
+        {
+            if (state.AdtMinX < 0 || state.AdtMinY < 0 || state.AdtMaxX >= 64 || state.AdtMaxY >= 64 ||
+                state.AdtMinX > state.AdtMaxX || state.AdtMinY > state.AdtMaxY)
+            {
+                throw new InvalidDataException("Batch state has an invalid rectangle ADT selection.");
+            }
+            int[][] rectangle = (from y in Enumerable.Range(state.AdtMinY, state.AdtMaxY - state.AdtMinY + 1)
+                                 from x in Enumerable.Range(state.AdtMinX, state.AdtMaxX - state.AdtMinX + 1)
+                                 select new[] { x, y }).ToArray();
+            if (!PairArraySetEquals(rectangle, state.RequestedAdts, tileCoordinates: false))
+            {
+                throw new InvalidDataException("Batch state requested ADT set differs from its rectangle selection.");
+            }
+        }
+    }
+
+    private static bool CountsEqual(GeometryCounts? left, GeometryCounts right) => left is not null &&
+        left.TerrainTriangles == right.TerrainTriangles && left.CollisionTriangles == right.CollisionTriangles &&
+        left.WmoCollisionTriangles == right.WmoCollisionTriangles && left.M2CollisionTriangles == right.M2CollisionTriangles &&
+        left.LiquidTriangles == right.LiquidTriangles && left.WaterTriangles == right.WaterTriangles &&
+        left.MagmaSlimeTriangles == right.MagmaSlimeTriangles;
+
+    private static bool HasDuplicatePairs(int[][] pairs) => pairs.Any(static pair => pair is not { Length: 2 }) ||
+        pairs.Where(static pair => pair is { Length: 2 }).Select(static pair => (pair[0], pair[1])).Distinct().Count() != pairs.Length;
+
+    private static bool PairArraySetEquals(int[][] expected, int[][] actual, bool tileCoordinates)
+    {
+        if (expected.Any(static pair => pair is not { Length: 2 }) ||
+            actual.Any(static pair => pair is not { Length: 2 }) ||
+            HasDuplicatePairs(expected) || HasDuplicatePairs(actual) || expected.Length != actual.Length)
+        {
+            return false;
+        }
+        if (tileCoordinates && (expected.Any(static pair => !NavmeshCoords.IsValidTile(pair[0], pair[1])) ||
+                                actual.Any(static pair => !NavmeshCoords.IsValidTile(pair[0], pair[1]))))
+        {
+            return false;
+        }
+        return expected.Select(static pair => (pair[0], pair[1])).ToHashSet()
+            .SetEquals(actual.Select(static pair => (pair[0], pair[1])));
+    }
+
     /// <summary>
     /// Turns a selected batch into a continent manifest only after an independent
     /// mapextractor --list-tiles log from the matching Forever client proves exact
@@ -487,6 +730,10 @@ public static class ForeverGeometryBatchRunner
         string statePath = Path.GetFullPath(stateFile);
         BatchState state = JsonSerializer.Deserialize<BatchState>(File.ReadAllText(statePath), JsonOptions)
             ?? throw new InvalidDataException($"Batch state is empty or malformed: {statePath}");
+        if (state.AdtSelectionMode != "explicit_list")
+        {
+            throw new InvalidDataException("Publication requires an explicit --adt-list request; rectangle selections are test/compatibility batches only.");
+        }
         (string Product, int Build) client = ReadForeverClientIdentity(clientRoot);
         if (!string.Equals(client.Product, state.ClientProduct, StringComparison.OrdinalIgnoreCase) ||
             client.Build != state.ClientBuild)
@@ -499,28 +746,42 @@ public static class ForeverGeometryBatchRunner
         string tileListLogPath = Path.GetFullPath(mapExtractorTileListLog);
         HashSet<(int X, int Y)> wdtAdts = ParseMapExtractorTileList(tileListLogPath,
             state.MapId, client.Build, clientRoot);
-        HashSet<(int X, int Y)> batchAdts = state.SourceTasks
-            .Select(static source => (source.AdtX, source.AdtY)).ToHashSet();
-        HashSet<(int X, int Y)> requestedAdts =
-            (from y in Enumerable.Range(state.AdtMinY, state.AdtMaxY - state.AdtMinY + 1)
-             from x in Enumerable.Range(state.AdtMinX, state.AdtMaxX - state.AdtMinX + 1)
-             select (x, y)).ToHashSet();
-        if (batchAdts.Count != state.SourceTasks.Count || !batchAdts.SetEquals(requestedAdts) ||
-            !batchAdts.SetEquals(wdtAdts))
+        (int X, int Y)[] requestedAdts = state.RequestedAdts
+            .Select(static pair => (pair[0], pair[1])).ToArray();
+        HashSet<(int X, int Y)> requestedSet = requestedAdts.ToHashSet();
+        (int X, int Y)[] processedAdts = state.SourceTasks
+            .Where(static source => source.Status == "succeeded" && !string.IsNullOrWhiteSpace(source.InputSha256) &&
+                                    source.ClientBuild > 0 && !string.IsNullOrWhiteSpace(source.ClientProduct))
+            .Select(static source => (source.AdtX, source.AdtY)).ToArray();
+        HashSet<(int X, int Y)> processedSet = processedAdts.ToHashSet();
+        if (requestedSet.Count != requestedAdts.Length || processedSet.Count != processedAdts.Length ||
+            processedAdts.Length != state.SourceTasks.Count || requestedSet.Count != state.SourceTasks.Count ||
+            !requestedSet.SetEquals(wdtAdts) || !requestedSet.SetEquals(processedSet))
         {
+            (int X, int Y)[] requestedButUnprocessed = requestedSet.Except(processedSet).ToArray();
+            (int X, int Y)[] processedButUnrequested = processedSet.Except(requestedSet).ToArray();
+            (int X, int Y)[] wdtOnly = wdtAdts.Except(requestedSet).ToArray();
+            (int X, int Y)[] requestedMissingFromWdt = requestedSet.Except(wdtAdts).ToArray();
             throw new InvalidDataException(
-                $"Publication refused: batch contains {batchAdts.Count} source ADTs, its request covers " +
-                $"{requestedAdts.Count}, and the independent WDT list contains {wdtAdts.Count}; all three sets must match.");
+                $"Publication refused: Requested ADTs={requestedSet.Count}, successfully processed ADTs={processedSet.Count}, " +
+                $"WDT ADTs={wdtAdts.Count}; all three unique sets must match exactly. " +
+                $"Requested-but-unprocessed={FormatAdtCoordinates(requestedButUnprocessed)}, " +
+                $"processed-but-unrequested={FormatAdtCoordinates(processedButUnrequested)}, " +
+                $"WDT-only={FormatAdtCoordinates(wdtOnly)}, requested-but-absent-from-WDT={FormatAdtCoordinates(requestedMissingFromWdt)}.");
         }
 
+        HashSet<(int X, int Z)> independentlyExpectedTiles = state.ExpectedTiles
+            .Select(static pair => (pair[0], pair[1])).ToHashSet();
         HashSet<(int X, int Z)> contributedTiles = state.SourceTasks
-            .SelectMany(static source => source.ContributingTiles)
+            .SelectMany(static source => source.IndependentlyExpectedTiles)
             .Select(static pair => (pair[0], pair[1])).ToHashSet();
         HashSet<(int X, int Z)> requestedTiles = state.TargetTiles
             .Select(static pair => (pair[0], pair[1])).ToHashSet();
         HashSet<(int X, int Z)> completedTiles = state.TileTasks
             .Select(static tile => (tile.TileX, tile.TileZ)).ToHashSet();
-        if (contributedTiles.Count == 0 || requestedTiles.Count != state.TargetTiles.Length ||
+        if (independentlyExpectedTiles.Count == 0 || contributedTiles.Count != state.ExpectedTiles.Length ||
+            !independentlyExpectedTiles.SetEquals(contributedTiles) ||
+            requestedTiles.Count != state.TargetTiles.Length ||
             completedTiles.Count != state.TileTasks.Count || !contributedTiles.SetEquals(requestedTiles) ||
             !requestedTiles.SetEquals(completedTiles) || state.TileTasks.Any(static tile =>
                 tile.Status != "succeeded" || !tile.DnmReadbackSucceeded || !tile.HeightQuerySucceeded ||
@@ -533,7 +794,7 @@ public static class ForeverGeometryBatchRunner
         DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(
             Path.GetFullPath(state.DnmOutputDirectory), requestedTiles);
         if (verification.TileCount != requestedTiles.Count || !verification.HeightQuerySucceeded ||
-            !verification.ConnectedPathSucceeded || requestedTiles.Count > 1 && verification.CrossTileLinkCount == 0)
+            !verification.ConnectedPathSucceeded)
         {
             throw new InvalidDataException("Publication refused: the exact DNM set failed independent read-back or query verification.");
         }
@@ -546,19 +807,26 @@ public static class ForeverGeometryBatchRunner
         string tileListSha256 = HashFile(tileListLogPath);
         (int X, int Y)[] orderedAdts = wdtAdts.OrderBy(static item => item.Y).ThenBy(static item => item.X).ToArray();
         (int X, int Z)[] orderedTiles = requestedTiles.OrderBy(static item => item.X).ThenBy(static item => item.Z).ToArray();
+        string evidencePath = Path.Combine(dnmRoot, ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath
+            .Replace('/', Path.DirectorySeparatorChar));
+        byte[]? originalEvidence = File.Exists(evidencePath) ? File.ReadAllBytes(evidencePath) : null;
+        Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
+        WriteWdtCoverageEvidence(evidencePath, client.Product, client.Build, state.MapId, orderedAdts,
+            Path.GetFileName(tileListLogPath), tileListSha256);
+        string evidenceSha256 = HashFile(evidencePath);
         manifest["scope"] = "continent";
         manifest["complete_for_continent"] = true;
         manifest["publishable_as_continent_cache"] = true;
         manifest["coverage_provenance"] = "wdt_tile_list";
         manifest["coverage"] = new JsonObject
         {
-            ["wdt_tile_list_file"] = Path.GetFileName(tileListLogPath),
-            ["wdt_tile_list_sha256"] = tileListSha256,
+            ["wdt_tile_list_file"] = ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath,
+            ["wdt_tile_list_sha256"] = evidenceSha256,
             ["wdt_client_product"] = client.Product,
             ["wdt_client_build"] = client.Build,
             ["wdt_map_id"] = state.MapId,
             ["expected_source_adts_xy"] = ToJsonPairs(orderedAdts.Select(static item => (item.X, item.Y))),
-            ["processed_source_adts_xy"] = ToJsonPairs(batchAdts.OrderBy(static item => item.Y).ThenBy(static item => item.X)
+            ["processed_source_adts_xy"] = ToJsonPairs(processedSet.OrderBy(static item => item.Y).ThenBy(static item => item.X)
                 .Select(static item => (item.X, item.Y))),
             ["expected_tile_indices"] = ToJsonPairs(orderedTiles),
             ["completed_tile_indices"] = ToJsonPairs(orderedTiles),
@@ -576,11 +844,37 @@ public static class ForeverGeometryBatchRunner
         {
             File.WriteAllBytes(manifestPath + ".restore", originalManifest);
             File.Move(manifestPath + ".restore", manifestPath, overwrite: true);
+            if (originalEvidence is null)
+            {
+                if (File.Exists(evidencePath)) File.Delete(evidencePath);
+            }
+            else
+            {
+                File.WriteAllBytes(evidencePath + ".restore", originalEvidence);
+                File.Move(evidencePath + ".restore", evidencePath, overwrite: true);
+            }
             throw;
         }
 
-        return new ForeverGeometryPublicationResult(statePath, manifestPath, tileListSha256,
+        return new ForeverGeometryPublicationResult(statePath, manifestPath, evidenceSha256,
             orderedAdts.Length, orderedTiles.Length);
+    }
+
+    private static void WriteWdtCoverageEvidence(string path, string product, int build, int mapId,
+        IReadOnlyList<(int X, int Y)> adts, string sourceLogFile, string sourceLogSha256)
+    {
+        var proof = new
+        {
+            format = ForeverNavmeshCacheManifest.WdtCoverageEvidenceFormat,
+            client_product = product,
+            client_build = build,
+            map_id = mapId,
+            source = "mapextractor --list-tiles",
+            source_log_file = sourceLogFile,
+            source_log_sha256 = sourceLogSha256,
+            adt_xy = adts.Select(static adt => new[] { adt.X, adt.Y }).ToArray(),
+        };
+        WriteTextAtomically(path, JsonSerializer.Serialize(proof, JsonOptions));
     }
 
     private static HashSet<(int X, int Y)> ParseMapExtractorTileList(string logPath, int mapId, int build,
@@ -592,12 +886,29 @@ public static class ForeverGeometryBatchRunner
         }
 
         string[] lines = File.ReadAllLines(logPath);
-        if (!lines.Any(line => line.Contains($"Detected client build: {build}", StringComparison.Ordinal)) ||
-            !lines.Any(line => line.Contains($"Restricted extraction to MapID {mapId}.", StringComparison.Ordinal)) ||
-            !lines.Any(line => line.Contains(Path.Combine(Path.GetFullPath(clientRoot), "Data"),
-                StringComparison.OrdinalIgnoreCase)))
+        string[] buildMarkers = lines.Select(static line => line.Trim())
+            .Where(static line => line.StartsWith("Detected client build:", StringComparison.Ordinal))
+            .ToArray();
+        string[] mapMarkers = lines.Select(static line => line.Trim())
+            .Where(static line => line.StartsWith("Restricted extraction to MapID ", StringComparison.Ordinal))
+            .ToArray();
+        string[] storageMarkers = lines.Select(static line => line.Trim())
+            .Where(static line => line.StartsWith("Opened casc storage", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        string expectedBuildMarker = $"Detected client build: {build}";
+        string expectedMapMarker = $"Restricted extraction to MapID {mapId}.";
+        string expectedDataPath = Path.GetFullPath(Path.Combine(clientRoot, "Data"))
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string? listedDataPath = storageMarkers.Length == 1
+            ? ExtractOpenedStoragePath(storageMarkers[0])
+            : null;
+        if (buildMarkers.Length != 1 || !string.Equals(buildMarkers[0], expectedBuildMarker, StringComparison.Ordinal) ||
+            mapMarkers.Length != 1 || !string.Equals(mapMarkers[0], expectedMapMarker, StringComparison.Ordinal) ||
+            listedDataPath is null ||
+            !string.Equals(Path.GetFullPath(listedDataPath).TrimEnd(Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar), expectedDataPath, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidDataException("The WDT tile-list log does not prove the expected client CASC root, Build, and restricted MapID.");
+            throw new InvalidDataException("The WDT tile-list log must contain exactly one matching CASC Data root, detected Build, and restricted MapID marker.");
         }
 
         HashSet<(int X, int Y)> result = [];
@@ -619,6 +930,29 @@ public static class ForeverGeometryBatchRunner
         }
 
         return result;
+    }
+
+    private static string? ExtractOpenedStoragePath(string line)
+    {
+        const string Prefix = "Opened casc storage ";
+        string value = line.Trim();
+        if (!value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)) return null;
+        value = value[Prefix.Length..].Trim();
+        if (value.Length >= 2 && ((value[0] == '\'' && value[^1] == '\'') ||
+                                  (value[0] == '"' && value[^1] == '"')))
+        {
+            value = value[1..^1];
+        }
+
+        return string.IsNullOrWhiteSpace(value) ? null : value;
+    }
+
+    private static string FormatAdtCoordinates(IEnumerable<(int X, int Y)> coordinates)
+    {
+        (int X, int Y)[] sorted = coordinates.OrderBy(static pair => pair.Y)
+            .ThenBy(static pair => pair.X).ToArray();
+        string shown = string.Join(",", sorted.Take(12).Select(static pair => $"({pair.X},{pair.Y})"));
+        return sorted.Length > 12 ? $"[{shown},… +{sorted.Length - 12}]" : $"[{shown}]";
     }
 
     private static (string Product, int Build) ReadForeverClientIdentity(string clientRoot)
@@ -689,6 +1023,8 @@ public static class ForeverGeometryBatchRunner
         AdtMinY = request.AdtMinY,
         AdtMaxX = request.AdtMaxX,
         AdtMaxY = request.AdtMaxY,
+        AdtSelectionMode = request.AdtList is null ? "rectangle" : "explicit_list",
+        RequestedAdts = adts.Select(static adt => new[] { adt.X, adt.Y }).ToArray(),
         InputDirectory = inputRoot,
         OutputDirectory = outputRoot,
         DnmOutputDirectory = dnmRoot,
@@ -706,12 +1042,24 @@ public static class ForeverGeometryBatchRunner
 
     private static void ValidateRequest(ForeverGeometryBatchRequest request)
     {
-        if (request.MapId < 0 || request.AdtMinX < 0 || request.AdtMinY < 0 ||
-            request.AdtMaxX >= 64 || request.AdtMaxY >= 64 ||
-            request.AdtMinX > request.AdtMaxX || request.AdtMinY > request.AdtMaxY ||
-            (long)(request.AdtMaxX - request.AdtMinX + 1) * (request.AdtMaxY - request.AdtMinY + 1) > 4096)
+        if (request.MapId < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(request), "Batch MapID must be non-negative.");
+        }
+
+        if (request.AdtList is null &&
+            (request.AdtMinX < 0 || request.AdtMinY < 0 || request.AdtMaxX >= 64 || request.AdtMaxY >= 64 ||
+             request.AdtMinX > request.AdtMaxX || request.AdtMinY > request.AdtMaxY ||
+             (long)(request.AdtMaxX - request.AdtMinX + 1) * (request.AdtMaxY - request.AdtMinY + 1) > 4096))
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Batch ADT range must be an explicit rectangle inside the 0..63 grid.");
+        }
+
+        if (request.AdtList is { } adtList &&
+            (adtList.Count is < 1 or > 4096 || adtList.Any(static adt => adt.X is < 0 or >= 64 || adt.Y is < 0 or >= 64) ||
+             adtList.Distinct().Count() != adtList.Count))
+        {
+            throw new ArgumentException("Explicit ADT list must contain 1..4096 unique coordinates in the 0..63 grid.", nameof(request));
         }
 
         ArgumentException.ThrowIfNullOrWhiteSpace(request.InputDirectory);
@@ -727,6 +1075,12 @@ public static class ForeverGeometryBatchRunner
             throw new ArgumentOutOfRangeException(nameof(request), "Batch bake settings must be finite and within supported ranges.");
         }
 
+        if (request.PaddingYards != TileGeometryExtractor.PaddingYd)
+        {
+            throw new InvalidOperationException(
+                $"Forever runtime supports only fixed padding {TileGeometryExtractor.PaddingYd}; custom --padding-yards values are rejected.");
+        }
+
         if (request.TargetTiles is { Count: > 0 } && request.TargetTiles.Distinct().Count() != request.TargetTiles.Count)
         {
             throw new ArgumentException("Explicit target Detour tiles must be unique.", nameof(request));
@@ -734,9 +1088,11 @@ public static class ForeverGeometryBatchRunner
     }
 
     private static AdtCoordinate[] EnumerateAdts(ForeverGeometryBatchRequest request) =>
-        (from y in Enumerable.Range(request.AdtMinY, request.AdtMaxY - request.AdtMinY + 1)
-         from x in Enumerable.Range(request.AdtMinX, request.AdtMaxX - request.AdtMinX + 1)
-         select new AdtCoordinate(x, y)).ToArray();
+        request.AdtList is not null
+            ? request.AdtList.OrderBy(static adt => adt.Y).ThenBy(static adt => adt.X).ToArray()
+            : (from y in Enumerable.Range(request.AdtMinY, request.AdtMaxY - request.AdtMinY + 1)
+               from x in Enumerable.Range(request.AdtMinX, request.AdtMaxX - request.AdtMinX + 1)
+               select new AdtCoordinate(x, y)).ToArray();
 
     private static string ResolveInputPath(string root, int mapId, AdtCoordinate adt)
     {
@@ -807,7 +1163,7 @@ public static class ForeverGeometryBatchRunner
             complete_for_continent = false,
             publishable_as_continent_cache = false,
             source_adts = sources,
-            coverage_provenance = "explicit_batch_range",
+            coverage_provenance = "explicit_request_set",
             batch_state_file = Path.Combine(state.OutputDirectory, "batch-state.json"),
             bake_settings = new
             {
@@ -821,6 +1177,9 @@ public static class ForeverGeometryBatchRunner
                 verts_per_poly = NavmeshSettings.VertsPerPoly,
                 format_version = NavmeshSettings.FormatVersion,
                 dot_recast_version = profile.DotRecastVersion,
+                padding_yards = profile.PaddingYards,
+                geometry_export_version = profile.GeometryExportVersion,
+                raw_geometry_format = profile.RawGeometryFormat,
             },
             query_verification = new
             {
@@ -849,14 +1208,17 @@ public static class ForeverGeometryBatchRunner
             : [],
     };
 
-    private static string ComputeRequestSignature(ForeverGeometryBatchRequest request, string inputRoot, string dnmRoot)
+    private static string ComputeRequestSignature(ForeverGeometryBatchRequest request, string inputRoot, string dnmRoot,
+        IReadOnlyList<AdtCoordinate> expectedAdts)
     {
         string tileSignature = request.TargetTiles is null
             ? "inferred"
             : string.Join(';', request.TargetTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
                 .Select(static tile => $"{tile.X},{tile.Z}"));
-        string value = string.Join('|', StateFormat, request.MapId, request.AdtMinX, request.AdtMinY,
-            request.AdtMaxX, request.AdtMaxY, inputRoot, dnmRoot, request.Continent,
+        string adtSignature = string.Join(';', expectedAdts.Select(static adt => $"{adt.X},{adt.Y}"));
+        string value = string.Join('|', StateFormat, request.MapId,
+            request.AdtList is null ? "rectangle" : "explicit_list", adtSignature,
+            request.AdtMinX, request.AdtMinY, request.AdtMaxX, request.AdtMaxY, inputRoot, dnmRoot, request.Continent,
             request.AgentRadius.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             request.AgentMaxClimb.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
             request.WalkableSlope.ToString("R", System.Globalization.CultureInfo.InvariantCulture),
@@ -885,7 +1247,7 @@ public static class ForeverGeometryBatchRunner
                     ? Path.Combine(dnmRoot, $"tile_{task.TileX}_{task.TileZ}.dnm")
                     : task.DnmOutputPath))
             .Where(path => string.Equals(Path.GetDirectoryName(path), dnmRoot, StringComparison.OrdinalIgnoreCase))
-            .Select(Path.GetFileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .Select(static path => Path.GetFileName(path)!).ToHashSet(StringComparer.OrdinalIgnoreCase);
         string[] actual = Directory.EnumerateFiles(dnmRoot, "*.dnm").Select(Path.GetFileName)
             .Where(static name => name is not null).Cast<string>().ToArray();
         if (actual.Any(name => !owned.Contains(name)))
@@ -906,6 +1268,8 @@ public static class ForeverGeometryBatchRunner
                 : task.DnmOutputPath, dnmRoot);
         }
         DeleteOwnedFile(Path.Combine(dnmRoot, "manifest.json"), dnmRoot);
+        DeleteOwnedFile(Path.Combine(dnmRoot, ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath
+            .Replace('/', Path.DirectorySeparatorChar)), Path.Combine(dnmRoot, "coverage"));
     }
 
     private static void DeleteOwnedFile(string? path, string expectedDirectory)
@@ -1000,6 +1364,9 @@ public static class ForeverGeometryBatchRunner
         public int AdtMinY { get; set; }
         public int AdtMaxX { get; set; }
         public int AdtMaxY { get; set; }
+        public string AdtSelectionMode { get; set; } = "rectangle";
+        public int[][] RequestedAdts { get; set; } = [];
+        public int[][] ExpectedTiles { get; set; } = [];
         public string InputDirectory { get; set; } = "";
         public string OutputDirectory { get; set; } = "";
         public string DnmOutputDirectory { get; set; } = "";
@@ -1038,6 +1405,7 @@ public static class ForeverGeometryBatchRunner
         public string ConfigHash { get; set; } = "";
         public GeometryCounts? Counts { get; set; }
         public int[][] ContributingTiles { get; set; } = [];
+        public int[][] IndependentlyExpectedTiles { get; set; } = [];
         public string[] OutputFiles { get; set; } = [];
         public string? FailureReason { get; set; }
         public long ElapsedMilliseconds { get; set; }

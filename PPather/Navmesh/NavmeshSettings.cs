@@ -19,6 +19,14 @@ namespace PPather.Navmesh;
 /// </summary>
 public sealed class NavmeshSettings
 {
+    /// <summary>
+    /// Input and slicing versions for the Forever offline geometry pipeline.
+    /// Bump GeometryExportAlgorithmVersion when triangle-to-tile assignment or
+    /// coordinate handling changes in RawGeometryTileExporter.
+    /// </summary>
+    public const string ForeverRawGeometryFormat = "wow-raw-geometry-v1";
+    public const string ForeverGeometryExportAlgorithmVersion = "tile-aabb-v1";
+
     /// <summary>Bump when serialized tile bytes change (params, DotRecast fork, areas).</summary>
     public const int FormatVersion = 1;
 
@@ -140,7 +148,8 @@ public sealed class NavmeshSettings
     /// </summary>
     public static string ComputeSettingsHash(string clientExpansion, string dotRecastVersion,
         float agentRadius, float agentMaxClimb, float walkableSlope, float? minWorldZ = null,
-        string? dataSetIdentity = null)
+        string? dataSetIdentity = null, float? geometryPaddingYards = null,
+        string? geometryExportVersion = null, string? rawGeometryFormat = null)
     {
         StringBuilder sb = new();
         sb.Append(FormatVersion).Append('|')
@@ -172,6 +181,24 @@ public sealed class NavmeshSettings
         if (!string.IsNullOrWhiteSpace(dataSetIdentity))
         {
             sb.Append("|dataSet|").Append(dataSetIdentity);
+        }
+
+        // Legacy eras leave these optional values unset, preserving their
+        // historical cache identity. Forever profiles set both values so a
+        // geometry slicing change or padding change cannot reuse stale tiles.
+        if (geometryPaddingYards.HasValue || !string.IsNullOrWhiteSpace(geometryExportVersion) ||
+            !string.IsNullOrWhiteSpace(rawGeometryFormat))
+        {
+            if (!geometryPaddingYards.HasValue || !float.IsFinite(geometryPaddingYards.Value) ||
+                geometryPaddingYards.Value < 0 || string.IsNullOrWhiteSpace(geometryExportVersion) ||
+                string.IsNullOrWhiteSpace(rawGeometryFormat))
+            {
+                throw new ArgumentException("Forever geometry cache identity requires finite padding, raw format, and export algorithm versions.");
+            }
+
+            sb.Append("|geometryPadding|").Append(geometryPaddingYards.Value)
+              .Append("|rawGeometryFormat|").Append(rawGeometryFormat)
+              .Append("|geometryExport|").Append(geometryExportVersion);
         }
 
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));

@@ -79,12 +79,38 @@ internal static class P45Regression
         NavmeshBakeOptions filteredOptions = new() { MinWorldZ = new() { ["Azeroth"] = -700f } };
         ForeverNavmeshBakeProfile filteredProfile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, filteredOptions);
         ForeverNavmeshBakeProfile nextBuildProfile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70095, new NavmeshBakeOptions());
+        string changedGeometryVersionHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
+            defaults.AgentRadius, defaults.AgentMaxClimb, defaults.WalkableSlope, dataSetIdentity: "wow_cn_beta-70094",
+            geometryPaddingYards: TileGeometryExtractor.PaddingYd,
+            geometryExportVersion: "tile-aabb-v-next",
+            rawGeometryFormat: NavmeshSettings.ForeverRawGeometryFormat);
+        string changedPaddingHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
+            defaults.AgentRadius, defaults.AgentMaxClimb, defaults.WalkableSlope, dataSetIdentity: "wow_cn_beta-70094",
+            geometryPaddingYards: TileGeometryExtractor.PaddingYd + 1,
+            geometryExportVersion: NavmeshSettings.ForeverGeometryExportAlgorithmVersion,
+            rawGeometryFormat: NavmeshSettings.ForeverRawGeometryFormat);
+        string changedRawFormatHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
+            defaults.AgentRadius, defaults.AgentMaxClimb, defaults.WalkableSlope, dataSetIdentity: "wow_cn_beta-70094",
+            geometryPaddingYards: TileGeometryExtractor.PaddingYd,
+            geometryExportVersion: NavmeshSettings.ForeverGeometryExportAlgorithmVersion,
+            rawGeometryFormat: "wow-raw-geometry-v-next");
         if (profileA.SettingsHash != profileB.SettingsHash || profileA.SettingsHash != frenchCultureHash ||
             profileA.SettingsHash == filteredProfile.SettingsHash ||
-            profileA.SettingsHash == nextBuildProfile.SettingsHash || defaults.ResolveMinWorldZ("Azeroth") is not null)
+            profileA.SettingsHash == nextBuildProfile.SettingsHash || defaults.ResolveMinWorldZ("Azeroth") is not null ||
+            profileA.GeometryExportVersion != NavmeshSettings.ForeverGeometryExportAlgorithmVersion ||
+            profileA.RawGeometryFormat != NavmeshSettings.ForeverRawGeometryFormat ||
+            profileA.PaddingYards != TileGeometryExtractor.PaddingYd ||
+            profileA.SettingsHash == changedGeometryVersionHash || profileA.SettingsHash == changedPaddingHash ||
+            profileA.SettingsHash == changedRawFormatHash)
         {
-            throw new InvalidOperationException("The shared Forever bake profile is not deterministic or does not partition MinWorldZ and Build identity.");
+            throw new InvalidOperationException("The shared Forever bake profile is not deterministic or does not partition MinWorldZ, Build, padding, and geometry-export identity.");
         }
+
+        ExpectFailure(() => ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
+                new NavmeshBakeOptions(), TileGeometryExtractor.PaddingYd + 0.25f),
+            "The profile accepted custom padding that runtime cannot configure.");
+        ExpectFailure(() => ForeverNavmeshBakeProfile.Create("Azeroth", "wow_classic", 70094, new NavmeshBakeOptions()),
+            "The Forever profile accepted a cache from another Product.");
 
         NavmeshBakeOptions explicitNull = new() { MinWorldZ = new() { ["Azeroth"] = null } };
         ExpectFailure(() => ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, explicitNull),

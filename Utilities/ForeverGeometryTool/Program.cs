@@ -138,14 +138,26 @@ internal static class Program
     private static int RunBatch(string[] args)
     {
         Dictionary<string, List<string>> values = ParseBatchArgs(args, allowResume: true);
-        (int minX, int minY, int maxX, int maxY) = ParseAdtRange(RequiredSingle(values, "--adt-range"));
+        bool hasRange = values.ContainsKey("--adt-range");
+        bool hasAdtList = values.ContainsKey("--adt-list");
+        if (hasRange == hasAdtList)
+        {
+            throw new ArgumentException("Supply exactly one of --adt-range or --adt-list.");
+        }
+        (int minX, int minY, int maxX, int maxY) = hasRange
+            ? ParseAdtRange(RequiredSingle(values, "--adt-range"))
+            : (0, 0, 0, 0);
+        int mapId = int.Parse(RequiredSingle(values, "--map"), CultureInfo.InvariantCulture);
+        AdtCoordinate[]? adtList = hasAdtList
+            ? ForeverGeometryBatchRunner.ReadAdtList(RequiredSingle(values, "--adt-list"), mapId)
+            : null;
         string[] tileValues = values.TryGetValue("--tile", out List<string>? tiles) ? [.. tiles] : [];
         (int X, int Z)[]? targetTiles = tileValues.Length == 0
             ? null
             : tileValues.Select(value => ParsePair(value, "--tile")).ToArray();
         NavmeshBakeOptions defaults = new();
         ForeverGeometryBatchRequest request = new(
-            int.Parse(RequiredSingle(values, "--map"), CultureInfo.InvariantCulture),
+            mapId,
             minX, minY, maxX, maxY,
             RequiredSingle(values, "--input-dir"),
             RequiredSingle(values, "--output-dir"),
@@ -157,7 +169,8 @@ internal static class Program
             OptionalBatchFloat(values, "--walkable-slope", defaults.WalkableSlope),
             OptionalBatchFloat(values, "--padding-yards", PPather.Navmesh.TileGeometryExtractor.PaddingYd),
             values.ContainsKey("--min-world-z") ? OptionalBatchFloat(values, "--min-world-z", 0) : null,
-            values.ContainsKey("--resume"));
+            values.ContainsKey("--resume"),
+            adtList);
         ForeverGeometryBatchResult result = ForeverGeometryBatchRunner.Run(request);
         Console.WriteLine(JsonSerializer.Serialize(new { status = "PASS", batch = result }, JsonOptions));
         return result.FailedTaskCount == 0 ? 0 : 2;
@@ -167,7 +180,7 @@ internal static class Program
     {
         HashSet<string> allowed = new(StringComparer.OrdinalIgnoreCase)
         {
-            "--state", "--map", "--adt-range", "--input-dir", "--output-dir", "--dnm-output",
+            "--state", "--map", "--adt-range", "--adt-list", "--input-dir", "--output-dir", "--dnm-output",
             "--continent", "--tile", "--agent-radius", "--agent-climb", "--walkable-slope",
             "--padding-yards", "--min-world-z", "--client-root", "--tile-list-log",
         };
@@ -307,7 +320,7 @@ internal static class Program
 
     private static void PrintUsage()
     {
-        Console.WriteLine("Batch mode: ForeverGeometryTool batch --map <id> --adt-range <X0,Y0:X1,Y1> --input-dir <rawgeo root> --output-dir <state/geometry dir> --dnm-output <DNM dir> --continent <name> [--tile X,Z ...] [--resume]");
+        Console.WriteLine("Batch mode: ForeverGeometryTool batch --map <id> (--adt-list <coordinate file or mapextractor tile-list log> | --adt-range <X0,Y0:X1,Y1>) --input-dir <rawgeo root> --output-dir <state/geometry dir> --dnm-output <DNM dir> --continent <name> [--tile X,Z ...] [--resume]");
         Console.WriteLine("Verify a completed selected batch independently: ForeverGeometryTool batch-verify --state <batch-state.json>");
         Console.WriteLine("Seal only after complete WDT ADT coverage and all contributed tiles verify: ForeverGeometryTool batch-seal --state <batch-state.json> --client-root <Forever client> --tile-list-log <mapextractor --list-tiles log>");
         Console.WriteLine("Usage: ForeverGeometryTool --input <rawgeo.json> --adt <X,Y> [--input <rawgeo.json> --adt <X,Y> ...] --expect-adt <X,Y> [--expect-adt ...] --output <empty directory> --map <MapID>");

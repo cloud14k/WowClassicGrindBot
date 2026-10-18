@@ -163,7 +163,7 @@ public static class ForeverGeometryAggregator
                     MinWorldZ = request.MinWorldZ.HasValue
                         ? new Dictionary<string, float?> { [request.Continent] = request.MinWorldZ.Value }
                         : [],
-                });
+                }, request.PaddingYards);
             settingsHash = profile.SettingsHash;
         }
 
@@ -221,6 +221,8 @@ public static class ForeverGeometryAggregator
                 walkable_slope = aggregate.WalkableSlope,
                 min_world_z = aggregate.MinWorldZ,
                 padding_yards = aggregate.PaddingYards,
+                raw_geometry_format = NavmeshSettings.ForeverRawGeometryFormat,
+                geometry_export_version = NavmeshSettings.ForeverGeometryExportAlgorithmVersion,
                 cell_size = NavmeshSettings.CellSize,
                 cell_height = NavmeshSettings.CellHeight,
                 tile_world_size = NavmeshSettings.TileWorldSize,

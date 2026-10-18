@@ -53,12 +53,16 @@ dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c
   --continent Azeroth --dnm-output tmp/p3-dnm --bake-tile 68,118
 ```
 
-## Resumable explicit-range batch preparation
+## Resumable explicit ADT batch preparation
 
 `batch` consumes **existing** rawgeo JSON files from an explicit input root; it
-does not open CASC or discover a WDT. The inclusive ADT rectangle is bounded to
-the client 0..63 grid. Files may be directly in the input root or in the
-`adtXX_YY/raw-geometry/` folders created by `extract-single-adt.ps1`. The runner
+does not open CASC or discover a WDT. `--adt-range` accepts an inclusive
+rectangle bounded to the client 0..63 grid for partial/test runs. `--adt-list`
+accepts a sparse requested set, one `X,Y` coordinate per line; it also accepts
+`tile MapID X Y` lines from a matching `mapextractor --list-tiles` log. Use the
+explicit list form for a complete continent candidate. Files may be directly in
+the input root or in the `adtXX_YY/raw-geometry/` folders created by
+`extract-single-adt.ps1`. The runner
 records source and tile task states in `batch-state.json`, hashes every rawgeo,
 and writes one geometry/DNM tile at a time using only that tile's contributing
 ADTs. Re-running with `--resume` reuses unchanged validated tasks and retries
@@ -72,7 +76,7 @@ For a deliberately small run, provide one explicit ADT and a new output pair:
 
 ```powershell
 dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c Release -- batch `
-  --map 0 --adt-range 33,46:33,46 `
+  --map 0 --adt-list tmp/selected-adts.txt `
   --input-dir tmp/p45-casc-3x3-clean `
   --output-dir tmp/p5-small-batch `
   --dnm-output tmp/p5-small-batch-dnm `
@@ -93,8 +97,9 @@ The batch manifest always starts with `scope=explicit_adt_and_tile_set` and
 `publishable_as_continent_cache=false`. It does not infer continent coverage
 from an ADT rectangle. A separate sealing command can change those fields only
 after a complete MapID-specific WDT tile listing from the matching Forever
-client exactly matches every requested source ADT, every source and tile task
-is still current by SHA/configuration, every contributed Detour tile is present,
+client exactly matches the requested, successfully processed and WDT ADT sets,
+every source and tile task is still current by SHA/configuration, every
+contributed Detour tile is present,
 and independent DNM read-back, height, path and cross-tile checks pass:
 
 ```powershell
@@ -112,8 +117,11 @@ partial ADT range fails closed and leaves the selected-scope manifest
 unchanged. On success, the manifest records the tile-list log's basename and
 SHA-256 alongside the exact expected/processed ADT and target/completed tile
 sets. `ValidateForPublication` and the official runtime validator both require
-this coverage proof. The sealing command consumes an existing log and never
-starts a WDT listing or continent extraction itself.
+this coverage proof. The sealed cache contains `coverage/wdt-coverage.json`; the
+runtime checks its fixed relative path, containment, file hash, product, Build,
+MapID and normalized ADT set. The seal command accepts only one exact CASC Data
+root, Build and restricted MapID marker in the listing log, then consumes the
+validated log without starting a WDT listing or continent extraction itself.
 
 Both output directories must be empty. `--bake-tile` uses Detour coordinates
 `X,Z`, and every requested tile must exist in the aggregate. Geometry and DNM
@@ -121,6 +129,13 @@ manifests record the source set, Build, bake settings, duplicate counts and file
 hashes. A selected ADT/tile test pack is explicitly marked as not publishable as
 a continent cache. Runtime Forever cache loading requires a matching manifest,
 Product, Build, MapID, settings hash and exact DNM file set.
+
+The bake identity includes the raw geometry format and exporter algorithm
+version. Vertical geometry padding is fixed at 4 yards because runtime has no
+padding setting; a custom value is rejected. The Forever DNM manifest is now
+format v2 and requires the package-contained WDT coverage proof, so v1 sealed
+cache packages must be rebuilt and sealed again. Existing rawgeo files can be
+reused when their source and geometry validations still pass.
 
 ## Rebuild the restricted CASC tools
 

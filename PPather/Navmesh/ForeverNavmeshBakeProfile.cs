@@ -17,6 +17,9 @@ public sealed record ForeverNavmeshBakeProfile(
     int ClientBuild,
     string DataSetIdentity,
     string DotRecastVersion,
+    string RawGeometryFormat,
+    string GeometryExportVersion,
+    float PaddingYards,
     float AgentRadius,
     float AgentMaxClimb,
     float WalkableSlope,
@@ -24,7 +27,8 @@ public sealed record ForeverNavmeshBakeProfile(
     string SettingsHash)
 {
     public static ForeverNavmeshBakeProfile Create(string continent, string clientProduct,
-        int clientBuild, NavmeshBakeOptions options)
+        int clientBuild, NavmeshBakeOptions options,
+        float paddingYards = TileGeometryExtractor.PaddingYd)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(continent);
         ArgumentException.ThrowIfNullOrWhiteSpace(clientProduct);
@@ -43,6 +47,12 @@ public sealed record ForeverNavmeshBakeProfile(
             throw new InvalidOperationException("Forever navmesh radius, climb, and slope settings must be finite and within their valid ranges.");
         }
 
+        if (!float.IsFinite(paddingYards) || paddingYards != TileGeometryExtractor.PaddingYd)
+        {
+            throw new InvalidOperationException(
+                $"Forever runtime currently supports only the fixed geometry padding of {TileGeometryExtractor.PaddingYd.ToString(CultureInfo.InvariantCulture)} yards; received {paddingYards.ToString(CultureInfo.InvariantCulture)}.");
+        }
+
         float? minWorldZ = options.ResolveMinWorldZ(continent);
         string dotRecastVersion = typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0";
         string dataSetIdentity = $"{clientProduct.ToLowerInvariant()}-{clientBuild}";
@@ -56,14 +66,17 @@ public sealed record ForeverNavmeshBakeProfile(
             CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
             settingsHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
                 options.AgentRadius, options.AgentMaxClimb, options.WalkableSlope,
-                minWorldZ, dataSetIdentity);
+                minWorldZ, dataSetIdentity, paddingYards,
+                NavmeshSettings.ForeverGeometryExportAlgorithmVersion,
+                NavmeshSettings.ForeverRawGeometryFormat);
         }
         finally
         {
             CultureInfo.CurrentCulture = previousCulture;
         }
         return new ForeverNavmeshBakeProfile(continent, clientProduct, clientBuild, dataSetIdentity,
-            dotRecastVersion, options.AgentRadius, options.AgentMaxClimb, options.WalkableSlope,
-            minWorldZ, settingsHash);
+            dotRecastVersion, NavmeshSettings.ForeverRawGeometryFormat,
+            NavmeshSettings.ForeverGeometryExportAlgorithmVersion, paddingYards,
+            options.AgentRadius, options.AgentMaxClimb, options.WalkableSlope, minWorldZ, settingsHash);
     }
 }
