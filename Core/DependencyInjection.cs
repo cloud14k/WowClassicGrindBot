@@ -407,9 +407,19 @@ public static class DependencyInjection
         s.AddSingleton<ManualResetEventSlim>(x => new(false));
         s.AddSingleton<Wait>();
 
-        s.AddSingleton<StartupClientVersion>();
-        s.AddSingleton<DataConfig>(x => DataConfig.Load(
-            x.GetRequiredService<StartupClientVersion>().Path));
+        s.AddSingleton<StartupClientVersion>(x =>
+        {
+            WowProcess process = x.GetRequiredService<WowProcess>();
+            return new StartupClientVersion(process.FileVersion, process.ClientProduct, process.ClientBuild);
+        });
+        s.AddSingleton<DataConfig>(x =>
+        {
+            StartupClientVersion client = x.GetRequiredService<StartupClientVersion>();
+            DataConfig config = DataConfig.Load(client.Path);
+            config.ClientProduct = client.Product;
+            config.ClientBuild = client.Build;
+            return config;
+        });
 
         s.AddSingleton<IWowScreen>(x => CreateWowScreen(x.GetRequiredService<IServiceProvider>(), log));
         s.AddSingleton<IScreenImageProvider>(x => x.GetRequiredService<IWowScreen>());

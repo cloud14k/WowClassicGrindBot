@@ -45,6 +45,7 @@ internal sealed class Program
         ["find-target"] = Test_FindTargetByCursor,
         ["pather"] = Test_PPather,
         ["navmesh"] = Test_NavmeshCoords,
+        ["p45"] = args => P45Regression.Run(logger, args),
         ["routegen"] = Test_RouteGeneration,
         ["npc-regression"] = args => Test_NpcNameFinderRegression.Run(logger),
         ["combat-recovery"] = _ => Test_CombatRecovery.Run(),
@@ -60,7 +61,7 @@ internal sealed class Program
 
     /// <summary>Suites that need no WoW process - see the attach decision in Main.</summary>
     private static readonly HashSet<string> offlineSuites =
-        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "routegen", "npc-regression", "combat-recovery", "state", "keybindings", "record" };
+        new(StringComparer.OrdinalIgnoreCase) { "navmesh", "p45", "routegen", "npc-regression", "combat-recovery", "state", "keybindings", "record" };
 
     public static async Task Main(string[] args)
     {

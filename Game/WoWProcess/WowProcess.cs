@@ -30,6 +30,10 @@ public sealed class WowProcess : IDisposable
 
     public Version FileVersion { get; private set; }
 
+    public string ClientProduct { get; private set; } = "";
+
+    public int? ClientBuild { get; private set; }
+
     public string Path { get; private set; }
 
     private Process process;
@@ -64,7 +68,7 @@ public sealed class WowProcess : IDisposable
         process = p;
         id = process.Id;
         IsRunning = true;
-        (Path, FileVersion) = GetProcessInfo();
+        (Path, FileVersion, ClientProduct, ClientBuild) = GetProcessInfo();
 
         thread = new(PollProcessExited);
         thread.Start();
@@ -87,7 +91,7 @@ public sealed class WowProcess : IDisposable
                     process = p;
                     id = process.Id;
                     IsRunning = true;
-                    (Path, FileVersion) = GetProcessInfo();
+                    (Path, FileVersion, ClientProduct, ClientBuild) = GetProcessInfo();
                 }
             }
 
@@ -128,7 +132,7 @@ public sealed class WowProcess : IDisposable
         return null;
     }
 
-    private (string path, Version version) GetProcessInfo()
+    private (string path, Version version, string product, int? build) GetProcessInfo()
     {
         string path = WinAPI.ExecutablePath.Get(process)
             ?? throw new NullReferenceException("Unable to identify World of Warcraft process path!");
@@ -142,10 +146,12 @@ public sealed class WowProcess : IDisposable
 
             v = CorrectVersion(v);
 
-            return (path, v);
+            WowClientBuildInfo? buildInfo = WowClientBuildInfo.Read(path, v);
+            return (path, v, buildInfo?.Product ?? "", buildInfo?.Build);
         }
 
-        return (path, new Version());
+        WowClientBuildInfo? fallbackBuildInfo = WowClientBuildInfo.Read(path);
+        return (path, new Version(), fallbackBuildInfo?.Product ?? "", fallbackBuildInfo?.Build);
     }
 
     // Blizzard occasionally ships executables with broken file versions

@@ -1,0 +1,274 @@
+using System.Numerics;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+using DotRecast.Core;
+using DotRecast.Detour;
+using DotRecast.Detour.Io;
+
+using PPather.Navmesh;
+using SharedLib;
+
+namespace ForeverGeometryTool;
+
+public sealed record BakedTileRecord(
+    [property: System.Text.Json.Serialization.JsonPropertyName("dt_tile_x")] int DtTileX,
+    [property: System.Text.Json.Serialization.JsonPropertyName("dt_tile_z")] int DtTileZ,
+    [property: System.Text.Json.Serialization.JsonPropertyName("file")] string File,
+    [property: System.Text.Json.Serialization.JsonPropertyName("sha256")] string Sha256,
+    [property: System.Text.Json.Serialization.JsonPropertyName("polygon_count")] int PolygonCount,
+    [property: System.Text.Json.Serialization.JsonPropertyName("vertex_count")] int VertexCount,
+    [property: System.Text.Json.Serialization.JsonPropertyName("terrain_triangles")] int TerrainTriangles,
+    [property: System.Text.Json.Serialization.JsonPropertyName("collision_triangles")] int CollisionTriangles,
+    [property: System.Text.Json.Serialization.JsonPropertyName("liquid_triangles")] int LiquidTriangles);
+
+public sealed record BakeVerification(int TileCount, int AddTileCount, int CrossTileLinkCount,
+    bool HeightQuerySucceeded, bool ConnectedPathSucceeded, int PathPolyCount,
+    float[] StartWow, float[] EndWow, string SettingsHash, IReadOnlyList<BakedTileRecord> Tiles);
+
+public static class ForeverGeometryBakeVerifier
+{
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+
+    public static BakeVerification BakeAndVerify(GeometryAggregate aggregate,
+        IReadOnlyCollection<(int X, int Z)> requestedTiles, string outputDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(aggregate);
+        if (requestedTiles.Count == 0)
+        {
+            throw new ArgumentException("At least one explicit Detour tile must be selected for baking.", nameof(requestedTiles));
+        }
+
+        if (requestedTiles.Distinct().Count() != requestedTiles.Count)
+        {
+            throw new InvalidDataException("A Detour tile was selected for baking more than once.");
+        }
+
+        Directory.CreateDirectory(outputDirectory);
+        if (Directory.EnumerateFileSystemEntries(outputDirectory).Any())
+        {
+            throw new IOException(".dnm output directory must be empty to prevent mixed or overwritten tile sets.");
+        }
+
+        Dictionary<(int X, int Z), ForeverGeometryTile> available = aggregate.Tiles
+            .ToDictionary(static tile => (tile.DtTileX, tile.DtTileZ));
+        List<ForeverGeometryTile> selected = [];
+        foreach ((int x, int z) in requestedTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z))
+        {
+            if (!available.TryGetValue((x, z), out ForeverGeometryTile? tile))
+            {
+                throw new InvalidDataException($"Requested tile ({x},{z}) is not present in the aggregated geometry.");
+            }
+
+            selected.Add(tile);
+        }
+
+        NavmeshBakeOptions bake = new()
+        {
+            AgentRadius = aggregate.AgentRadius,
+            AgentMaxClimb = aggregate.AgentMaxClimb,
+            WalkableSlope = aggregate.WalkableSlope,
+        };
+        List<(ForeverGeometryTile Source, DtMeshData Data, string Path, string Sha256)> loadedTiles = [];
+        foreach (ForeverGeometryTile source in selected)
+        {
+            TileGeometry geometry = source.ToTileGeometry();
+            DtMeshData data = NavmeshTileBuilder.Bake(geometry, source.DtTileX, source.DtTileZ, bake)
+                ?? throw new InvalidDataException($"NavmeshTileBuilder returned no polygons for tile ({source.DtTileX},{source.DtTileZ}).");
+
+            string fileName = $"tile_{source.DtTileX}_{source.DtTileZ}.dnm";
+            string dnmPath = Path.Combine(outputDirectory, fileName);
+            using (FileStream stream = File.Create(dnmPath))
+            using (BinaryWriter writer = new(stream))
+            {
+                new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
+            }
+
+            DtMeshData loaded;
+            using (FileStream stream = File.OpenRead(dnmPath))
+            using (BinaryReader reader = new(stream))
+            {
+                loaded = new DtMeshDataReader().Read(reader, NavmeshSettings.VertsPerPoly);
+            }
+
+            if (loaded.header.x != source.DtTileX || loaded.header.y != source.DtTileZ ||
+                loaded.header.polyCount <= 0 || loaded.header.vertCount <= 0)
+            {
+                throw new InvalidDataException($"Read-back .dnm header mismatch or empty tile at ({source.DtTileX},{source.DtTileZ}).");
+            }
+
+            loadedTiles.Add((source, loaded, dnmPath,
+                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(dnmPath))).ToLowerInvariant()));
+        }
+
+        DtNavMesh navMesh = new();
+        DtStatus initStatus = navMesh.Init(new DtNavMeshParams
+        {
+            orig = new Vector3(NavmeshCoords.Origin, 0, NavmeshCoords.Origin),
+            tileWidth = NavmeshSettings.TileWorldSize,
+            tileHeight = NavmeshSettings.TileWorldSize,
+            maxTiles = NavmeshSettings.MaxTiles,
+            maxPolys = NavmeshSettings.MaxPolysPerTile,
+        }, NavmeshSettings.VertsPerPoly);
+        if (!initStatus.Succeeded())
+        {
+            throw new InvalidOperationException($"DtNavMesh.Init failed after .dnm read-back: {initStatus}");
+        }
+
+        Dictionary<(int X, int Z), DtMeshTile> meshTiles = [];
+        foreach ((ForeverGeometryTile source, DtMeshData data, _, _) in loadedTiles)
+        {
+            DtStatus addStatus = navMesh.AddTile(data, 0, 0, out long tileRef);
+            if (!addStatus.Succeeded() || tileRef == 0)
+            {
+                throw new InvalidOperationException($"DtNavMesh.AddTile failed for ({source.DtTileX},{source.DtTileZ}): {addStatus}");
+            }
+
+            meshTiles.Add((source.DtTileX, source.DtTileZ), navMesh.GetTileByRef(tileRef)
+                ?? throw new InvalidOperationException("DtNavMesh.AddTile succeeded but the tile could not be read back."));
+        }
+
+        DtNavMeshQuery query = new(navMesh);
+        WowQueryFilter filter = new();
+        filter.BeginQuery();
+        bool heightQuerySucceeded = false;
+        bool pathSucceeded = false;
+        int pathPolyCount = 0;
+        int crossTileLinks = 0;
+        Vector3 startWow = Vector3.Zero;
+        Vector3 endWow = Vector3.Zero;
+
+        foreach (KeyValuePair<(int X, int Z), DtMeshTile> entry in meshTiles)
+        {
+            DtMeshTile tile = entry.Value;
+            long baseRef = navMesh.GetPolyRefBase(tile);
+            for (int polyIndex = 0; polyIndex < tile.data.header.polyCount; polyIndex++)
+            {
+                DtPoly poly = tile.data.polys[polyIndex];
+                if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND ||
+                    (poly.flags & WowQueryFilter.IncludeFlags) == 0)
+                {
+                    continue;
+                }
+
+                long startRef = baseRef | (long)poly.index;
+                Vector3 center = navMesh.GetPolyCenter(startRef);
+                if (!heightQuerySucceeded && query.ClosestPointOnPoly(startRef, center, out Vector3 surface, out _).Succeeded())
+                {
+                    Vector3 wow = NavmeshCoords.ToWow(surface);
+                    if (Vector3.Distance(NavmeshCoords.ToRc(wow), surface) > 0.01f)
+                    {
+                        throw new InvalidDataException("Rc/WoW coordinate round-trip failed on a loaded .dnm tile.");
+                    }
+
+                    startWow = wow;
+                    heightQuerySucceeded = true;
+                }
+
+                for (int linkIndex = poly.firstLink; linkIndex != DtDetour.DT_NULL_LINK; linkIndex = tile.links[linkIndex].next)
+                {
+                    long endRef = tile.links[linkIndex].refs;
+                    if (endRef == 0 || endRef == startRef || !navMesh.IsValidPolyRef(endRef))
+                    {
+                        continue;
+                    }
+
+                    if (!navMesh.GetTileAndPolyByRef(endRef, out DtMeshTile endTile, out _).Succeeded())
+                    {
+                        continue;
+                    }
+
+                    bool crossTile = endTile.data.header.x != tile.data.header.x || endTile.data.header.y != tile.data.header.y;
+                    if (crossTile)
+                    {
+                        crossTileLinks++;
+                    }
+
+                    if (pathSucceeded || loadedTiles.Count > 1 && !crossTile)
+                    {
+                        continue;
+                    }
+
+                    Vector3 endCenter = navMesh.GetPolyCenter(endRef);
+                    long[] path = new long[64];
+                    DtStatus pathStatus = query.FindPath(startRef, endRef, center, endCenter,
+                        filter, path, out int count, path.Length);
+                    if (pathStatus.Succeeded() && count >= 2 && path[count - 1] == endRef)
+                    {
+                        Vector3 rcStart = navMesh.GetPolyCenter(startRef);
+                        Vector3 rcEnd = navMesh.GetPolyCenter(endRef);
+                        startWow = NavmeshCoords.ToWow(rcStart);
+                        endWow = NavmeshCoords.ToWow(rcEnd);
+                        pathPolyCount = count;
+                        pathSucceeded = true;
+                    }
+                }
+            }
+        }
+
+        if (loadedTiles.Count > 1 && crossTileLinks == 0)
+        {
+            throw new InvalidDataException("Multiple .dnm tiles loaded, but no cross-tile links were established.");
+        }
+
+        if (!heightQuerySucceeded || !pathSucceeded)
+        {
+            throw new InvalidDataException("The loaded .dnm set failed the ground-height or cross-tile path query.");
+        }
+
+        string dotRecastVersion = typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0";
+        string settingsHash = NavmeshSettings.ComputeSettingsHash("forever", dotRecastVersion,
+            bake.AgentRadius, bake.AgentMaxClimb, bake.WalkableSlope,
+            minWorldZ: aggregate.MinWorldZ,
+            dataSetIdentity: $"{StartupClientVersion.ForeverProductId}-{aggregate.ClientBuild}");
+        BakedTileRecord[] records = loadedTiles.Select(static item => new BakedTileRecord(
+            item.Source.DtTileX, item.Source.DtTileZ, Path.GetFileName(item.Path), item.Sha256,
+            item.Data.header.polyCount, item.Data.header.vertCount,
+            item.Source.TileCounts.TerrainTriangles, item.Source.TileCounts.CollisionTriangles,
+            item.Source.TileCounts.LiquidTriangles)).ToArray();
+        var manifest = new
+        {
+            format = "wow-forever-dnm-manifest-v1",
+            client_product = aggregate.ClientProduct,
+            client_build = aggregate.ClientBuild,
+            data_set_id = $"{StartupClientVersion.ForeverProductId}-{aggregate.ClientBuild}",
+            settings_hash = settingsHash,
+            map_id = aggregate.MapId,
+            scope = "explicit_adt_and_tile_set",
+            complete_for_requested_sources_and_tiles = true,
+            publishable_as_continent_cache = false,
+            source_adts = aggregate.Sources,
+            duplicate_triangles_removed = aggregate.DuplicateTrianglesRemoved,
+            bake_settings = new
+            {
+                agent_radius = bake.AgentRadius,
+                agent_max_climb = bake.AgentMaxClimb,
+                walkable_slope = bake.WalkableSlope,
+                min_world_z = aggregate.MinWorldZ,
+                cell_size = NavmeshSettings.CellSize,
+                cell_height = NavmeshSettings.CellHeight,
+                tile_world_size = NavmeshSettings.TileWorldSize,
+                verts_per_poly = NavmeshSettings.VertsPerPoly,
+                format_version = NavmeshSettings.FormatVersion,
+                dot_recast_version = dotRecastVersion,
+            },
+            query_verification = new
+            {
+                add_tile_count = loadedTiles.Count,
+                cross_tile_link_count = crossTileLinks,
+                height_query_succeeded = heightQuerySucceeded,
+                path_succeeded = pathSucceeded,
+                path_polygon_count = pathPolyCount,
+                start_wow = new[] { startWow.X, startWow.Y, startWow.Z },
+                end_wow = new[] { endWow.X, endWow.Y, endWow.Z },
+            },
+            tiles = records,
+        };
+        using FileStream manifestStream = File.Create(Path.Combine(outputDirectory, "manifest.json"));
+        JsonSerializer.Serialize(manifestStream, manifest, JsonOptions);
+
+        return new BakeVerification(loadedTiles.Count, loadedTiles.Count, crossTileLinks,
+            heightQuerySucceeded, pathSucceeded, pathPolyCount,
+            [startWow.X, startWow.Y, startWow.Z], [endWow.X, endWow.Y, endWow.Z], settingsHash, records);
+    }
+}

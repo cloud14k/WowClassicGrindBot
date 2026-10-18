@@ -4,19 +4,43 @@ namespace SharedLib;
 
 public sealed class StartupClientVersion
 {
+    public const string ForeverProductId = "wow_cn_beta";
+
     public ClientVersion Version { get; }
 
     public string Path { get; }
 
+    public string Product { get; }
+
+    public int? Build { get; }
+
+    public bool IsForever => Version == ClientVersion.Forever;
+
     public StartupClientVersion(Version v)
+        : this(v, "", null)
     {
+    }
+
+    public StartupClientVersion(Version v, string? product, int? build)
+    {
+        Product = product?.Trim() ?? "";
+        Build = build;
+
+        if (Product.Equals(ForeverProductId, StringComparison.OrdinalIgnoreCase))
+        {
+            Version = ClientVersion.Forever;
+            Path = "forever";
+            return;
+        }
+
         (Version, Path) = v switch
         {
             // --- Classic branch ---
-            { Major: 1, Minor: >= 13 } => (ClientVersion.SoM, "som"), // Vanilla / SoM
+            { Major: 1, Minor: >= 13 and <= 15 } => (ClientVersion.SoM, "som"), // Vanilla / SoM
             { Major: 2, Minor: >= 5 } => (ClientVersion.TBC, "tbc"),  // TBC Classic
             { Major: 3, Minor: >= 4 } => (ClientVersion.Wrath, "wrath"),
             { Major: 4, Minor: >= 4 } => (ClientVersion.Cata, "cata"),
+            { Major: 5, Minor: >= 5 } => (ClientVersion.Mop, "mop"),
 
             // --- Legacy branch ---
             { Major: 1, Minor: <= 12 } => (ClientVersion.Legacy_Vanilla, "legacy_vanilla"),

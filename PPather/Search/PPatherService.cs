@@ -891,13 +891,45 @@ public sealed class PPatherService : IDisposable
     private string NavmeshCacheDir(string continent)
     {
         // The era, not the client name: som, tbc and wrath share one bake.
+        string era = DataConfig.ClientEra(dataConfig.Exp);
+        string? dataSetIdentity = null;
+        if (era == "forever")
+        {
+            if (!string.Equals(dataConfig.ClientProduct, StartupClientVersion.ForeverProductId,
+                    StringComparison.OrdinalIgnoreCase) || !dataConfig.ClientBuild.HasValue)
+            {
+                throw new InvalidOperationException(
+                    "Forever navmesh data requires a verified wow_cn_beta Product and Build from the client install metadata.");
+            }
+
+            dataSetIdentity = dataConfig.NavmeshDataSetId;
+        }
+
         string hash = NavmeshSettings.ComputeSettingsHash(
-            NavmeshSettings.MeshEra(dataConfig.Exp),
+            era,
             typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0",
             bakeOptions.AgentRadius, bakeOptions.AgentMaxClimb, bakeOptions.WalkableSlope,
-            bakeOptions.ResolveMinWorldZ(continent));
+            bakeOptions.ResolveMinWorldZ(continent), dataSetIdentity);
 
         return System.IO.Path.Join(dataConfig.Navmesh, continent, hash);
+    }
+
+    private void ValidateForeverNavmeshCache(string cacheDir, float expectedMapId)
+    {
+        if (DataConfig.ClientEra(dataConfig.Exp) != "forever")
+        {
+            return;
+        }
+
+        if (!float.IsFinite(expectedMapId) || expectedMapId < 0 || expectedMapId > int.MaxValue ||
+            MathF.Truncate(expectedMapId) != expectedMapId)
+        {
+            throw new InvalidOperationException($"Forever navmesh cache requires an integer MapID, received {expectedMapId}.");
+        }
+
+        string settingsHash = System.IO.Path.GetFileName(cacheDir);
+        ForeverNavmeshCacheManifest.Validate(cacheDir, dataConfig.ClientProduct,
+            dataConfig.ClientBuild!.Value, settingsHash, (int)expectedMapId);
     }
 
     /// <summary>
@@ -958,6 +990,7 @@ public sealed class PPatherService : IDisposable
 
         string continent = ContinentDB.IdToName[activeMapId];
         string cacheDir = NavmeshCacheDir(continent);
+        ValidateForeverNavmeshCache(cacheDir, activeMapId);
 
         navmeshPathfinder = new NavmeshPathfinder(logger, TriangleWorld, cacheDir, bakeOptions, queryOptions,
             bakeOptions.ResolveMinWorldZ(continent));
@@ -1245,6 +1278,8 @@ public sealed class PPatherService : IDisposable
                     continent, cacheDir, continent);
                 return null;
             }
+
+            ValidateForeverNavmeshCache(cacheDir, mapId);
 
             nav = new NavmeshPathfinder(logger, null, cacheDir, bakeOptions, queryOptions,
                 bakeOptions.ResolveMinWorldZ(continent));

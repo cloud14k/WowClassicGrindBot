@@ -2,6 +2,8 @@ using Core.Extensions;
 
 using Game;
 
+using SharedLib;
+
 using Microsoft.Extensions.Logging;
 
 using System;
@@ -200,6 +202,11 @@ public sealed partial class AddonConfigurator
 
     private bool IsModernClassicClient()
     {
+        if (process.ClientProduct.Equals(StartupClientVersion.ForeverProductId, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         Version version = process.FileVersion;
 
         return version switch

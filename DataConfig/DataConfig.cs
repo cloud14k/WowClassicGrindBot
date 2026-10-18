@@ -71,6 +71,7 @@ public sealed class DataConfig
                 or "legacy_vanilla" or "legacy_tbc" or "legacy_wrath" => "precata",
             "cata" or "legacy_cata" => "cata",
             "mop" or "legacy_mop" => "mop",
+            "forever" => "forever",
             _ => client.ToLowerInvariant(),
         };
     }
@@ -156,6 +157,18 @@ public sealed class DataConfig
     // at runtime - determined from the running exe file version
     [JsonIgnore]
     public string Exp { get; set; } = "wrath"; // hardcoded default
+
+    [JsonIgnore]
+    public string ClientProduct { get; set; } = "";
+
+    [JsonIgnore]
+    public int? ClientBuild { get; set; }
+
+    [JsonIgnore]
+    public string? NavmeshDataSetId =>
+        string.IsNullOrWhiteSpace(ClientProduct) || !ClientBuild.HasValue
+            ? null
+            : $"{ClientProduct.ToLowerInvariant()}-{ClientBuild.Value}";
 
     public static DataConfig Load()
     {

@@ -9,6 +9,9 @@ public enum ClientVersion
     Wrath = 11,
     Cata = 14,
     Mop = 19,
+    // Process identity for the Forever product; the addon itself reports the
+    // Classic project id, so this value is not written by DataToColor.
+    Forever = 20,
     //
     Legacy_Vanilla = 91,
     Legacy_TBC = 92,

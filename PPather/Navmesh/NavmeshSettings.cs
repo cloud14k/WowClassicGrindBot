@@ -139,7 +139,8 @@ public sealed class NavmeshSettings
     /// (informational version).
     /// </summary>
     public static string ComputeSettingsHash(string clientExpansion, string dotRecastVersion,
-        float agentRadius, float agentMaxClimb, float walkableSlope, float? minWorldZ = null)
+        float agentRadius, float agentMaxClimb, float walkableSlope, float? minWorldZ = null,
+        string? dataSetIdentity = null)
     {
         StringBuilder sb = new();
         sb.Append(FormatVersion).Append('|')
@@ -166,6 +167,11 @@ public sealed class NavmeshSettings
         if (minWorldZ.HasValue)
         {
             sb.Append("|minZ").Append(minWorldZ.Value);
+        }
+
+        if (!string.IsNullOrWhiteSpace(dataSetIdentity))
+        {
+            sb.Append("|dataSet|").Append(dataSetIdentity);
         }
 
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));

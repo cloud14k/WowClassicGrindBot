@@ -1,12 +1,6 @@
 using System.Globalization;
-using System.Numerics;
 using System.Text.Json;
 
-using DotRecast.Core;
-using DotRecast.Detour;
-using DotRecast.Detour.Io;
-
-using PPather.Navmesh;
 using SharedLib;
 
 namespace ForeverGeometryTool;
@@ -14,6 +8,10 @@ namespace ForeverGeometryTool;
 internal static class Program
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
+    private static readonly HashSet<string> RepeatableOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "--input", "--adt", "--expect-adt", "--bake-tile",
+    };
 
     private static int Main(string[] args)
     {
@@ -25,45 +23,75 @@ internal static class Program
                 return 0;
             }
 
-            Dictionary<string, string> values = ParseArgs(args);
-            string input = Required(values, "--input");
-            string output = Required(values, "--output");
-            int map = int.Parse(Required(values, "--map"), CultureInfo.InvariantCulture);
-            (int adtX, int adtY) = ParseAdt(Required(values, "--adt"));
-            bool hasDnmOutput = values.TryGetValue("--dnm-output", out string? dnmOutput);
-            bool hasBakeTile = values.TryGetValue("--bake-tile", out string? bakeTileValue);
-            if (hasDnmOutput != hasBakeTile)
+            Dictionary<string, List<string>> values = ParseArgs(args);
+            string output = RequiredSingle(values, "--output");
+            int map = int.Parse(RequiredSingle(values, "--map"), CultureInfo.InvariantCulture);
+            string[] inputs = RequiredMany(values, "--input");
+            string[] adts = RequiredMany(values, "--adt");
+            string[] expectedAdts = RequiredMany(values, "--expect-adt");
+            if (inputs.Length != adts.Length)
             {
-                throw new ArgumentException("--dnm-output and --bake-tile must be supplied together; P3 currently limits baking to one tile.");
+                throw new ArgumentException("Each --input must have one matching --adt in the same order.");
             }
 
-            IReadOnlyList<ForeverGeometryTile> tiles = RawGeometryTileExporter.Export(input,
-                new GeometryExportRequest(map, adtX, adtY));
-            RawGeometryTileExporter.WriteDirectory(output, tiles);
+            List<GeometryInputFile> geometryInputs = [];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                (int x, int y) = ParsePair(adts[i], "--adt");
+                geometryInputs.Add(new GeometryInputFile(inputs[i], x, y));
+            }
+
+            NavmeshBakeOptions defaults = new();
+            float radius = OptionalFloat(values, "--agent-radius", defaults.AgentRadius);
+            float climb = OptionalFloat(values, "--agent-climb", defaults.AgentMaxClimb);
+            float slope = OptionalFloat(values, "--walkable-slope", defaults.WalkableSlope);
+            float padding = OptionalFloat(values, "--padding-yards", PPather.Navmesh.TileGeometryExtractor.PaddingYd);
+            float? minWorldZ = OptionalNullableFloat(values, "--min-world-z");
+
+            bool hasDnmOutput = values.TryGetValue("--dnm-output", out List<string>? dnmOutputs);
+            string[] bakeTileValues = OptionalMany(values, "--bake-tile");
+            if (hasDnmOutput != (bakeTileValues.Length > 0) || hasDnmOutput && dnmOutputs!.Count != 1)
+            {
+                throw new ArgumentException("Supply one --dnm-output and one or more --bake-tile options together.");
+            }
+
+            List<AdtCoordinate> expectedAdtCoordinates = expectedAdts
+                .Select(value => ParsePair(value, "--expect-adt"))
+                .Select(static pair => new AdtCoordinate(pair.X, pair.Y))
+                .ToList();
+            GeometryAggregate aggregate = ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
+                map, geometryInputs, expectedAdtCoordinates, radius, climb, padding, slope, minWorldZ));
+            ForeverGeometryAggregator.WriteDirectory(output, aggregate);
 
             BakeVerification? bakeVerification = null;
             if (hasDnmOutput)
             {
-                (int tileX, int tileZ) = ParseTile(bakeTileValue!);
-                ForeverGeometryTile tile = tiles.SingleOrDefault(t => t.DtTileX == tileX && t.DtTileZ == tileZ)
-                    ?? throw new InvalidDataException($"Requested bake tile ({tileX},{tileZ}) is not present in the selected MapID/ADT geometry.");
-                bakeVerification = BakeWriteReadAndQuery(tile, dnmOutput!);
+                List<(int X, int Z)> requestedTiles = bakeTileValues
+                    .Select(value => ParsePair(value, "--bake-tile"))
+                    .ToList();
+                bakeVerification = ForeverGeometryBakeVerifier.BakeAndVerify(
+                    aggregate, requestedTiles, dnmOutputs![0]);
             }
 
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 status = "PASS",
                 map_id = map,
-                adt_xy = new[] { adtX, adtY },
-                input_file = Path.GetFullPath(input),
-                output_directory = Path.GetFullPath(output),
-                tile_count = tiles.Count,
-                terrain_triangles = tiles.Sum(t => t.TileCounts.TerrainTriangles),
-                collision_triangles = tiles.Sum(t => t.TileCounts.CollisionTriangles),
-                liquid_triangles = tiles.Sum(t => t.TileCounts.LiquidTriangles),
-                client_product = tiles[0].ClientProduct,
-                client_build = tiles[0].ClientBuild,
-                baked_tile = bakeVerification,
+                source_adts = aggregate.Sources.Select(static source => source.AdtXY).ToArray(),
+                source_count = aggregate.Sources.Count,
+                source_geometry_complete_for_explicit_set = true,
+                client_product = aggregate.ClientProduct,
+                client_build = aggregate.ClientBuild,
+                geometry_output = Path.GetFullPath(output),
+                geometry_tile_count = aggregate.Tiles.Count,
+                source_terrain_triangles = aggregate.SourceTerrainTriangles,
+                source_collision_triangles = aggregate.SourceCollisionTriangles,
+                source_liquid_triangles = aggregate.SourceLiquidTriangles,
+                aggregate_terrain_triangles = aggregate.Tiles.Sum(static tile => tile.TileCounts.TerrainTriangles),
+                aggregate_collision_triangles = aggregate.Tiles.Sum(static tile => tile.TileCounts.CollisionTriangles),
+                aggregate_liquid_triangles = aggregate.Tiles.Sum(static tile => tile.TileCounts.LiquidTriangles),
+                duplicate_triangles_removed = aggregate.DuplicateTrianglesRemoved,
+                baked = bakeVerification,
             }, JsonOptions));
             return 0;
         }
@@ -74,193 +102,94 @@ internal static class Program
         }
     }
 
-    private static Dictionary<string, string> ParseArgs(string[] args)
+    private static Dictionary<string, List<string>> ParseArgs(string[] args)
     {
-        Dictionary<string, string> result = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> allowed = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "--input", "--output", "--map", "--adt", "--expect-adt", "--dnm-output", "--bake-tile",
+            "--agent-radius", "--agent-climb", "--walkable-slope", "--padding-yards", "--min-world-z",
+        };
+        Dictionary<string, List<string>> result = new(StringComparer.OrdinalIgnoreCase);
         for (int i = 0; i < args.Length; i++)
         {
             string name = args[i];
-            if (name is not ("--input" or "--output" or "--map" or "--adt" or "--dnm-output" or "--bake-tile") || i + 1 >= args.Length)
+            if (!allowed.Contains(name) || i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
             {
                 throw new ArgumentException($"Unknown or incomplete option '{name}'.");
             }
 
-            if (!result.TryAdd(name, args[++i]))
+            if (!result.TryGetValue(name, out List<string>? entries))
+            {
+                entries = [];
+                result.Add(name, entries);
+            }
+            else if (!RepeatableOptions.Contains(name))
             {
                 throw new ArgumentException($"Option '{name}' was specified more than once.");
             }
+
+            entries.Add(args[++i]);
         }
 
         return result;
     }
 
-    private static string Required(Dictionary<string, string> values, string name) =>
-        values.TryGetValue(name, out string? value) && !string.IsNullOrWhiteSpace(value)
-            ? value
+    private static string RequiredSingle(Dictionary<string, List<string>> values, string name)
+    {
+        string[] entries = RequiredMany(values, name);
+        if (entries.Length != 1)
+        {
+            throw new ArgumentException($"Option '{name}' must be specified exactly once.");
+        }
+
+        return entries[0];
+    }
+
+    private static string[] RequiredMany(Dictionary<string, List<string>> values, string name) =>
+        values.TryGetValue(name, out List<string>? entries) && entries.Count > 0
+            ? [.. entries]
             : throw new ArgumentException($"Required option '{name}' is missing.");
 
-    private static (int X, int Y) ParseAdt(string value)
+    private static string[] OptionalMany(Dictionary<string, List<string>> values, string name) =>
+        values.TryGetValue(name, out List<string>? entries) ? [.. entries] : [];
+
+    private static float OptionalFloat(Dictionary<string, List<string>> values, string name, float fallback)
+    {
+        if (!values.TryGetValue(name, out List<string>? entries))
+        {
+            return fallback;
+        }
+
+        if (entries.Count != 1 || !float.TryParse(entries[0], NumberStyles.Float,
+                CultureInfo.InvariantCulture, out float value))
+        {
+            throw new ArgumentException($"Option '{name}' must be a single invariant-culture number.");
+        }
+
+        return value;
+    }
+
+    private static float? OptionalNullableFloat(Dictionary<string, List<string>> values, string name)
+    {
+        return values.ContainsKey(name) ? OptionalFloat(values, name, 0f) : null;
+    }
+
+    private static (int X, int Y) ParsePair(string value, string option)
     {
         string[] parts = value.Split(',', StringSplitOptions.TrimEntries);
         if (parts.Length != 2)
         {
-            throw new ArgumentException("--adt must be X,Y (for example 34,46).");
+            throw new ArgumentException($"{option} must be X,Y.");
         }
 
         return (int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture));
-    }
-
-    private static (int X, int Z) ParseTile(string value)
-    {
-        string[] parts = value.Split(',', StringSplitOptions.TrimEntries);
-        if (parts.Length != 2)
-        {
-            throw new ArgumentException("--bake-tile must be Detour X,Z (for example 68,118).");
-        }
-
-        return (int.Parse(parts[0], CultureInfo.InvariantCulture), int.Parse(parts[1], CultureInfo.InvariantCulture));
-    }
-
-    private static BakeVerification BakeWriteReadAndQuery(ForeverGeometryTile source, string outputDirectory)
-    {
-        Directory.CreateDirectory(outputDirectory);
-        if (Directory.EnumerateFileSystemEntries(outputDirectory).Any())
-        {
-            throw new IOException(".dnm output directory must be empty to prevent mixing tiles from different runs.");
-        }
-
-        TileGeometry geometry = source.ToTileGeometry();
-        DtMeshData data = NavmeshTileBuilder.Bake(geometry, source.DtTileX, source.DtTileZ)
-            ?? throw new InvalidDataException("NavmeshTileBuilder returned no polygons for the selected geometry tile.");
-
-        string dnmPath = Path.Combine(outputDirectory, $"tile_{source.DtTileX}_{source.DtTileZ}.dnm");
-        using (FileStream stream = File.Create(dnmPath))
-        using (BinaryWriter writer = new(stream))
-        {
-            new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
-        }
-
-        DtMeshData loaded;
-        using (FileStream stream = File.OpenRead(dnmPath))
-        using (BinaryReader reader = new(stream))
-        {
-            loaded = new DtMeshDataReader().Read(reader, NavmeshSettings.VertsPerPoly);
-        }
-
-        if (loaded.header.x != source.DtTileX || loaded.header.y != source.DtTileZ ||
-            loaded.header.polyCount <= 0 || loaded.header.vertCount <= 0)
-        {
-            throw new InvalidDataException("Read-back .dnm tile header does not match the requested tile or has no mesh data.");
-        }
-
-        DtNavMesh navMesh = new();
-        DtNavMeshParams navParams = new()
-        {
-            orig = new Vector3(NavmeshCoords.Origin, 0, NavmeshCoords.Origin),
-            tileWidth = NavmeshSettings.TileWorldSize,
-            tileHeight = NavmeshSettings.TileWorldSize,
-            maxTiles = NavmeshSettings.MaxTiles,
-            maxPolys = NavmeshSettings.MaxPolysPerTile,
-        };
-        DtStatus initStatus = navMesh.Init(navParams, NavmeshSettings.VertsPerPoly);
-        if (!initStatus.Succeeded())
-        {
-            throw new InvalidOperationException($"DtNavMesh.Init failed for the .dnm read-back: {initStatus}");
-        }
-
-        DtStatus addStatus = navMesh.AddTile(loaded, 0, 0, out long tileRef);
-        if (!addStatus.Succeeded() || tileRef == 0)
-        {
-            throw new InvalidOperationException($"DtNavMesh.AddTile failed for the .dnm read-back: {addStatus}");
-        }
-
-        DtMeshTile meshTile = navMesh.GetTileByRef(tileRef)
-            ?? throw new InvalidOperationException("DtNavMesh.AddTile succeeded but the tile reference could not be read back.");
-        DtNavMeshQuery query = new(navMesh);
-        WowQueryFilter filter = new();
-        filter.BeginQuery();
-        long baseRef = navMesh.GetPolyRefBase(meshTile);
-
-        for (int polyIndex = 0; polyIndex < meshTile.data.header.polyCount; polyIndex++)
-        {
-            DtPoly poly = meshTile.data.polys[polyIndex];
-            if (poly.GetPolyType() != DtPolyTypes.DT_POLYTYPE_GROUND || (poly.flags & WowQueryFilter.IncludeFlags) == 0)
-            {
-                continue;
-            }
-
-            long startRef = baseRef | (long)poly.index;
-            Vector3 center = navMesh.GetPolyCenter(startRef);
-            DtStatus nearestStatus = query.FindNearestPoly(center, new Vector3(2, 8, 2), filter,
-                out long resolvedStartRef, out var resolvedStart, out _);
-            if (!nearestStatus.Succeeded() || resolvedStartRef != startRef)
-            {
-                continue;
-            }
-
-            DtStatus heightStatus = query.ClosestPointOnPoly(startRef, center, out var surface, out _);
-            if (!heightStatus.Succeeded())
-            {
-                continue;
-            }
-
-            Vector3 wowPosition = NavmeshCoords.ToWow(surface);
-            Vector3 roundTrip = NavmeshCoords.ToRc(wowPosition);
-            if (Vector3.Distance(roundTrip, surface) > 0.01f)
-            {
-                throw new InvalidDataException("Rc/WoW coordinate round-trip failed on the loaded .dnm tile.");
-            }
-
-            for (int linkIndex = poly.firstLink; linkIndex != DtDetour.DT_NULL_LINK; linkIndex = meshTile.links[linkIndex].next)
-            {
-                long endRef = meshTile.links[linkIndex].refs;
-                if (endRef == 0 || endRef == startRef || !navMesh.IsValidPolyRef(endRef))
-                {
-                    continue;
-                }
-
-                Vector3 endCenter = navMesh.GetPolyCenter(endRef);
-                long[] path = new long[32];
-                DtStatus pathStatus = query.FindPath(startRef, endRef, resolvedStart, endCenter,
-                    filter, path, out int pathCount, path.Length);
-                if (pathStatus.Succeeded() && pathCount >= 2 && path[pathCount - 1] == endRef)
-                {
-                    return new BakeVerification
-                    {
-                        File = Path.GetFullPath(dnmPath),
-                        PolyCount = loaded.header.polyCount,
-                        VertexCount = loaded.header.vertCount,
-                        AddTileSucceeded = true,
-                        HeightQuerySucceeded = true,
-                        PathSucceeded = true,
-                        PathPolyCount = pathCount,
-                        StartWow = [wowPosition.X, wowPosition.Y, wowPosition.Z],
-                        HeightWow = wowPosition.Z,
-                    };
-                }
-            }
-        }
-
-        throw new InvalidDataException("The .dnm tile loaded, but no connected two-polygon path and ground-height query could be found.");
-    }
-
-    private sealed class BakeVerification
-    {
-        public required string File { get; init; }
-        public required int PolyCount { get; init; }
-        public required int VertexCount { get; init; }
-        public required bool AddTileSucceeded { get; init; }
-        public required bool HeightQuerySucceeded { get; init; }
-        public required bool PathSucceeded { get; init; }
-        public required int PathPolyCount { get; init; }
-        public required float[] StartWow { get; init; }
-        public required float HeightWow { get; init; }
     }
 
     private static void PrintUsage()
     {
-        Console.WriteLine("Usage: ForeverGeometryTool --input <one rawgeo.json> --output <empty directory> --map <MapID> --adt <X,Y> [--dnm-output <empty directory> --bake-tile <X,Z>]");
-        Console.WriteLine("Exports only the selected MapID/ADT file into per-navmesh-tile geometry JSON.");
-        Console.WriteLine("Optional P3 mode bakes and verifies exactly one selected tile as a standard .dnm file.");
+        Console.WriteLine("Usage: ForeverGeometryTool --input <rawgeo.json> --adt <X,Y> [--input <rawgeo.json> --adt <X,Y> ...] --expect-adt <X,Y> [--expect-adt ...] --output <empty directory> --map <MapID>");
+        Console.WriteLine("       [--agent-radius <yd> --agent-climb <yd> --walkable-slope <degrees> --padding-yards <yd> --min-world-z <yd>]");
+        Console.WriteLine("       [--dnm-output <empty directory> --bake-tile <DetourX,DetourZ> [--bake-tile ...]]");
+        Console.WriteLine("Every input and source ADT is explicit. All selected source geometry is aggregated before each selected Detour tile is baked once.");
     }
 }

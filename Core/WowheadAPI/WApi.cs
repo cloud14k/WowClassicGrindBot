@@ -15,7 +15,7 @@ public sealed class WApi
         // silently sent every legacy client to the retail site.
         BaseUrl = scv.Version switch
         {
-            ClientVersion.SoM or ClientVersion.Legacy_Vanilla => "https://classic.wowhead.com",
+            ClientVersion.SoM or ClientVersion.Forever or ClientVersion.Legacy_Vanilla => "https://classic.wowhead.com",
             ClientVersion.TBC or ClientVersion.Legacy_TBC => "https://tbc.wowhead.com",
             ClientVersion.Wrath or ClientVersion.Legacy_Wrath => "https://www.wowhead.com/wotlk",
             ClientVersion.Cata or ClientVersion.Legacy_Cata => "https://www.wowhead.com/cata",
@@ -25,7 +25,7 @@ public sealed class WApi
 
         BaseUIMapUrl = scv.Version switch
         {
-            ClientVersion.SoM or ClientVersion.Legacy_Vanilla => "https://wow.zamimg.com/images/wow/classic/maps/enus/original/",
+            ClientVersion.SoM or ClientVersion.Forever or ClientVersion.Legacy_Vanilla => "https://wow.zamimg.com/images/wow/classic/maps/enus/original/",
             ClientVersion.TBC or ClientVersion.Legacy_TBC => "https://wow.zamimg.com/images/wow/tbc/maps/enus/original/",
             ClientVersion.Wrath or ClientVersion.Legacy_Wrath => "https://wow.zamimg.com/images/wow/wrath/maps/enus/original/",
             ClientVersion.Cata or ClientVersion.Legacy_Cata => "https://wow.zamimg.com/images/wow/cata/maps/enus/original/",

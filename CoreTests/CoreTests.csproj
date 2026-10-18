@@ -21,6 +21,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Core\Core.csproj" />
     <ProjectReference Include="..\HidShared\HidShared.csproj" />
+    <ProjectReference Include="..\Utilities\ForeverGeometryTool\ForeverGeometryTool.csproj" />
   </ItemGroup>
 
   <ItemGroup>

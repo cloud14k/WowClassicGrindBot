@@ -8,7 +8,8 @@ namespace ForeverGeometryTool;
 
 public sealed record GeometryExportRequest(int MapId, int AdtX, int AdtY, float AgentRadius = 0.5f,
     float AgentMaxClimb = 1.6f,
-    float PaddingYards = TileGeometryExtractor.PaddingYd);
+    float PaddingYards = TileGeometryExtractor.PaddingYd,
+    float? MinWorldZ = null);
 
 /// <summary>
 /// Converts one raw Forever ADT export into per-tile, rc-space triangle soup.
@@ -72,9 +73,9 @@ public static class RawGeometryTileExporter
         float border = (TileGeometryExtractor.BorderCells(request.AgentRadius) * NavmeshSettings.CellSize) + request.PaddingYards;
         SortedDictionary<(int X, int Z), TileAccumulator> tiles = [];
 
-        AddTriangles(raw.TerrainVertices, raw.TerrainTriangles, null, GeometryKind.Terrain, border, tiles);
-        AddTriangles(raw.CollisionVertices, raw.CollisionTriangles, null, GeometryKind.Collision, border, tiles);
-        AddTriangles(raw.LiquidVertices, raw.LiquidTriangles, raw.LiquidTypes, GeometryKind.Liquid, border, tiles);
+        AddTriangles(raw.TerrainVertices, raw.TerrainTriangles, null, GeometryKind.Terrain, border, request.MinWorldZ, tiles);
+        AddTriangles(raw.CollisionVertices, raw.CollisionTriangles, null, GeometryKind.Collision, border, request.MinWorldZ, tiles);
+        AddTriangles(raw.LiquidVertices, raw.LiquidTriangles, raw.LiquidTypes, GeometryKind.Liquid, border, request.MinWorldZ, tiles);
 
         if (tiles.Count > MaximumTilesPerInput)
         {
@@ -87,7 +88,7 @@ public static class RawGeometryTileExporter
             int tileX = entry.Key.X;
             int tileZ = entry.Key.Z;
             TileAccumulator tile = entry.Value;
-            if (tile.TerrainTris.Count == 0 && tile.CollisionTris.Count == 0)
+            if (tile.TerrainTris.Count == 0 && tile.CollisionTris.Count == 0 && tile.LiquidTris.Count == 0)
             {
                 continue;
             }
@@ -133,47 +134,6 @@ public static class RawGeometryTileExporter
         return result;
     }
 
-    public static void WriteDirectory(string outputDirectory, IReadOnlyList<ForeverGeometryTile> tiles)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
-        ArgumentNullException.ThrowIfNull(tiles);
-
-        Directory.CreateDirectory(outputDirectory);
-        if (Directory.EnumerateFileSystemEntries(outputDirectory).Any())
-        {
-            throw new IOException("Output directory must be empty to prevent mixing tiles from different input runs.");
-        }
-
-        foreach (ForeverGeometryTile tile in tiles)
-        {
-            string fileName = $"map{tile.MapId:D4}_tile_{tile.DtTileX}_{tile.DtTileZ}.geometry.json";
-            string path = Path.Combine(outputDirectory, fileName);
-            using FileStream stream = File.Create(path);
-            JsonSerializer.Serialize(stream, tile, JsonOptions);
-        }
-
-        var manifest = new
-        {
-            format = "wow-forever-geometry-manifest-v1",
-            map_id = tiles[0].MapId,
-            adt_xy = tiles[0].AdtXY,
-            client_product = tiles[0].ClientProduct,
-            client_build = tiles[0].ClientBuild,
-            source_sha256 = tiles[0].SourceSha256,
-            tile_count = tiles.Count,
-            tiles = tiles.Select(t => new
-            {
-                dt_tile_x = t.DtTileX,
-                dt_tile_z = t.DtTileZ,
-                terrain_triangles = t.TileCounts.TerrainTriangles,
-                collision_triangles = t.TileCounts.CollisionTriangles,
-                liquid_triangles = t.TileCounts.LiquidTriangles,
-            }).ToArray(),
-        };
-        using FileStream manifestStream = File.Create(Path.Combine(outputDirectory, "manifest.json"));
-        JsonSerializer.Serialize(manifestStream, manifest, JsonOptions);
-    }
-
     private static void ValidateInput(RawGeometryDocument raw, GeometryExportRequest request)
     {
         if (raw.Format != ExpectedInputFormat || raw.Units != "yard" ||
@@ -210,12 +170,33 @@ public static class RawGeometryTileExporter
         ValidateGeometry(raw.TerrainVertices, raw.TerrainTriangles, "terrain");
         ValidateGeometry(raw.CollisionVertices, raw.CollisionTriangles, "collision");
         ValidateGeometry(raw.LiquidVertices, raw.LiquidTriangles, "liquid");
+        ValidateTerrainBounds(raw, request);
 
         for (int i = 0; i < raw.LiquidTypes.Length; i++)
         {
             if (raw.LiquidTypes[i] is not (NavmeshSettings.AreaWater or NavmeshSettings.AreaMagmaSlime))
             {
                 throw new InvalidDataException($"Liquid triangle {i} has unsupported area {raw.LiquidTypes[i]}; refusing to classify it silently.");
+            }
+        }
+    }
+
+    private static void ValidateTerrainBounds(RawGeometryDocument raw, GeometryExportRequest request)
+    {
+        const float toleranceYards = 0.05f;
+        float adtSize = NavmeshSettings.TileWorldSize * 4f;
+        float minX = (31 - request.AdtX) * adtSize;
+        float maxX = (32 - request.AdtX) * adtSize;
+        float minY = (31 - request.AdtY) * adtSize;
+        float maxY = (32 - request.AdtY) * adtSize;
+        foreach (float[] vertex in raw.TerrainVertices)
+        {
+            if (vertex[0] < minX - toleranceYards || vertex[0] > maxX + toleranceYards ||
+                vertex[2] < minY - toleranceYards || vertex[2] > maxY + toleranceYards)
+            {
+                throw new InvalidDataException(
+                    $"Terrain vertex ({vertex[0]:F3},{vertex[2]:F3}) lies outside requested ADT ({request.AdtX},{request.AdtY}) " +
+                    $"world bounds X[{minX:F3},{maxX:F3}] Y[{minY:F3},{maxY:F3}].");
             }
         }
     }
@@ -246,7 +227,7 @@ public static class RawGeometryTileExporter
     }
 
     private static void AddTriangles(float[][] sourceVertices, int[][] sourceTriangles, int[]? liquidTypes,
-        GeometryKind kind, float border, SortedDictionary<(int X, int Z), TileAccumulator> tiles)
+        GeometryKind kind, float border, float? minWorldZ, SortedDictionary<(int X, int Z), TileAccumulator> tiles)
     {
         for (int triIndex = 0; triIndex < sourceTriangles.Length; triIndex++)
         {
@@ -255,6 +236,11 @@ public static class RawGeometryTileExporter
             Vector3 v0 = ToRc(sourceVertices[tri[0]]);
             Vector3 v1 = ToRc(sourceVertices[tri[1]]);
             Vector3 v2 = ToRc(sourceVertices[tri[2]]);
+
+            if (minWorldZ is float floorZ && MathF.Max(v0.Y, MathF.Max(v1.Y, v2.Y)) < floorZ)
+            {
+                continue;
+            }
 
             float minWowX = MathF.Min(v0.Z, MathF.Min(v1.Z, v2.Z));
             float maxWowX = MathF.Max(v0.Z, MathF.Max(v1.Z, v2.Z));

@@ -16,8 +16,10 @@ public sealed class ForeverGeometryTile
     [JsonPropertyName("client_product")] public required string ClientProduct { get; init; }
     [JsonPropertyName("client_build")] public required int ClientBuild { get; init; }
     [JsonPropertyName("source_sha256")] public required string SourceSha256 { get; init; }
+    [JsonPropertyName("source_sha256s")] public string[] SourceSha256s { get; init; } = [];
     [JsonPropertyName("map_id")] public required int MapId { get; init; }
     [JsonPropertyName("adt_xy")] public required int[] AdtXY { get; init; }
+    [JsonPropertyName("source_adts_xy")] public int[][] SourceAdtsXY { get; init; } = [];
     [JsonPropertyName("source_coordinates")] public string SourceCoordinates { get; init; } = "[WoW_X, WoW_Z, WoW_Y], yards";
     [JsonPropertyName("coordinates")] public string Coordinates { get; init; } = "Recast [WoW_Y, WoW_Z, WoW_X], yards";
     [JsonPropertyName("dt_tile_x")] public required int DtTileX { get; init; }
@@ -27,6 +29,7 @@ public sealed class ForeverGeometryTile
 
     [JsonPropertyName("source_counts")] public required GeometryCounts SourceCounts { get; init; }
     [JsonPropertyName("tile_counts")] public required GeometryCounts TileCounts { get; init; }
+    [JsonPropertyName("duplicate_triangles_removed")] public GeometryDuplicateCounts DuplicateTrianglesRemoved { get; init; } = new();
 
     [JsonPropertyName("terrain_vertices_rc")] public required float[] TerrainVerticesRc { get; init; }
     [JsonPropertyName("terrain_triangles")] public required int[] TerrainTriangles { get; init; }
@@ -62,6 +65,14 @@ public sealed class ForeverGeometryTile
             BMax = new Vector3(BMaxRc[0], BMaxRc[1], BMaxRc[2]),
         };
     }
+}
+
+public sealed class GeometryDuplicateCounts
+{
+    [JsonPropertyName("terrain")] public int Terrain { get; init; }
+    [JsonPropertyName("collision")] public int Collision { get; init; }
+    [JsonPropertyName("liquid")] public int Liquid { get; init; }
+    [JsonPropertyName("total")] public int Total => Terrain + Collision + Liquid;
 }
 
 public sealed class GeometryCounts
