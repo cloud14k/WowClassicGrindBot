@@ -13,6 +13,44 @@ using DotRecast.Detour.Io;
 namespace PPather.Navmesh;
 
 /// <summary>
+/// Immutable tile coverage captured only after the complete continent manifest
+/// and its WDT proof have passed runtime validation.
+/// </summary>
+public sealed class ForeverNavmeshRuntimeCoverage
+{
+    private readonly HashSet<(int X, int Z)> expectedTiles;
+    private readonly HashSet<(int X, int Z)> bakedTiles;
+    private readonly HashSet<(int X, int Z)> emptyTiles;
+
+    internal ForeverNavmeshRuntimeCoverage(string product, int build, string settingsHash,
+        int mapId, string continent, IEnumerable<(int X, int Z)> expectedTiles,
+        IEnumerable<(int X, int Z)> bakedTiles, IEnumerable<(int X, int Z)> emptyTiles)
+    {
+        Product = product;
+        Build = build;
+        SettingsHash = settingsHash;
+        MapId = mapId;
+        Continent = continent;
+        this.expectedTiles = expectedTiles.ToHashSet();
+        this.bakedTiles = bakedTiles.ToHashSet();
+        this.emptyTiles = emptyTiles.ToHashSet();
+    }
+
+    public string Product { get; }
+    public int Build { get; }
+    public string SettingsHash { get; }
+    public int MapId { get; }
+    public string Continent { get; }
+    public IReadOnlyCollection<(int X, int Z)> ExpectedTiles => expectedTiles.ToArray();
+    public IReadOnlyCollection<(int X, int Z)> BakedTiles => bakedTiles.ToArray();
+    public IReadOnlyCollection<(int X, int Z)> EmptyTiles => emptyTiles.ToArray();
+
+    public bool ContainsExpectedTile(int x, int z) => expectedTiles.Contains((x, z));
+    public bool ContainsBakedTile(int x, int z) => bakedTiles.Contains((x, z));
+    public bool ContainsVerifiedEmptyTile(int x, int z) => emptyTiles.Contains((x, z));
+}
+
+/// <summary>
 /// Scope-aware validation for Forever navmesh packs. A selected test pack can
 /// be checked only through the explicitly named test API; it can never satisfy
 /// the continent eligibility checks used by publication or runtime loading.
@@ -88,10 +126,23 @@ public static class ForeverNavmeshCacheManifest
         string expectedProduct, int expectedBuild, string expectedSettingsHash, int expectedMapId,
         string expectedContinent)
     {
+        return ReadCoverageForRuntime(cacheDirectory, expectedProduct, expectedBuild,
+            expectedSettingsHash, expectedMapId, expectedContinent).EmptyTiles;
+    }
+
+    /// <summary>
+    /// Returns tile coverage only after the same full manifest, WDT proof,
+    /// DNM hashes and empty-tile evidence required by the runtime have passed.
+    /// </summary>
+    public static ForeverNavmeshRuntimeCoverage ReadCoverageForRuntime(string cacheDirectory,
+        string expectedProduct, int expectedBuild, string expectedSettingsHash, int expectedMapId,
+        string expectedContinent)
+    {
         ManifestSnapshot manifest = ReadAndValidateFiles(cacheDirectory, expectedProduct,
             expectedBuild, expectedSettingsHash, expectedMapId, expectedContinent);
         ValidateContinentEligibility(manifest);
-        return manifest.EmptyTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z).ToArray();
+        return new ForeverNavmeshRuntimeCoverage(expectedProduct, expectedBuild, expectedSettingsHash,
+            expectedMapId, expectedContinent, manifest.ExpectedTiles, manifest.ManifestTiles, manifest.EmptyTiles);
     }
 
     private static ManifestSnapshot ReadAndValidateFiles(string cacheDirectory, string expectedProduct,

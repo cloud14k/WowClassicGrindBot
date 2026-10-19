@@ -44,6 +44,7 @@ public sealed class NavmeshPathfinder : IDisposable
 
     /// <summary>A second pass clears the other edge at convex boundary corners.</summary>
     private const int EdgeMarginMaxIterations = 2;
+    private const float PathTargetReachedToleranceYards = 0.5f;
     /// <summary>Minimum useful push progress in yards; below this a candidate is treated as blocked.</summary>
     private const float SnapEpsilon = 0.05f;
     private const float MarginEpsilon = 1e-3f;
@@ -106,6 +107,7 @@ public sealed class NavmeshPathfinder : IDisposable
     private readonly DtNavMeshQuery query;
     private readonly WowQueryFilter filter;
     private readonly NavmeshEndpointResolver resolver;
+    private readonly ForeverNavmeshRuntimeCoverage? runtimeCoverage;
 
     // Query knobs, resolved once from NavmeshQueryOptions in the constructor.
     private readonly int corridorTileRadius;
@@ -138,6 +140,9 @@ public sealed class NavmeshPathfinder : IDisposable
     private long stalledStamp;
 
     public NavmeshStats LastStats;
+
+    /// <summary>Typed diagnostic for the most recent path query, or null when no failure was recorded.</summary>
+    public NavmeshPathDiagnostic? LastDiagnostic { get; private set; }
 
     public NavmeshTileCache Tiles => tiles;
 
@@ -208,9 +213,11 @@ public sealed class NavmeshPathfinder : IDisposable
     // world == null makes a disk-only pathfinder: it answers over already-baked
     // tiles (path/height queries) but never bakes, so it needs no game files.
     public NavmeshPathfinder(ILogger logger, ChunkedTriangleCollection? world, string cacheDir,
-        NavmeshBakeOptions bake, NavmeshQueryOptions queryOptions, float? minWorldZ = null)
+        NavmeshBakeOptions bake, NavmeshQueryOptions queryOptions, float? minWorldZ = null,
+        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null)
     {
         this.logger = logger;
+        this.runtimeCoverage = runtimeCoverage;
 
         corridorTileRadius = Math.Clamp(queryOptions.CorridorTiles, 1, MaxCorridorTileRadiusCap);
         maxCorridorTileRadius = Math.Clamp(queryOptions.CorridorMaxTiles, 1, MaxCorridorTileRadiusCap);
@@ -220,7 +227,8 @@ public sealed class NavmeshPathfinder : IDisposable
         EdgeMarginYards = queryOptions.EdgeMargin;
         stickyCorridorRadius = corridorTileRadius;
 
-        tiles = new NavmeshTileCache(logger, world, cacheDir, bake, corridorTileRadius, minWorldZ);
+        tiles = new NavmeshTileCache(logger, world, cacheDir, bake, corridorTileRadius, minWorldZ,
+            runtimeCoverage);
         query = new DtNavMeshQuery(tiles.NavMesh);
         filter = new WowQueryFilter();
         resolver = new NavmeshEndpointResolver(query, filter);
@@ -330,7 +338,22 @@ public sealed class NavmeshPathfinder : IDisposable
     public Path? FindPath(Vector3 wowFrom, Vector3 wowTo, bool? startIndoors)
     {
         LastStats = default;
+        LastDiagnostic = null;
         filter.BeginQuery();
+        NavmeshTileCoordinate startTile = TileFor(wowFrom);
+        NavmeshTileCoordinate endTile = TileFor(wowTo);
+        if (runtimeCoverage is not null)
+        {
+            if (!runtimeCoverage.ContainsExpectedTile(startTile.X, startTile.Z))
+                return Fail(NavmeshPathFailureReason.OutsideCertifiedCoverage, startTile, endTile, startTile);
+            if (!runtimeCoverage.ContainsExpectedTile(endTile.X, endTile.Z))
+                return Fail(NavmeshPathFailureReason.OutsideCertifiedCoverage, startTile, endTile, endTile);
+            if (runtimeCoverage.ContainsVerifiedEmptyTile(startTile.X, startTile.Z))
+                return Fail(NavmeshPathFailureReason.VerifiedEmptyNavmeshTile, startTile, endTile, startTile);
+            if (runtimeCoverage.ContainsVerifiedEmptyTile(endTile.X, endTile.Z))
+                return Fail(NavmeshPathFailureReason.VerifiedEmptyNavmeshTile, startTile, endTile, endTile);
+        }
+
         int bakedBefore = tiles.TilesBakedThisSession;
 
         long t0 = Stopwatch.GetTimestamp();
@@ -348,7 +371,8 @@ public sealed class NavmeshPathfinder : IDisposable
                 !resolver.TryResolve(wowTo, null, out long endRef, out Vector3 resolvedTo))
             {
                 LastStats.ResolveMs = Stopwatch.GetElapsedTime(t1).TotalMilliseconds;
-                return null;
+                return Fail(ClassifyEndpointFailure(startTile, endTile), startTile, endTile,
+                    FindAffectedEndpoint(startTile, endTile));
             }
 
             lastResolvedFrom = resolvedFrom;
@@ -380,7 +404,7 @@ public sealed class NavmeshPathfinder : IDisposable
 
             if (rcPoints == null || rcPoints.Count == 0)
             {
-                return null;
+                return Fail(NavmeshPathFailureReason.PathUnreachable, startTile, endTile, null);
             }
 
             if (JitterYards > 0f)
@@ -417,12 +441,73 @@ public sealed class NavmeshPathfinder : IDisposable
             LastStats.ResolveShiftYd = Vector3.Distance(wowTo, resolvedTo);
             LastStats.ResidentTiles = tiles.ResidentTileCount;
 
+            if (LastStats.EndGapYd > PathTargetReachedToleranceYards)
+            {
+                RecordFailure(NavmeshPathFailureReason.PathUnreachable, startTile, endTile, null);
+            }
             return new Path(wowPoints);
         }
         finally
         {
             tiles.Lock.ExitReadLock();
         }
+    }
+
+    private Path? Fail(NavmeshPathFailureReason reason, NavmeshTileCoordinate start,
+        NavmeshTileCoordinate end, NavmeshTileCoordinate? affected)
+    {
+        RecordFailure(reason, start, end, affected);
+        return null;
+    }
+
+    private void RecordFailure(NavmeshPathFailureReason reason, NavmeshTileCoordinate start,
+        NavmeshTileCoordinate end, NavmeshTileCoordinate? affected)
+    {
+        LastDiagnostic = new NavmeshPathDiagnostic(reason, start, end, affected);
+        logger.LogWarning("Navmesh path query failed: {Reason}; start tile ({StartX},{StartZ}), end tile ({EndX},{EndZ}), affected tile ({AffectedX},{AffectedZ}).",
+            reason, start.X, start.Z, end.X, end.Z,
+            affected?.X, affected?.Z);
+    }
+
+    private NavmeshPathFailureReason ClassifyEndpointFailure(NavmeshTileCoordinate start,
+        NavmeshTileCoordinate end)
+    {
+        NavmeshRuntimeTileStatus startStatus = tiles.GetTileStatus(start.X, start.Z);
+        NavmeshRuntimeTileStatus endStatus = tiles.GetTileStatus(end.X, end.Z);
+        if (startStatus == NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile ||
+            endStatus == NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile)
+            return NavmeshPathFailureReason.MissingOrInvalidNavmeshTile;
+        if (startStatus == NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile ||
+            endStatus == NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile)
+            return NavmeshPathFailureReason.VerifiedEmptyNavmeshTile;
+        if (startStatus == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage ||
+            endStatus == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
+            return NavmeshPathFailureReason.OutsideCertifiedCoverage;
+        return NavmeshPathFailureReason.NoWalkableSurface;
+    }
+
+    private NavmeshTileCoordinate? FindAffectedEndpoint(NavmeshTileCoordinate start,
+        NavmeshTileCoordinate end)
+    {
+        if (tiles.GetTileStatus(start.X, start.Z) == NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile)
+            return start;
+        if (tiles.GetTileStatus(end.X, end.Z) == NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile)
+            return end;
+        if (tiles.GetTileStatus(start.X, start.Z) == NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile)
+            return start;
+        if (tiles.GetTileStatus(end.X, end.Z) == NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile)
+            return end;
+        if (tiles.GetTileStatus(start.X, start.Z) == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
+            return start;
+        if (tiles.GetTileStatus(end.X, end.Z) == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
+            return end;
+        return null;
+    }
+
+    private static NavmeshTileCoordinate TileFor(Vector3 wow)
+    {
+        NavmeshCoords.GetTileIndex(wow.X, wow.Y, out int x, out int z);
+        return new NavmeshTileCoordinate(x, z);
     }
 
     /// <summary>

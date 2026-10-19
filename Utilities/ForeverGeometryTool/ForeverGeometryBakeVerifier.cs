@@ -269,6 +269,13 @@ public static class ForeverGeometryBakeVerifier
                 throw new InvalidDataException($"Requested tile ({x},{z}) is not present in the aggregated geometry.");
             }
 
+            if (!aggregate.TileSourceIdentities.TryGetValue((x, z), out IReadOnlyList<GeometrySourceIdentity>? expectedSources))
+            {
+                throw new InvalidDataException($"Aggregate tile ({x},{z}) has no independent source identity record.");
+            }
+            ForeverGeometryAggregator.ValidateTileSourceIdentity(tile, expectedSources,
+                $"Aggregate tile ({x},{z})");
+
             selected.Add(tile);
         }
 
@@ -550,8 +557,10 @@ public static class ForeverGeometryBakeVerifier
             tiles = records,
             empty_navmesh_tiles = emptyEvidence,
         };
-        using FileStream manifestStream = File.Create(Path.Combine(outputDirectory, "manifest.json"));
-        JsonSerializer.Serialize(manifestStream, manifest, JsonOptions);
+        using (FileStream manifestStream = File.Create(Path.Combine(outputDirectory, "manifest.json")))
+        {
+            JsonSerializer.Serialize(manifestStream, manifest, JsonOptions);
+        }
 
         ForeverNavmeshCacheManifest.ValidateSelectedPackForTest(outputDirectory, profile.ClientProduct,
             profile.ClientBuild, profile.SettingsHash, aggregate.MapId);
@@ -598,15 +607,25 @@ public static class ForeverGeometryBakeVerifier
         foreach (ForeverGeometryTile tile in emptyTiles.OrderBy(static tile => tile.DtTileX)
                      .ThenBy(static tile => tile.DtTileZ))
         {
-            HashSet<(int X, int Y)> contributors = tile.SourceAdtsXY
-                .Select(static pair => (pair[0], pair[1])).ToHashSet();
-            GeometrySourceRecord[] sources = aggregate.Sources.Where(source =>
-                    contributors.Contains((source.AdtXY[0], source.AdtXY[1])))
+            if (!aggregate.TileSourceIdentities.TryGetValue((tile.DtTileX, tile.DtTileZ),
+                    out IReadOnlyList<GeometrySourceIdentity>? expectedSources))
+            {
+                throw new InvalidDataException($"Empty tile ({tile.DtTileX},{tile.DtTileZ}) has no independent source identity record.");
+            }
+            ForeverGeometryAggregator.ValidateTileSourceIdentity(tile, expectedSources,
+                $"Empty tile ({tile.DtTileX},{tile.DtTileZ})");
+
+            Dictionary<(int X, int Y), GeometrySourceRecord> aggregateSources = aggregate.Sources.ToDictionary(
+                static source => (source.AdtXY[0], source.AdtXY[1]));
+            GeometrySourceRecord[] sources = expectedSources
+                .Select(source => aggregateSources.TryGetValue((source.AdtX, source.AdtY), out GeometrySourceRecord? record)
+                    ? record
+                    : throw new InvalidDataException($"Empty tile source ADT ({source.AdtX},{source.AdtY}) is absent from aggregate sources."))
                 .OrderBy(static source => source.AdtXY[1]).ThenBy(static source => source.AdtXY[0]).ToArray();
-            if (sources.Length == 0 || sources.Length != contributors.Count ||
-                sources.Length != tile.SourceSha256s.Length ||
-                sources.Select(static source => source.Sha256)
-                    .SequenceEqual(tile.SourceSha256s, StringComparer.OrdinalIgnoreCase) == false ||
+            ForeverGeometryAggregator.ValidateSourceIdentitySets(
+                sources.Select(static source => new GeometrySourceIdentity(source.AdtXY[0], source.AdtXY[1], source.Sha256)),
+                expectedSources, $"Empty tile ({tile.DtTileX},{tile.DtTileZ}) aggregate sources");
+            if (sources.Length == 0 ||
                 tile.TileCounts.TerrainTriangles + tile.TileCounts.CollisionTriangles + tile.TileCounts.LiquidTriangles <= 0)
             {
                 throw new InvalidDataException($"Empty tile ({tile.DtTileX},{tile.DtTileZ}) has no consistent geometry source evidence.");

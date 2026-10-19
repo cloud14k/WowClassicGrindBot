@@ -10,6 +10,7 @@ namespace ForeverGeometryTool;
 
 public sealed record GeometryInputFile(string Path, int AdtX, int AdtY);
 public readonly record struct AdtCoordinate(int X, int Y);
+public readonly record struct GeometrySourceIdentity(int AdtX, int AdtY, string Sha256);
 
 public sealed record GeometryAggregateRequest(int MapId, IReadOnlyList<GeometryInputFile> Inputs,
     IReadOnlyList<AdtCoordinate> ExpectedAdts,
@@ -31,6 +32,13 @@ public sealed class GeometryAggregate
     public required IReadOnlyList<GeometrySourceRecord> Sources { get; init; }
     public required IReadOnlyList<AdtCoordinate> ExpectedAdts { get; init; }
     public required IReadOnlyList<ForeverGeometryTile> Tiles { get; init; }
+    /// <summary>
+    /// Independently retained contributor identities for each aggregate tile.
+    /// This lets bake/evidence validation detect a tile whose own source list
+    /// has been edited to remove or replace a contributor.
+    /// </summary>
+    public IReadOnlyDictionary<(int X, int Z), IReadOnlyList<GeometrySourceIdentity>> TileSourceIdentities { get; init; }
+        = new Dictionary<(int X, int Z), IReadOnlyList<GeometrySourceIdentity>>();
     public required GeometryDuplicateCounts DuplicateTrianglesRemoved { get; init; }
     public required float AgentRadius { get; init; }
     public required float AgentMaxClimb { get; init; }
@@ -145,8 +153,10 @@ public static class ForeverGeometryAggregator
         }
 
         List<ForeverGeometryTile> tiles = [];
+        Dictionary<(int X, int Z), IReadOnlyList<GeometrySourceIdentity>> tileSourceIdentities = [];
         foreach (KeyValuePair<(int X, int Z), TileAccumulator> entry in merged.OrderBy(static pair => pair.Key.X).ThenBy(static pair => pair.Key.Z))
         {
+            tileSourceIdentities.Add(entry.Key, entry.Value.GetSourceIdentities());
             tiles.Add(entry.Value.ToTile(request.MapId, expectedProduct!, expectedBuild!.Value));
         }
 
@@ -175,6 +185,7 @@ public static class ForeverGeometryAggregator
             Sources = sources,
             ExpectedAdts = expectedAdts,
             Tiles = tiles,
+            TileSourceIdentities = tileSourceIdentities,
             DuplicateTrianglesRemoved = duplicates,
             AgentRadius = request.AgentRadius,
             AgentMaxClimb = request.AgentMaxClimb,
@@ -255,10 +266,106 @@ public static class ForeverGeometryAggregator
 
     public static string ComputeSourceSetHash(IEnumerable<GeometrySourceRecord> sources)
     {
-        string canonical = string.Join('\n', sources.OrderBy(static source => source.AdtXY[1])
-            .ThenBy(static source => source.AdtXY[0])
-            .Select(static source => $"{source.AdtXY[0]},{source.AdtXY[1]}:{source.Sha256}"));
+        GeometrySourceIdentity[] canonicalSources = CanonicalizeSourceIdentities(
+            sources.Select(static source => source.AdtXY is { Length: 2 }
+                ? new GeometrySourceIdentity(source.AdtXY[0], source.AdtXY[1], source.Sha256)
+                : throw new InvalidDataException("A geometry source has an invalid ADT coordinate pair.")),
+            "source-set hash");
+        return ComputeCanonicalSourceSetHash(canonicalSources);
+    }
+
+    private static string ComputeCanonicalSourceSetHash(IReadOnlyCollection<GeometrySourceIdentity> canonicalSources)
+    {
+        // Empty-navmesh evidence v1 and batch state already hash row-major
+        // (AdtY, AdtX). Preserve that wire hash for existing evidence while
+        // comparing source identity by the actual (AdtX, AdtY) key.
+        string canonical = string.Join('\n', canonicalSources
+            .Select(static source => $"{source.AdtX},{source.AdtY}:{source.Sha256}"));
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))).ToLowerInvariant();
+    }
+
+    /// <summary>Returns a unique source set in the persisted row-major Y/X order.</summary>
+    public static GeometrySourceIdentity[] CanonicalizeSourceIdentities(
+        IEnumerable<GeometrySourceIdentity> sources, string context)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        ArgumentException.ThrowIfNullOrWhiteSpace(context);
+        Dictionary<(int X, int Y), string> keyed = [];
+        foreach (GeometrySourceIdentity source in sources)
+        {
+            if (source.AdtX is < 0 or >= 64 || source.AdtY is < 0 or >= 64 ||
+                source.Sha256 is null || source.Sha256.Length != 64 || !source.Sha256.All(Uri.IsHexDigit))
+            {
+                throw new InvalidDataException($"{context} contains an invalid ADT coordinate or SHA-256.");
+            }
+            if (!keyed.TryAdd((source.AdtX, source.AdtY), source.Sha256))
+            {
+                throw new InvalidDataException($"{context} contains duplicate ADT ({source.AdtX},{source.AdtY}).");
+            }
+        }
+
+        return keyed.OrderBy(static source => source.Key.Y).ThenBy(static source => source.Key.X)
+            .Select(static source => new GeometrySourceIdentity(source.Key.X, source.Key.Y, source.Value))
+            .ToArray();
+    }
+
+    public static void ValidateSourceIdentitySets(IEnumerable<GeometrySourceIdentity> actual,
+        IEnumerable<GeometrySourceIdentity> expected, string context)
+    {
+        GeometrySourceIdentity[] actualCanonical = CanonicalizeSourceIdentities(actual, $"{context} actual sources");
+        GeometrySourceIdentity[] expectedCanonical = CanonicalizeSourceIdentities(expected, $"{context} expected sources");
+        Dictionary<(int X, int Y), string> actualByAdt = actualCanonical.ToDictionary(
+            static source => (source.AdtX, source.AdtY), static source => source.Sha256);
+        Dictionary<(int X, int Y), string> expectedByAdt = expectedCanonical.ToDictionary(
+            static source => (source.AdtX, source.AdtY), static source => source.Sha256);
+
+        string Format(IEnumerable<(int X, int Y)> values) => string.Join(",", values.OrderBy(static pair => pair.Y)
+            .ThenBy(static pair => pair.X).Select(static pair => $"({pair.X},{pair.Y})"));
+        (int X, int Y)[] missing = expectedByAdt.Keys.Except(actualByAdt.Keys).ToArray();
+        (int X, int Y)[] extra = actualByAdt.Keys.Except(expectedByAdt.Keys).ToArray();
+        if (missing.Length > 0 || extra.Length > 0)
+        {
+            throw new InvalidDataException($"{context} source ADT set differs; missing=[{Format(missing)}], extra=[{Format(extra)}].");
+        }
+
+        foreach ((int X, int Y) adt in expectedByAdt.Keys)
+        {
+            if (!actualByAdt[adt].Equals(expectedByAdt[adt], StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"{context} SHA-256 differs for ADT ({adt.X},{adt.Y}).");
+            }
+        }
+    }
+
+    public static void ValidateTileSourceIdentity(ForeverGeometryTile tile,
+        IReadOnlyCollection<GeometrySourceIdentity> expectedSources, string context)
+    {
+        ArgumentNullException.ThrowIfNull(tile);
+        if (tile.SourceAdtsXY is null || tile.SourceSha256s is null ||
+            tile.SourceAdtsXY.Length != tile.SourceSha256s.Length || string.IsNullOrWhiteSpace(tile.SourceSha256))
+        {
+            throw new InvalidDataException($"{context} source ADT/SHA-256 fields are missing or their counts differ.");
+        }
+
+        GeometrySourceIdentity[] actualSources = new GeometrySourceIdentity[tile.SourceAdtsXY.Length];
+        for (int i = 0; i < actualSources.Length; i++)
+        {
+            int[] pair = tile.SourceAdtsXY[i];
+            if (pair is not { Length: 2 })
+                throw new InvalidDataException($"{context} contains an invalid source ADT pair.");
+            actualSources[i] = new GeometrySourceIdentity(pair[0], pair[1], tile.SourceSha256s[i]);
+        }
+
+        GeometrySourceIdentity[] expectedCanonical = CanonicalizeSourceIdentities(expectedSources,
+            $"{context} expected sources");
+        ValidateSourceIdentitySets(actualSources, expectedCanonical, context);
+        string expectedSourceHash = expectedCanonical.Length == 1
+            ? expectedCanonical[0].Sha256
+            : ComputeCanonicalSourceSetHash(expectedCanonical);
+        if (!tile.SourceSha256.Equals(expectedSourceHash, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"{context} aggregate source-set SHA-256 is inconsistent.");
+        }
     }
 
     private static GeometryDuplicateCounts SumDuplicates(IEnumerable<GeometryDuplicateCounts> counts)
@@ -317,9 +424,14 @@ public static class ForeverGeometryAggregator
                 liquidVertices, liquidTriangles, liquidAreas, liquidKeys, ref duplicateLiquid);
         }
 
+        public IReadOnlyList<GeometrySourceIdentity> GetSourceIdentities() =>
+            CanonicalizeSourceIdentities(contributors.Values.Select(static source =>
+                new GeometrySourceIdentity(source.AdtXY[0], source.AdtXY[1], source.Sha256)), "aggregate tile contributors");
+
         public ForeverGeometryTile ToTile(int mapId, string product, int build)
         {
-            GeometrySourceRecord[] sourceList = contributors.Values.ToArray();
+            GeometrySourceRecord[] sourceList = contributors.Values
+                .OrderBy(static source => source.AdtXY[1]).ThenBy(static source => source.AdtXY[0]).ToArray();
             if (sourceList.Length == 0 || terrainTriangles.Count == 0 && collisionTriangles.Count == 0 && liquidTriangles.Count == 0)
             {
                 throw new InvalidDataException("An aggregate tile has no geometry sources or triangles.");

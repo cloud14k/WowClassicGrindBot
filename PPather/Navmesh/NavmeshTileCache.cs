@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Numerics;
 using System.Threading;
 using System.Threading.Channels;
@@ -78,6 +79,7 @@ public sealed class NavmeshTileCache : IDisposable
     private readonly NavmeshBakeOptions bake;
     private readonly float? minWorldZ;
     private readonly int corridorTileRadius;
+    private readonly ForeverNavmeshRuntimeCoverage? runtimeCoverage;
 
     private readonly DtNavMesh navMesh;
     private readonly ReaderWriterLockSlim rwLock = new();
@@ -94,6 +96,7 @@ public sealed class NavmeshTileCache : IDisposable
     // dtTile (x,z) -> last-touch stamp for LRU. Concurrent: touched by query
     // threads, enumerated under the write lock during eviction.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(int x, int z), long> resident = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<(int x, int z), NavmeshRuntimeTileStatus> runtimeTileStates = [];
     // Guarded by stateLock.
     private readonly HashSet<(int x, int z)> emptyTiles = [];
     // Tiles currently queued or baking - avoids duplicate work. Guarded by stateLock.
@@ -141,7 +144,8 @@ public sealed class NavmeshTileCache : IDisposable
     public int MissingTilesOnDisk => Volatile.Read(ref missingOnDisk);
 
     public NavmeshTileCache(ILogger logger, ChunkedTriangleCollection? world, string cacheDir,
-        NavmeshBakeOptions bake, int corridorTileRadius, float? minWorldZ = null)
+        NavmeshBakeOptions bake, int corridorTileRadius, float? minWorldZ = null,
+        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null)
     {
         this.logger = logger;
         this.world = world;
@@ -149,6 +153,27 @@ public sealed class NavmeshTileCache : IDisposable
         this.bake = bake;
         this.minWorldZ = minWorldZ;
         this.corridorTileRadius = corridorTileRadius;
+        this.runtimeCoverage = runtimeCoverage;
+
+        if (runtimeCoverage is not null)
+        {
+            HashSet<(int X, int Z)> baked = runtimeCoverage.BakedTiles.ToHashSet();
+            HashSet<(int X, int Z)> empty = runtimeCoverage.EmptyTiles.ToHashSet();
+            HashSet<(int X, int Z)> overlap = baked.Intersect(empty).ToHashSet();
+            HashSet<(int X, int Z)> covered = baked.Concat(empty).ToHashSet();
+            if (overlap.Count != 0 || !covered.SetEquals(runtimeCoverage.ExpectedTiles))
+            {
+                throw new InvalidDataException("Validated Forever tile coverage has overlapping or incomplete baked/empty results.");
+            }
+
+            foreach ((int x, int z) in baked)
+                runtimeTileStates[(x, z)] = NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded;
+            foreach ((int x, int z) in empty)
+            {
+                runtimeTileStates[(x, z)] = NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile;
+                emptyTiles.Add((x, z));
+            }
+        }
 
         Directory.CreateDirectory(cacheDir);
 
@@ -296,6 +321,29 @@ public sealed class NavmeshTileCache : IDisposable
         return File.Exists(TilePath(tx, tz));
     }
 
+    /// <summary>Current tile classification, based on the validated Forever coverage when available.</summary>
+    public NavmeshRuntimeTileStatus GetTileStatus(int tx, int tz)
+    {
+        if (!NavmeshCoords.IsValidTile(tx, tz))
+            return runtimeCoverage is null ? NavmeshRuntimeTileStatus.Unknown : NavmeshRuntimeTileStatus.OutsideCertifiedCoverage;
+        if (runtimeCoverage is not null && !runtimeCoverage.ContainsExpectedTile(tx, tz))
+            return NavmeshRuntimeTileStatus.OutsideCertifiedCoverage;
+        if (runtimeCoverage?.ContainsVerifiedEmptyTile(tx, tz) == true)
+            return NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile;
+        if (resident.ContainsKey((tx, tz)))
+            return NavmeshRuntimeTileStatus.Loaded;
+        if (runtimeTileStates.TryGetValue((tx, tz), out NavmeshRuntimeTileStatus state))
+            return state;
+        lock (stateLock)
+        {
+            if (emptyTiles.Contains((tx, tz)))
+                return NavmeshRuntimeTileStatus.UnverifiedNoNavmesh;
+        }
+        return runtimeCoverage?.ContainsBakedTile(tx, tz) == true
+            ? NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded
+            : NavmeshRuntimeTileStatus.Unknown;
+    }
+
     /// <summary>
     /// Releases the cached ADT triangle geometry. Taken under the extract lock so
     /// it cannot clear a chunk a baker thread is mid-read of; the geometry
@@ -341,6 +389,11 @@ public sealed class NavmeshTileCache : IDisposable
     {
         if (!NavmeshCoords.IsValidTile(tx, tz))
         {
+            return;
+        }
+        if (runtimeCoverage is not null && !runtimeCoverage.ContainsExpectedTile(tx, tz))
+        {
+            runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.OutsideCertifiedCoverage;
             return;
         }
 
@@ -417,9 +470,19 @@ public sealed class NavmeshTileCache : IDisposable
 
             if (data == null)
             {
-                lock (stateLock)
+                if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true)
                 {
-                    emptyTiles.Add((tx, tz));
+                    runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile;
+                    logger.LogError("Validated Forever navmesh tile ({TileX},{TileZ}) is missing or could not be loaded/baked.", tx, tz);
+                }
+                else
+                {
+                    lock (stateLock)
+                    {
+                        emptyTiles.Add((tx, tz));
+                    }
+                    if (runtimeCoverage is not null)
+                        runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.UnverifiedNoNavmesh;
                 }
             }
             else
@@ -431,10 +494,13 @@ public sealed class NavmeshTileCache : IDisposable
                     if (!status.Succeeded())
                     {
                         logger.LogWarning("AddTile({TileX},{TileZ}) failed: {Status}", tx, tz, status);
+                        if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true)
+                            runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile;
                         data = null;
                     }
                     else
                     {
+                        runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.Loaded;
                         resident[(tx, tz)] = Interlocked.Increment(ref touchCounter);
                         EvictIfOverBudget();
                     }
@@ -446,9 +512,12 @@ public sealed class NavmeshTileCache : IDisposable
 
                 if (data == null)
                 {
-                    lock (stateLock)
+                    if (runtimeCoverage?.ContainsBakedTile(tx, tz) != true)
                     {
-                        emptyTiles.Add((tx, tz));
+                        lock (stateLock)
+                        {
+                            emptyTiles.Add((tx, tz));
+                        }
                     }
                 }
             }
@@ -461,6 +530,8 @@ public sealed class NavmeshTileCache : IDisposable
         catch (Exception ex)
         {
             logger.LogError(ex, "Baking tile ({TileX},{TileZ}) failed", tx, tz);
+            if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true)
+                runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile;
         }
         finally
         {
@@ -483,7 +554,13 @@ public sealed class NavmeshTileCache : IDisposable
             {
                 using FileStream fs = File.OpenRead(path);
                 using BinaryReader br = new(fs);
-                return new DtMeshDataReader().Read(br, NavmeshSettings.VertsPerPoly);
+                DtMeshData loadedData = new DtMeshDataReader().Read(br, NavmeshSettings.VertsPerPoly);
+                if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true &&
+                    (loadedData.header.x != tx || loadedData.header.y != tz || loadedData.header.polyCount <= 0 || loadedData.header.vertCount <= 0))
+                {
+                    throw new InvalidDataException($"Validated Forever tile ({tx},{tz}) now has an invalid DNM header or no polygons.");
+                }
+                return loadedData;
             }
             catch (Exception ex)
             {

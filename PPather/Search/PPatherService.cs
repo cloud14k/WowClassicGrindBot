@@ -10,6 +10,7 @@ using SharedLib.Data;
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,6 +50,7 @@ public sealed class PPatherService : IDisposable
 
     private NavmeshPathfinder navmeshPathfinder;
     private float navmeshMapId = -1;
+    private string? navmeshCacheIdentity;
     private bool? lastStartIndoors;
 
     /// <summary>
@@ -77,6 +79,7 @@ public sealed class PPatherService : IDisposable
     private readonly Lock areaGridLock = new();
     private readonly Dictionary<string, AreaGrid?> areaGrids = new();
     private readonly Dictionary<string, NavmeshPathfinder?> queryNavmesh = new();
+    private readonly Dictionary<string, string> queryNavmeshIdentities = new();
 
     /// <summary>
     /// Selects the in-process engine. Runtime-settable so the benchmark can
@@ -85,6 +88,9 @@ public sealed class PPatherService : IDisposable
     public PathingEngine Engine { get; set; } = PathingEngine.Navmesh;
 
     public NavmeshPathfinder NavmeshPathfinder => navmeshPathfinder;
+
+    /// <summary>Typed diagnostic associated with the most recent navmesh path query.</summary>
+    public NavmeshPathDiagnostic? LastNavmeshDiagnostic => navmeshPathfinder?.LastDiagnostic;
 
     /// <summary>
     /// Displaces interior waypoints by up to this many yards so repeated trips
@@ -268,6 +274,7 @@ public sealed class PPatherService : IDisposable
                 nav?.Dispose();
             }
             queryNavmesh.Clear();
+            queryNavmeshIdentities.Clear();
         }
     }
 
@@ -286,6 +293,7 @@ public sealed class PPatherService : IDisposable
         navmeshPathfinder?.Dispose();
         navmeshPathfinder = null;
         navmeshMapId = -1;
+        navmeshCacheIdentity = null;
         activeMapId = -1;
 
         if (search == null)
@@ -859,6 +867,7 @@ public sealed class PPatherService : IDisposable
         navmeshPathfinder?.Dispose();
         navmeshPathfinder = null;
         navmeshMapId = -1;
+        navmeshCacheIdentity = null;
 
         long freed = 0;
 
@@ -911,12 +920,12 @@ public sealed class PPatherService : IDisposable
         return System.IO.Path.Join(dataConfig.Navmesh, continent, hash);
     }
 
-    private IReadOnlyCollection<(int X, int Z)> ValidateForeverNavmeshCache(string cacheDir,
+    private ForeverNavmeshRuntimeCoverage? ValidateForeverNavmeshCache(string cacheDir,
         float expectedMapId, string continent)
     {
         if (DataConfig.ClientEra(dataConfig.Exp) != "forever")
         {
-            return Array.Empty<(int X, int Z)>();
+            return null;
         }
 
         if (!float.IsFinite(expectedMapId) || expectedMapId < 0 || expectedMapId > int.MaxValue ||
@@ -927,7 +936,7 @@ public sealed class PPatherService : IDisposable
 
         ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(continent,
             dataConfig.ClientProduct, dataConfig.ClientBuild!.Value, bakeOptions);
-        return ForeverNavmeshCacheManifest.ReadEmptyTilesForRuntime(cacheDir, profile.ClientProduct,
+        return ForeverNavmeshCacheManifest.ReadCoverageForRuntime(cacheDir, profile.ClientProduct,
             profile.ClientBuild, profile.SettingsHash, (int)expectedMapId, profile.Continent);
     }
 
@@ -980,20 +989,21 @@ public sealed class PPatherService : IDisposable
 
     private void EnsureNavmeshPathfinder()
     {
-        if (navmeshPathfinder != null && navmeshMapId == activeMapId)
+        string continent = ContinentDB.IdToName[activeMapId];
+        string cacheDir = NavmeshCacheDir(continent);
+        string cacheIdentity = System.IO.Path.GetFullPath(cacheDir);
+        if (navmeshPathfinder != null && navmeshMapId == activeMapId &&
+            string.Equals(navmeshCacheIdentity, cacheIdentity, StringComparison.OrdinalIgnoreCase))
         {
             return;
         }
 
         navmeshPathfinder?.Dispose();
 
-        string continent = ContinentDB.IdToName[activeMapId];
-        string cacheDir = NavmeshCacheDir(continent);
-        IReadOnlyCollection<(int X, int Z)> certifiedEmptyTiles =
-            ValidateForeverNavmeshCache(cacheDir, activeMapId, continent);
+        ForeverNavmeshRuntimeCoverage runtimeCoverage = ValidateForeverNavmeshCache(cacheDir, activeMapId, continent);
 
         navmeshPathfinder = new NavmeshPathfinder(logger, TriangleWorld, cacheDir, bakeOptions, queryOptions,
-            bakeOptions.ResolveMinWorldZ(continent));
+            bakeOptions.ResolveMinWorldZ(continent), runtimeCoverage);
         navmeshPathfinder.Zones = CostZoneLoader.Load(logger, dataConfig.Road, continent,
             roadCoreHalfWidth: queryOptions.RoadCore);
         navmeshPathfinder.Tiles.NotifyTileAdded =
@@ -1001,6 +1011,7 @@ public sealed class PPatherService : IDisposable
         navmeshPathfinder.Tiles.NotifyTileRemoved =
             (x, z) => OnNavmeshTileRemoved?.Invoke(x, z);
         navmeshMapId = activeMapId;
+        navmeshCacheIdentity = cacheIdentity;
 
         int bakedTiles = CountBakedTiles(cacheDir);
 
@@ -1008,7 +1019,7 @@ public sealed class PPatherService : IDisposable
         {
             logger.LogInformation("Navmesh engine ready for {Continent} ({Mode}) - {Tiles} baked tiles, {EmptyTiles} verified empty tiles in {CacheDir}",
                 continent, search == null ? "disk-only, no game files" : "geometry available", bakedTiles,
-                certifiedEmptyTiles.Count, cacheDir);
+                runtimeCoverage?.EmptyTiles.Count ?? 0, cacheDir);
         }
 
         // An empty cache directory with no geometry behind it cannot answer a
@@ -1016,11 +1027,11 @@ public sealed class PPatherService : IDisposable
         // stuck". Said here, once per continent, it is the first line the user
         // sees - and it names the directory that is actually being read, which
         // is the half of the problem a bare tile count would miss.
-        if (bakedTiles == 0 && certifiedEmptyTiles.Count > 0)
+        if (bakedTiles == 0 && runtimeCoverage is { EmptyTiles.Count: > 0 })
         {
             logger.LogWarning(
                 "The validated cache for {Continent} contains {EmptyTiles} geometry-verified tiles with no walkable polygons and no baked navmesh tiles; path queries cannot succeed.",
-                continent, certifiedEmptyTiles.Count);
+                continent, runtimeCoverage.EmptyTiles.Count);
         }
         else if (bakedTiles == 0 && search == null)
         {
@@ -1264,7 +1275,10 @@ public sealed class PPatherService : IDisposable
     /// </summary>
     private NavmeshPathfinder? GetQueryNavmesh(string continent, float mapId)
     {
-        if (navmeshPathfinder != null && navmeshMapId == mapId)
+        string cacheDir = NavmeshCacheDir(continent);
+        string cacheIdentity = System.IO.Path.GetFullPath(cacheDir) + "|" + mapId.ToString("R", CultureInfo.InvariantCulture);
+        if (navmeshPathfinder != null && navmeshMapId == mapId &&
+            string.Equals(navmeshCacheIdentity, System.IO.Path.GetFullPath(cacheDir), StringComparison.OrdinalIgnoreCase))
         {
             return navmeshPathfinder;
         }
@@ -1273,26 +1287,34 @@ public sealed class PPatherService : IDisposable
         {
             if (queryNavmesh.TryGetValue(continent, out NavmeshPathfinder? nav))
             {
-                return nav;
+                if (queryNavmeshIdentities.TryGetValue(continent, out string existingIdentity) &&
+                    string.Equals(existingIdentity, cacheIdentity, StringComparison.OrdinalIgnoreCase))
+                {
+                    return nav;
+                }
+                nav?.Dispose();
+                queryNavmesh.Remove(continent);
+                queryNavmeshIdentities.Remove(continent);
             }
 
-            string cacheDir = NavmeshCacheDir(continent);
             if (!System.IO.Directory.Exists(cacheDir))
             {
                 queryNavmesh[continent] = null;
+                queryNavmeshIdentities[continent] = cacheIdentity;
                 logger.LogWarning(
                     "No baked navmesh for {Continent} ({CacheDir}); z unavailable. Bake it with --bake={Continent}.",
                     continent, cacheDir, continent);
                 return null;
             }
 
-            ValidateForeverNavmeshCache(cacheDir, mapId, continent);
+            ForeverNavmeshRuntimeCoverage runtimeCoverage = ValidateForeverNavmeshCache(cacheDir, mapId, continent);
 
             nav = new NavmeshPathfinder(logger, null, cacheDir, bakeOptions, queryOptions,
-                bakeOptions.ResolveMinWorldZ(continent));
+                bakeOptions.ResolveMinWorldZ(continent), runtimeCoverage);
             nav.Zones = CostZoneLoader.Load(logger, dataConfig.Road, continent,
                 roadCoreHalfWidth: queryOptions.RoadCore);
             queryNavmesh[continent] = nav;
+            queryNavmeshIdentities[continent] = cacheIdentity;
             return nav;
         }
     }

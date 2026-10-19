@@ -450,6 +450,7 @@ public sealed class PPatherController : ControllerBase
 
         PPather.Navmesh.CostZones zones =
             service.NavmeshPathfinder?.Zones ?? PPather.Navmesh.CostZones.Empty;
+        NavmeshPathDiagnostic? diagnostic = service.LastNavmeshDiagnostic;
 
         return new JsonResult(new StatsResponse(
             service.Engine.ToString(),
@@ -458,7 +459,8 @@ public sealed class PPatherController : ControllerBase
             stats.PushedPoints, stats.Legs, stats.EndGapYd, stats.ResolveShiftYd,
             stats.CorridorRadius, stats.Widenings, stats.ResidentTiles,
             stats.Retargeted, stats.RetargetDropYd, stats.StallMemoHit,
-            zones.CostChunkCount, zones.BlockedChunkCount));
+            zones.CostChunkCount, zones.BlockedChunkCount,
+            diagnostic?.Reason.ToString(), diagnostic?.StartTile, diagnostic?.EndTile, diagnostic?.AffectedTile));
     }
 
     public sealed record StatsResponse(
@@ -468,7 +470,9 @@ public sealed class PPatherController : ControllerBase
         int PushedPoints, int Legs, float EndGapYd, float ResolveShiftYd,
         int CorridorRadius, int Widenings, int ResidentTiles,
         bool Retargeted, float RetargetDropYd, bool StallMemoHit,
-        int PricedChunks, int BlockedChunks);
+        int PricedChunks, int BlockedChunks,
+        string? PathFailureReason, NavmeshTileCoordinate? PathStartTile,
+        NavmeshTileCoordinate? PathEndTile, NavmeshTileCoordinate? PathAffectedTile);
 
     /// <summary>
     /// Re-reads the authored road / danger zone files for the active continent.
