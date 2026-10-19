@@ -21,10 +21,12 @@ public sealed class ForeverNavmeshRuntimeCoverage
     private readonly HashSet<(int X, int Z)> expectedTiles;
     private readonly HashSet<(int X, int Z)> bakedTiles;
     private readonly HashSet<(int X, int Z)> emptyTiles;
+    private readonly Dictionary<(int X, int Z), string> bakedTileSha256;
 
     internal ForeverNavmeshRuntimeCoverage(string product, int build, string settingsHash,
         int mapId, string continent, IEnumerable<(int X, int Z)> expectedTiles,
-        IEnumerable<(int X, int Z)> bakedTiles, IEnumerable<(int X, int Z)> emptyTiles)
+        IReadOnlyDictionary<(int X, int Z), string> bakedTileSha256,
+        IEnumerable<(int X, int Z)> emptyTiles)
     {
         Product = product;
         Build = build;
@@ -32,7 +34,9 @@ public sealed class ForeverNavmeshRuntimeCoverage
         MapId = mapId;
         Continent = continent;
         this.expectedTiles = expectedTiles.ToHashSet();
-        this.bakedTiles = bakedTiles.ToHashSet();
+        this.bakedTileSha256 = bakedTileSha256.ToDictionary(static entry => entry.Key,
+            static entry => entry.Value.ToLowerInvariant());
+        this.bakedTiles = this.bakedTileSha256.Keys.ToHashSet();
         this.emptyTiles = emptyTiles.ToHashSet();
     }
 
@@ -48,6 +52,9 @@ public sealed class ForeverNavmeshRuntimeCoverage
     public bool ContainsExpectedTile(int x, int z) => expectedTiles.Contains((x, z));
     public bool ContainsBakedTile(int x, int z) => bakedTiles.Contains((x, z));
     public bool ContainsVerifiedEmptyTile(int x, int z) => emptyTiles.Contains((x, z));
+
+    public bool TryGetBakedTileSha256(int x, int z, out string sha256) =>
+        bakedTileSha256.TryGetValue((x, z), out sha256!);
 }
 
 /// <summary>
@@ -142,7 +149,7 @@ public static class ForeverNavmeshCacheManifest
             expectedBuild, expectedSettingsHash, expectedMapId, expectedContinent);
         ValidateContinentEligibility(manifest);
         return new ForeverNavmeshRuntimeCoverage(expectedProduct, expectedBuild, expectedSettingsHash,
-            expectedMapId, expectedContinent, manifest.ExpectedTiles, manifest.ManifestTiles, manifest.EmptyTiles);
+            expectedMapId, expectedContinent, manifest.ExpectedTiles, manifest.DnmSha256s, manifest.EmptyTiles);
     }
 
     private static ManifestSnapshot ReadAndValidateFiles(string cacheDirectory, string expectedProduct,
@@ -218,7 +225,8 @@ public static class ForeverNavmeshCacheManifest
             ReadOptionalCoverageAdts(root, "processed_source_adts_xy", manifestPath),
             ReadOptionalCoverageTiles(root, "expected_tile_indices", manifestPath),
             ReadOptionalCoverageTiles(root, "completed_tile_indices", manifestPath),
-            tiles.Select(static tile => (tile.X, tile.Z)).ToHashSet(), emptyTiles);
+            tiles.Select(static tile => (tile.X, tile.Z)).ToHashSet(),
+            tiles.ToDictionary(static tile => (tile.X, tile.Z), static tile => tile.Sha256), emptyTiles);
     }
 
     private static void ValidateContinentEligibility(ManifestSnapshot manifest)
@@ -902,5 +910,6 @@ public static class ForeverNavmeshCacheManifest
         HashSet<(int X, int Y)> WdtAdts,
         HashSet<(int X, int Y)> ExpectedAdts, HashSet<(int X, int Y)> ProcessedAdts,
         HashSet<(int X, int Z)> ExpectedTiles, HashSet<(int X, int Z)> CompletedTiles,
-        HashSet<(int X, int Z)> ManifestTiles, HashSet<(int X, int Z)> EmptyTiles);
+        HashSet<(int X, int Z)> ManifestTiles, Dictionary<(int X, int Z), string> DnmSha256s,
+        HashSet<(int X, int Z)> EmptyTiles);
 }

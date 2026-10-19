@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -79,6 +80,7 @@ public sealed class NavmeshTileCache : IDisposable
     private readonly NavmeshBakeOptions bake;
     private readonly float? minWorldZ;
     private readonly int corridorTileRadius;
+    private readonly int maxResidentTiles;
     private readonly ForeverNavmeshRuntimeCoverage? runtimeCoverage;
 
     private readonly DtNavMesh navMesh;
@@ -101,6 +103,9 @@ public sealed class NavmeshTileCache : IDisposable
     private readonly HashSet<(int x, int z)> emptyTiles = [];
     // Tiles currently queued or baking - avoids duplicate work. Guarded by stateLock.
     private readonly HashSet<(int x, int z)> inFlight = [];
+    // Dynamic legacy bakes which failed are terminal for this cache lifetime;
+    // they must not be retried on every path request or mislabeled as empty.
+    private readonly HashSet<(int x, int z)> failedTiles = [];
     private readonly object stateLock = new();
 
     private long touchCounter;
@@ -145,14 +150,18 @@ public sealed class NavmeshTileCache : IDisposable
 
     public NavmeshTileCache(ILogger logger, ChunkedTriangleCollection? world, string cacheDir,
         NavmeshBakeOptions bake, int corridorTileRadius, float? minWorldZ = null,
-        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null)
+        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null, int maxResidentTiles = MaxResidentTiles)
     {
+        if (maxResidentTiles < 1)
+            throw new ArgumentOutOfRangeException(nameof(maxResidentTiles));
+
         this.logger = logger;
         this.world = world;
         this.cacheDir = cacheDir;
         this.bake = bake;
         this.minWorldZ = minWorldZ;
         this.corridorTileRadius = corridorTileRadius;
+        this.maxResidentTiles = maxResidentTiles;
         this.runtimeCoverage = runtimeCoverage;
 
         if (runtimeCoverage is not null)
@@ -411,6 +420,10 @@ public sealed class NavmeshTileCache : IDisposable
             {
                 return;
             }
+            if (failedTiles.Contains((tx, tz)))
+            {
+                return;
+            }
 
             if (!inFlight.Add((tx, tz)))
             {
@@ -487,6 +500,7 @@ public sealed class NavmeshTileCache : IDisposable
             }
             else
             {
+                bool tileAddFailed = false;
                 rwLock.EnterWriteLock();
                 try
                 {
@@ -496,6 +510,11 @@ public sealed class NavmeshTileCache : IDisposable
                         logger.LogWarning("AddTile({TileX},{TileZ}) failed: {Status}", tx, tz, status);
                         if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true)
                             runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile;
+                        else
+                        {
+                            tileAddFailed = true;
+                            MarkDynamicBakeFailed(tx, tz);
+                        }
                         data = null;
                     }
                     else
@@ -512,7 +531,7 @@ public sealed class NavmeshTileCache : IDisposable
 
                 if (data == null)
                 {
-                    if (runtimeCoverage?.ContainsBakedTile(tx, tz) != true)
+                    if (!tileAddFailed && runtimeCoverage?.ContainsBakedTile(tx, tz) != true)
                     {
                         lock (stateLock)
                         {
@@ -532,6 +551,8 @@ public sealed class NavmeshTileCache : IDisposable
             logger.LogError(ex, "Baking tile ({TileX},{TileZ}) failed", tx, tz);
             if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true)
                 runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.MissingOrInvalidNavmeshTile;
+            else
+                MarkDynamicBakeFailed(tx, tz);
         }
         finally
         {
@@ -548,6 +569,49 @@ public sealed class NavmeshTileCache : IDisposable
     {
         string path = TilePath(tx, tz);
 
+        if (runtimeCoverage is not null)
+        {
+            if (!runtimeCoverage.TryGetBakedTileSha256(tx, tz, out string expectedSha256))
+            {
+                // The only tiles that reach this method in a certified cache
+                // are expected DNM records. Empty or outside tiles are stopped
+                // by Request before a worker is queued.
+                return null;
+            }
+
+            try
+            {
+                // Hash and parse the same byte snapshot. A path replacement
+                // after ReadAllBytes cannot change the data this query loads.
+                byte[] bytes = File.ReadAllBytes(path);
+                string actualSha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+                if (!actualSha256.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException(
+                        $"Forever DNM tile ({tx},{tz}) SHA-256 mismatch: expected {expectedSha256}, actual {actualSha256}.");
+                }
+
+                using MemoryStream stream = new(bytes, writable: false);
+                using BinaryReader reader = new(stream);
+                DtMeshData loadedData = new DtMeshDataReader().Read(reader, NavmeshSettings.VertsPerPoly);
+                if (loadedData.header.x != tx || loadedData.header.y != tz ||
+                    loadedData.header.polyCount <= 0 || loadedData.header.vertCount <= 0)
+                {
+                    throw new InvalidDataException(
+                        $"Forever DNM tile ({tx},{tz}) has an invalid coordinate header or no polygons.");
+                }
+
+                return loadedData;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex,
+                    "Published Forever navmesh tile {Path} failed its load-time integrity check; preserving the file and refusing to rebake it.",
+                    path);
+                return null;
+            }
+        }
+
         if (File.Exists(path))
         {
             try
@@ -555,11 +619,6 @@ public sealed class NavmeshTileCache : IDisposable
                 using FileStream fs = File.OpenRead(path);
                 using BinaryReader br = new(fs);
                 DtMeshData loadedData = new DtMeshDataReader().Read(br, NavmeshSettings.VertsPerPoly);
-                if (runtimeCoverage?.ContainsBakedTile(tx, tz) == true &&
-                    (loadedData.header.x != tx || loadedData.header.y != tz || loadedData.header.polyCount <= 0 || loadedData.header.vertCount <= 0))
-                {
-                    throw new InvalidDataException($"Validated Forever tile ({tx},{tz}) now has an invalid DNM header or no polygons.");
-                }
                 return loadedData;
             }
             catch (Exception ex)
@@ -611,7 +670,7 @@ public sealed class NavmeshTileCache : IDisposable
             Interlocked.Add(ref extractHoldTicks, Stopwatch.GetTimestamp() - held);
         }
 
-        DtMeshData? data = NavmeshTileBuilder.Bake(geom, tx, tz, bake);
+        DtMeshData? data = NavmeshTileBuilder.BakeLegacyDynamic(geom, tx, tz, bake).MeshData;
 
         Interlocked.Increment(ref tilesBakedThisSession);
 
@@ -639,10 +698,19 @@ public sealed class NavmeshTileCache : IDisposable
         return data;
     }
 
+    private void MarkDynamicBakeFailed(int tx, int tz)
+    {
+        lock (stateLock)
+        {
+            failedTiles.Add((tx, tz));
+        }
+        runtimeTileStates[(tx, tz)] = NavmeshRuntimeTileStatus.DynamicBakeFailed;
+    }
+
     private void EvictIfOverBudget()
     {
         // Called under the write lock.
-        while (resident.Count > MaxResidentTiles)
+        while (resident.Count > maxResidentTiles)
         {
             (int x, int z) oldest = default;
             long oldestTouch = long.MaxValue;

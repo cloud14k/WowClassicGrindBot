@@ -9,6 +9,8 @@ using System.Numerics;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Threading;
+using System.Threading.Tasks;
 
 using DotRecast.Core;
 using DotRecast.Detour;
@@ -892,6 +894,21 @@ internal static class P45GeometryRegression
     private static void RunRuntimeNavigationDiagnosticsRegression(string root, string product, int build,
         int mapId, string settingsHash, string continent)
     {
+        string wrongHeaderCache = Path.Combine(root, "runtime-diagnostic-wrong-header");
+        WriteCache(wrongHeaderCache, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent,
+            bakedTiles: new[] { (1, 2) });
+        string wrongHeaderPath = Path.Combine(wrongHeaderCache, "tile_1_2.dnm");
+        WriteDnmAtPath(wrongHeaderPath, 3, 2, groundHeight: 10f);
+        JsonObject wrongHeaderManifest = JsonNode.Parse(File.ReadAllText(
+            Path.Combine(wrongHeaderCache, "manifest.json")))!.AsObject();
+        wrongHeaderManifest["tiles"]![0]!["sha256"] =
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(wrongHeaderPath))).ToLowerInvariant();
+        File.WriteAllText(Path.Combine(wrongHeaderCache, "manifest.json"), wrongHeaderManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                wrongHeaderCache, product, build, settingsHash, mapId, continent),
+            "Runtime accepted a DNM whose path/manifest tile coordinate disagreed with its DNM header.");
+
         string cache = Path.Combine(root, "runtime-diagnostic-continent");
         WriteCache(cache, product, build, mapId, settingsHash, "continent",
             completeForRequested: true, publishable: true, continent,
@@ -965,6 +982,7 @@ internal static class P45GeometryRegression
         ForeverNavmeshRuntimeCoverage corruptCoverage = ForeverNavmeshCacheManifest.ReadCoverageForRuntime(
             cache, product, build, settingsHash, mapId, continent);
         File.WriteAllBytes(tileOne, [0x44, 0x4e, 0x4d, 0x00]);
+        byte[] corruptBytes = File.ReadAllBytes(tileOne);
         try
         {
             using NavmeshPathfinder corrupt = CreateDiagnosticPathfinder(cache, corruptCoverage);
@@ -972,11 +990,50 @@ internal static class P45GeometryRegression
                 new NavmeshTileCoordinate(1, 2), "validated DNM corrupted after runtime validation");
             if (corrupt.Tiles.GetTileStatus(1, 2) == NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile)
                 throw new InvalidOperationException("A corrupt DNM was misidentified as a verified empty tile.");
+            if (!File.Exists(tileOne) || !File.ReadAllBytes(tileOne).SequenceEqual(corruptBytes))
+                throw new InvalidOperationException("Runtime deleted or changed a corrupt published Forever DNM while rejecting it.");
         }
         finally
         {
             File.WriteAllBytes(tileOne, validDnm);
         }
+
+        // Force LRU eviction with a small, explicit cache budget. The second
+        // actual disk load after eviction must hash-check against the immutable
+        // coverage snapshot and must not rebake or overwrite a valid-looking
+        // replacement file.
+        ForeverNavmeshRuntimeCoverage reloadCoverage = ForeverNavmeshCacheManifest.ReadCoverageForRuntime(
+            cache, product, build, settingsHash, mapId, continent);
+        using (NavmeshPathfinder reload = CreateDiagnosticPathfinder(cache, reloadCoverage, maxResidentTiles: 1))
+        {
+            NavmeshPathQueryResult firstLoad = reload.FindPathWithResult(start, start, null);
+            NavmeshPathQueryResult secondLoad = reload.FindPathWithResult(end, end, null);
+            if (firstLoad.Path is null || firstLoad.Diagnostic is not null ||
+                secondLoad.Path is null || secondLoad.Diagnostic is not null ||
+                reload.Tiles.ResidentTiles.Contains((1, 2)))
+            {
+                throw new InvalidOperationException("The DNM reload fixture did not load two tiles and evict the first tile.");
+            }
+
+            byte[] substitutedDnm = CreateDnmBytes(1, 2, groundHeight: 12f);
+            File.WriteAllBytes(tileOne, substitutedDnm);
+            NavmeshPathQueryResult substituted = reload.FindPathWithResult(start, start, null);
+            if (substituted.Path is not null ||
+                substituted.Diagnostic?.Reason != NavmeshPathFailureReason.MissingOrInvalidNavmeshTile ||
+                substituted.Diagnostic.AffectedTile != new NavmeshTileCoordinate(1, 2) ||
+                !File.ReadAllBytes(tileOne).SequenceEqual(substitutedDnm))
+            {
+                throw new InvalidOperationException("An evicted Forever tile was reloaded without matching its manifest hash, or was modified during rejection.");
+            }
+
+            NavmeshPathQueryResult unaffected = reload.FindPathWithResult(end, end, null);
+            if (unaffected.Path is null || unaffected.Diagnostic is not null)
+            {
+                throw new InvalidOperationException("A valid Forever tile stopped working after a neighboring published DNM failed its reload hash check.");
+            }
+        }
+
+        File.WriteAllBytes(tileOne, validDnm);
 
         string mapOneCache = Path.Combine(root, "runtime-diagnostic-map1");
         WriteCache(mapOneCache, product, build, 1, settingsHash, "continent",
@@ -993,7 +1050,9 @@ internal static class P45GeometryRegression
         using (NavmeshPathfinder mapOne = CreateDiagnosticPathfinder(mapOneCache, mapOneCoverage))
         {
             Vector3 mapOnePoint = TileWorldPoint(2, 2);
-            if (mapOne.FindPath(mapOnePoint, mapOnePoint, null) is null || mapOne.LastDiagnostic is not null)
+            NavmeshPathQueryResult mapOneResult = mapOne.FindPathWithResult(mapOnePoint, mapOnePoint, null);
+            if (mapOneResult.Path is null || mapOneResult.Diagnostic is not null ||
+                mapOneResult.RequestedStart != mapOnePoint || mapOne.LastQueryResult?.QueryId != mapOneResult.QueryId)
                 throw new InvalidOperationException("MapID 1 did not load its own DNM at a coordinate empty on MapID 0.");
         }
 
@@ -1010,6 +1069,59 @@ internal static class P45GeometryRegression
         using NavmeshPathfinder legacy = CreateDiagnosticPathfinder(legacyCache, runtimeCoverage: null);
         if (legacy.FindPath(start, start, null) is null || legacy.LastDiagnostic is not null)
             throw new InvalidOperationException("A Classic-era-style cache without a Forever manifest changed its legacy path behavior.");
+
+        using NavmeshPathfinder concurrent = CreateDiagnosticPathfinder(cache, coverage);
+        using ManualResetEventSlim startTogether = new(false);
+        Task<NavmeshPathQueryResult> validTask = Task.Run(() =>
+        {
+            startTogether.Wait();
+            return concurrent.FindPathWithResult(start, start, null);
+        });
+        Task<NavmeshPathQueryResult> emptyTask = Task.Run(() =>
+        {
+            startTogether.Wait();
+            return concurrent.FindPathWithResult(empty, empty, null);
+        });
+        startTogether.Set();
+        Task.WaitAll(validTask, emptyTask);
+        NavmeshPathQueryResult validResult = validTask.Result;
+        NavmeshPathQueryResult emptyResult = emptyTask.Result;
+        NavmeshPathQueryResult concurrentLatest = concurrent.LastQueryResult
+            ?? throw new InvalidOperationException("Concurrent queries did not publish a latest-result snapshot.");
+        if (validResult.QueryId == emptyResult.QueryId || validResult.Path is null || validResult.Diagnostic is not null ||
+            emptyResult.Path is not null || emptyResult.Diagnostic?.Reason != NavmeshPathFailureReason.VerifiedEmptyNavmeshTile ||
+            validResult.RequestedStart != start || validResult.RequestedEnd != start ||
+            emptyResult.RequestedStart != empty || emptyResult.RequestedEnd != empty ||
+            concurrentLatest.QueryId != validResult.QueryId && concurrentLatest.QueryId != emptyResult.QueryId ||
+            concurrentLatest.Diagnostic != concurrent.LastDiagnostic)
+        {
+            throw new InvalidOperationException("Concurrent valid and verified-empty queries lost their per-call paths, endpoints, IDs, or diagnostics.");
+        }
+
+        using ManualResetEventSlim failuresTogether = new(false);
+        Task<NavmeshPathQueryResult> emptyFailureTask = Task.Run(() =>
+        {
+            failuresTogether.Wait();
+            return concurrent.FindPathWithResult(empty, empty, null);
+        });
+        Task<NavmeshPathQueryResult> coverageFailureTask = Task.Run(() =>
+        {
+            failuresTogether.Wait();
+            return concurrent.FindPathWithResult(outside, start, null);
+        });
+        failuresTogether.Set();
+        Task.WaitAll(emptyFailureTask, coverageFailureTask);
+        NavmeshPathQueryResult emptyFailure = emptyFailureTask.Result;
+        NavmeshPathQueryResult coverageFailure = coverageFailureTask.Result;
+        if (emptyFailure.QueryId == coverageFailure.QueryId ||
+            emptyFailure.Diagnostic?.Reason != NavmeshPathFailureReason.VerifiedEmptyNavmeshTile ||
+            emptyFailure.Diagnostic.AffectedTile != new NavmeshTileCoordinate(2, 2) ||
+            coverageFailure.Diagnostic?.Reason != NavmeshPathFailureReason.OutsideCertifiedCoverage ||
+            coverageFailure.Diagnostic.AffectedTile != new NavmeshTileCoordinate(4, 2) ||
+            emptyFailure.RequestedStart != empty || coverageFailure.RequestedStart != outside)
+        {
+            throw new InvalidOperationException("Concurrent failure queries cross-assigned their failure reasons, coordinates, or affected tiles.");
+        }
     }
 
     private static void AddVerifiedEmptyTile(string cacheDirectory, string product, int build, int mapId,
@@ -1067,18 +1179,36 @@ internal static class P45GeometryRegression
         File.WriteAllText(manifestPath, manifest.ToJsonString());
     }
 
-    private static void WriteDnm(string directory, int tileX, int tileZ)
+    private static void WriteDnm(string directory, int tileX, int tileZ, float groundHeight = 10f)
     {
         Directory.CreateDirectory(directory);
-        using FileStream stream = File.Create(Path.Combine(directory, $"tile_{tileX}_{tileZ}.dnm"));
+        WriteDnmAtPath(Path.Combine(directory, $"tile_{tileX}_{tileZ}.dnm"), tileX, tileZ, groundHeight);
+    }
+
+    private static void WriteDnmAtPath(string path, int headerTileX, int headerTileZ, float groundHeight)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using FileStream stream = File.Create(path);
         using BinaryWriter writer = new(stream);
-        new DtMeshDataWriter().Write(writer, CreateGroundTileData(tileX, tileZ), RcByteOrder.LITTLE_ENDIAN, false);
+        new DtMeshDataWriter().Write(writer,
+            CreateGroundTileData(headerTileX, headerTileZ, groundHeight), RcByteOrder.LITTLE_ENDIAN, false);
+    }
+
+    private static byte[] CreateDnmBytes(int tileX, int tileZ, float groundHeight)
+    {
+        using MemoryStream stream = new();
+        using (BinaryWriter writer = new(stream, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            new DtMeshDataWriter().Write(writer,
+                CreateGroundTileData(tileX, tileZ, groundHeight), RcByteOrder.LITTLE_ENDIAN, false);
+        }
+        return stream.ToArray();
     }
 
     private static NavmeshPathfinder CreateDiagnosticPathfinder(string cacheDirectory,
-        ForeverNavmeshRuntimeCoverage? runtimeCoverage) => new(
+        ForeverNavmeshRuntimeCoverage? runtimeCoverage, int maxResidentTiles = NavmeshTileCache.MaxResidentTiles) => new(
             NullLogger<NavmeshPathfinder>.Instance, null, cacheDirectory, new NavmeshBakeOptions(),
-            new NavmeshQueryOptions(), runtimeCoverage: runtimeCoverage);
+            new NavmeshQueryOptions(), runtimeCoverage: runtimeCoverage, maxResidentTiles: maxResidentTiles);
 
     private static Vector3 TileWorldPoint(int tileX, int tileZ)
     {
@@ -1751,12 +1881,53 @@ internal static class P45GeometryRegression
         if (!mixed.HasNavmesh || mixed.MeshData!.header.polyCount <= 0)
             throw new InvalidOperationException("Mixed walkable ground and vertical collision did not keep its valid navmesh polygons.");
 
-        ExpectFailure(() => NavmeshTileBuilder.BakeWithResult(new TileGeometry
-        {
-            GroundVerts = [], GroundTris = [], LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
-            BMin = new Vector3(0, 0, 0), BMax = new Vector3(1, 1, 1),
-        }, tileX, tileZ, new NavmeshBakeOptions()),
+        TileGeometry noGeometry = CreateEmptyGeometry(tileX, tileZ);
+        ExpectFailure(() => NavmeshTileBuilder.BakeWithResult(noGeometry, tileX, tileZ, new NavmeshBakeOptions()),
             "Geometry-free input was classified as a legal empty tile instead of an extraction failure.");
+
+        NavmeshTileBakeResult classicEmpty = NavmeshTileBuilder.BakeLegacyDynamic(
+            noGeometry, tileX, tileZ, new NavmeshBakeOptions());
+        if (classicEmpty.Disposition != NavmeshTileBakeDisposition.NoWalkablePolygons ||
+            classicEmpty.MeshData is not null || classicEmpty.PolygonCount != 0)
+        {
+            throw new InvalidOperationException("Classic dynamic baking no longer returns null for a clean geometry-free tile.");
+        }
+
+        NavmeshTileBakeResult classicGround = NavmeshTileBuilder.BakeLegacyDynamic(
+            CreateWalkableGeometry(tileX, tileZ), tileX, tileZ, new NavmeshBakeOptions());
+        if (!classicGround.HasNavmesh)
+            throw new InvalidOperationException("Classic dynamic baking changed normal walkable ground behavior.");
+
+        // An ocean/coast tile with no source chunk is accepted as empty only
+        // when extraction itself succeeded; the next terrain tile must still
+        // bake normally in the same test process.
+        _ = NavmeshTileBuilder.BakeLegacyDynamic(CreateEmptyGeometry(tileX, tileZ), tileX, tileZ);
+        if (!NavmeshTileBuilder.BakeLegacyDynamic(CreateWalkableGeometry(tileX + 1, tileZ), tileX + 1, tileZ)
+                .HasNavmesh)
+        {
+            throw new InvalidOperationException("A clean empty coast tile prevented a following Classic terrain tile from baking.");
+        }
+
+        TileGeometry partialCoast = CreateEmptyGeometry(tileX, tileZ, failedChunkLoads: 1);
+        NavmeshTileBakeResult partialCoastEmpty = NavmeshTileBuilder.BakeLegacyDynamic(partialCoast, tileX, tileZ);
+        if (partialCoastEmpty.Disposition != NavmeshTileBakeDisposition.NoWalkablePolygons ||
+            partialCoastEmpty.MeshData is not null)
+        {
+            throw new InvalidOperationException("Classic dynamic baking changed its legacy empty result at a partially missing coast/ocean boundary.");
+        }
+
+        TileGeometry badIndices = new()
+        {
+            GroundVerts = CreateWalkableGeometry(tileX, tileZ).GroundVerts,
+            GroundTris = [0, 1, 99],
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = CreateWalkableGeometry(tileX, tileZ).BMin,
+            BMax = CreateWalkableGeometry(tileX, tileZ).BMax,
+        };
+        ExpectFailure(() => NavmeshTileBuilder.BakeLegacyDynamic(badIndices, tileX, tileZ),
+            "Classic dynamic baking accepted a bad triangle index.");
+        ExpectFailure(() => NavmeshTileBuilder.BakeWithResult(badIndices, tileX, tileZ),
+            "The strict Forever bake accepted a bad triangle index.");
 
         RunPaddingOnlyEmptyTileRegression(root);
         RunEmptyBatchRecoveryRegression(root);
@@ -1790,6 +1961,20 @@ internal static class P45GeometryRegression
             LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
             BMin = new Vector3(tileMinX, 0, tileMinZ),
             BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+        };
+    }
+
+    private static TileGeometry CreateEmptyGeometry(int tileX, int tileZ, int failedChunkLoads = 0)
+    {
+        float minX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float minZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        return new TileGeometry
+        {
+            GroundVerts = [], GroundTris = [],
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = new Vector3(minX, 0, minZ),
+            BMax = new Vector3(minX + NavmeshSettings.TileWorldSize, 1, minZ + NavmeshSettings.TileWorldSize),
+            FailedChunkLoads = failedChunkLoads,
         };
     }
 
@@ -2270,16 +2455,16 @@ internal static class P45GeometryRegression
         };
     }
 
-    private static DtMeshData CreateGroundTileData(int tileX, int tileZ)
+    private static DtMeshData CreateGroundTileData(int tileX, int tileZ, float groundHeight = 10f)
     {
         float tileMinX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
         float tileMinZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
         float[] verts =
         [
-            tileMinX + 20, 10, tileMinZ + 20,
-            tileMinX + 20, 10, tileMinZ + 60,
-            tileMinX + 60, 10, tileMinZ + 20,
-            tileMinX + 60, 10, tileMinZ + 60,
+            tileMinX + 20, groundHeight, tileMinZ + 20,
+            tileMinX + 20, groundHeight, tileMinZ + 60,
+            tileMinX + 60, groundHeight, tileMinZ + 20,
+            tileMinX + 60, groundHeight, tileMinZ + 60,
         ];
         TileGeometry geometry = new()
         {
@@ -2288,8 +2473,9 @@ internal static class P45GeometryRegression
             LiquidVerts = [],
             LiquidTris = [],
             LiquidAreas = [],
-            BMin = new Vector3(tileMinX, 0, tileMinZ),
-            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+            BMin = new Vector3(tileMinX, groundHeight - 10f, tileMinZ),
+            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, groundHeight + 90f,
+                tileMinZ + NavmeshSettings.TileWorldSize),
         };
         return NavmeshTileBuilder.Bake(geometry, tileX, tileZ, new NavmeshBakeOptions())
             ?? throw new InvalidOperationException("Test ground geometry did not produce a real DNM tile.");

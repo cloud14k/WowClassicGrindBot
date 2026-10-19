@@ -71,10 +71,10 @@ public sealed class PPatherController : ControllerBase
     public JsonResult MapRoute(int uimap1, float x1, float y1, int uimap2, float x2, float y2,
         float? edgeMargin = null)
     {
-        service.PathEdgeMarginYards = edgeMargin;
-
-        service.SetLocations(service.ToWorld(uimap1, x1, y1), service.ToWorld(uimap2, x2, y2));
-        Path path = service.DoSearch(eSearch);
+        Vector4 from = service.ToWorld(uimap1, x1, y1);
+        Vector4 to = service.ToWorld(uimap2, x2, y2);
+        Path path = service.DoSearchAtLocations(from, to, eSearch,
+            new PPatherService.NavmeshPathQueryOverrides(false, 0f, null, true, edgeMargin));
         if (path == null)
         {
             return emptyVector3;
@@ -87,7 +87,7 @@ public sealed class PPatherController : ControllerBase
 
         for (int i = 0; i < path.locations.Count; i++)
         {
-            array[i] = service.ToLocal(path.locations[i], (int)service.SearchFrom.W, uimap1);
+            array[i] = service.ToLocal(path.locations[i], (int)from.W, uimap1);
         }
 
         pool.Return(array);
@@ -218,13 +218,8 @@ public sealed class PPatherController : ControllerBase
             (x1, y1, z1, x2, y2, z2) = (x2, y2, z2, x1, y1, z1);
         }
 
-        service.PathJitterYards = jitter;
-        service.PathJitterSeed = seed;
-        service.PathEdgeMarginYards = edgeMargin;
-
-        service.SetLocations(new(x1, y1, z1, mapid), new(x2, y2, z2, mapid));
-
-        var path = service.DoSearch(eSearch);
+        var path = service.DoSearchAtLocations(new(x1, y1, z1, mapid), new(x2, y2, z2, mapid), eSearch,
+            new PPatherService.NavmeshPathQueryOverrides(true, jitter, seed, true, edgeMargin));
         if (path == null)
         {
             return emptyVector3;
@@ -258,11 +253,10 @@ public sealed class PPatherController : ControllerBase
     [RateLimit]
     public JsonResult WorldRoute2(float x1, float y1, float z1, float x2, float y2, float z2, int uimap, bool? startindoors = null)
     {
-        service.SetLocations(
-            service.ToWorldZ(uimap, x1, y1, z1, startindoors),
-            service.ToWorldZ(uimap, x2, y2, z2, null));
-
-        Path path = service.DoSearch(eSearch);
+        Vector4 from = service.ToWorldZ(uimap, x1, y1, z1, startindoors);
+        Vector4 to = service.ToWorldZ(uimap, x2, y2, z2, null);
+        Path path = service.DoSearchAtLocations(from, to, eSearch,
+            startIndoors: startindoors, overrideStartIndoors: true);
         if (path == null)
         {
             return emptyVector3;
@@ -294,8 +288,9 @@ public sealed class PPatherController : ControllerBase
     [RateLimit]
     public JsonResult MapToWorldRoute(float x1, float y1, float z1, float x2, float y2, float z2, int uimap)
     {
-        service.SetLocations(service.ToWorld(uimap, x1, y1, z1), service.ToWorld(uimap, x2, y2, z2));
-        Path path = service.DoSearch(eSearch);
+        Vector4 from = service.ToWorld(uimap, x1, y1, z1);
+        Vector4 to = service.ToWorld(uimap, x2, y2, z2);
+        Path path = service.DoSearchAtLocations(from, to, eSearch);
         if (path == null)
         {
             return emptyVector3;
@@ -445,12 +440,12 @@ public sealed class PPatherController : ControllerBase
     [ProducesResponseType(StatusCodes.Status200OK)]
     public JsonResult Stats()
     {
-        NavmeshPathfinder.NavmeshStats stats =
-            service.NavmeshPathfinder?.LastStats ?? default;
+        NavmeshPathQueryResult? latest = service.LatestNavmeshQueryResult;
+        NavmeshPathfinder.NavmeshStats stats = latest?.Stats ?? default;
 
         PPather.Navmesh.CostZones zones =
             service.NavmeshPathfinder?.Zones ?? PPather.Navmesh.CostZones.Empty;
-        NavmeshPathDiagnostic? diagnostic = service.LastNavmeshDiagnostic;
+        NavmeshPathDiagnostic? diagnostic = latest?.Diagnostic;
 
         return new JsonResult(new StatsResponse(
             service.Engine.ToString(),
@@ -460,7 +455,8 @@ public sealed class PPatherController : ControllerBase
             stats.CorridorRadius, stats.Widenings, stats.ResidentTiles,
             stats.Retargeted, stats.RetargetDropYd, stats.StallMemoHit,
             zones.CostChunkCount, zones.BlockedChunkCount,
-            diagnostic?.Reason.ToString(), diagnostic?.StartTile, diagnostic?.EndTile, diagnostic?.AffectedTile));
+            diagnostic?.Reason.ToString(), diagnostic?.StartTile, diagnostic?.EndTile, diagnostic?.AffectedTile,
+            latest?.QueryId, latest is null ? "none" : "global-latest", latest?.RequestedStart, latest?.RequestedEnd));
     }
 
     public sealed record StatsResponse(
@@ -472,7 +468,8 @@ public sealed class PPatherController : ControllerBase
         bool Retargeted, float RetargetDropYd, bool StallMemoHit,
         int PricedChunks, int BlockedChunks,
         string? PathFailureReason, NavmeshTileCoordinate? PathStartTile,
-        NavmeshTileCoordinate? PathEndTile, NavmeshTileCoordinate? PathAffectedTile);
+        NavmeshTileCoordinate? PathEndTile, NavmeshTileCoordinate? PathAffectedTile,
+        Guid? PathQueryId, string PathQuerySnapshotScope, Vector3? PathQueryStart, Vector3? PathQueryEnd);
 
     /// <summary>
     /// Re-reads the authored road / danger zone files for the active continent.

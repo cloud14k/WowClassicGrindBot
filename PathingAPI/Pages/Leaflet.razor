@@ -147,6 +147,7 @@
     int pathColour = 1;
     string name;
     SearchParam parameters;
+    PPatherService.NavmeshPathQueryOverrides? queryOverrides;
 
     System.Threading.Thread searchPathThread;
 
@@ -158,10 +159,10 @@
         }
         parameters = searchParameters;
 
-        // The service is a singleton also driven by the HTTP API; set the
-        // jitter explicitly so this search never reuses a stale request's.
-        pPatherService.PathJitterYards = searchParameters.Jitter;
-        pPatherService.PathJitterSeed = searchParameters.Seed;
+        // The service is a singleton also driven by the HTTP API; keep these
+        // request-specific knobs with the route instead of mutating globals.
+        queryOverrides = new PPatherService.NavmeshPathQueryOverrides(
+            true, searchParameters.Jitter, searchParameters.Seed, false, null);
 
         await DoSearch(searchParameters.SearchType, ((int)searchParameters.SearchType) + 1, searchParameters.SearchType.ToString());
     }
@@ -209,9 +210,8 @@
             await jsRuntime.InvokeVoidAsync("removeMesh", name);
             await jsRuntime.InvokeVoidAsync("removeMesh", "search");
 
-            pPatherService.SetLocations(parameters.From.Location, parameters.To.Location);
-
-            var patherPath = pPatherService.DoSearch(searchType);
+            var patherPath = pPatherService.DoSearchAtLocations(
+                parameters.From.Location, parameters.To.Location, searchType, queryOverrides);
 
             IsDisabled = false;
         }

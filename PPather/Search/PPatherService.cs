@@ -28,6 +28,12 @@ public sealed class PPatherService : IDisposable
     private readonly WorldMapAreaDB worldMapAreaDB;
     private readonly NavmeshBakeOptions bakeOptions;
     private readonly NavmeshQueryOptions queryOptions;
+    private readonly object routeQueryGate = new();
+    private NavmeshPathQueryResult? latestNavmeshQueryResult;
+    private PathingEngine engine = PathingEngine.Navmesh;
+    private float pathJitterYards;
+    private int? pathJitterSeed;
+    private float? pathEdgeMarginYards;
 
     public event Action SearchBegin;
     public event Action<Path> OnPathCreated;
@@ -85,29 +91,55 @@ public sealed class PPatherService : IDisposable
     /// Selects the in-process engine. Runtime-settable so the benchmark can
     /// A/B both engines without a server restart.
     /// </summary>
-    public PathingEngine Engine { get; set; } = PathingEngine.Navmesh;
+    public PathingEngine Engine
+    {
+        get { lock (routeQueryGate) return engine; }
+        set { lock (routeQueryGate) engine = value; }
+    }
 
     public NavmeshPathfinder NavmeshPathfinder => navmeshPathfinder;
 
-    /// <summary>Typed diagnostic associated with the most recent navmesh path query.</summary>
-    public NavmeshPathDiagnostic? LastNavmeshDiagnostic => navmeshPathfinder?.LastDiagnostic;
+    /// <summary>Global latest completed navmesh query snapshot, across all API callers.</summary>
+    public NavmeshPathQueryResult? LatestNavmeshQueryResult => Volatile.Read(ref latestNavmeshQueryResult);
+
+    /// <summary>Compatibility view of the diagnostic in the global latest query snapshot.</summary>
+    public NavmeshPathDiagnostic? LastNavmeshDiagnostic => LatestNavmeshQueryResult?.Diagnostic;
+
+    public readonly record struct NavmeshPathQueryOverrides(
+        bool OverrideJitter,
+        float JitterYards,
+        int? JitterSeed,
+        bool OverrideEdgeMargin,
+        float? EdgeMarginYards);
 
     /// <summary>
     /// Displaces interior waypoints by up to this many yards so repeated trips
     /// over the same route do not retrace an identical line. 0 disables it.
     /// Applied to the next navmesh query.
     /// </summary>
-    public float PathJitterYards { get; set; }
+    public float PathJitterYards
+    {
+        get { lock (routeQueryGate) return pathJitterYards; }
+        set { lock (routeQueryGate) pathJitterYards = value; }
+    }
 
     /// <summary>Seed for <see cref="PathJitterYards"/>; null is non-deterministic.</summary>
-    public int? PathJitterSeed { get; set; }
+    public int? PathJitterSeed
+    {
+        get { lock (routeQueryGate) return pathJitterSeed; }
+        set { lock (routeQueryGate) pathJitterSeed = value; }
+    }
 
     /// <summary>
     /// Per-request edge-margin override in yards. Null uses the engine default
     /// (PPATHER_PATH_EDGE_MARGIN); 0 disables the push for the request.
     /// Applied to the next navmesh query.
     /// </summary>
-    public float? PathEdgeMarginYards { get; set; }
+    public float? PathEdgeMarginYards
+    {
+        get { lock (routeQueryGate) return pathEdgeMarginYards; }
+        set { lock (routeQueryGate) pathEdgeMarginYards = value; }
+    }
 
     /// <summary>
     /// Re-reads the authored road / danger zone files for the active continent.
@@ -280,30 +312,40 @@ public sealed class PPatherService : IDisposable
 
     public void Reset()
     {
-        // A bulk bake holds the tile cache and the geometry world for as long as
-        // it runs - tearing them down underneath it cancels the job. The Leaflet
-        // page calls Reset on every load, so without this a browser refresh
-        // silently kills a multi-hour bake.
-        if (bakeStatus.Running)
+        lock (routeQueryGate)
         {
-            logger.LogInformation("Reset skipped: a navmesh bake is running.");
-            return;
+            // A bulk bake holds the tile cache and the geometry world for as long as
+            // it runs - tearing them down underneath it cancels the job. The Leaflet
+            // page calls Reset on every load, so without this a browser refresh
+            // silently kills a multi-hour bake.
+            if (bakeStatus.Running)
+            {
+                logger.LogInformation("Reset skipped: a navmesh bake is running.");
+                return;
+            }
+
+            navmeshPathfinder?.Dispose();
+            navmeshPathfinder = null;
+            navmeshMapId = -1;
+            navmeshCacheIdentity = null;
+            activeMapId = -1;
+            Volatile.Write(ref latestNavmeshQueryResult, null);
+
+            if (search == null)
+                return;
+
+            search.Clear();
+            search = null;
         }
-
-        navmeshPathfinder?.Dispose();
-        navmeshPathfinder = null;
-        navmeshMapId = -1;
-        navmeshCacheIdentity = null;
-        activeMapId = -1;
-
-        if (search == null)
-            return;
-
-        search.Clear();
-        search = null;
     }
 
     public void Initialise(float mapId)
+    {
+        lock (routeQueryGate)
+            InitialiseCore(mapId);
+    }
+
+    private void InitialiseCore(float mapId)
     {
         if (activeMapId == mapId && (search != null || geometryUnavailable.Contains(mapId)))
         {
@@ -312,6 +354,7 @@ public sealed class PPatherService : IDisposable
 
         if (activeMapId >= 0 && activeMapId != mapId)
         {
+            Volatile.Write(ref latestNavmeshQueryResult, null);
             Reset();
         }
 
@@ -502,29 +545,35 @@ public sealed class PPatherService : IDisposable
 
     public Vector4 ToWorld(int uiMap, float mapX, float mapY, float z = 0)
     {
-        if (!worldMapAreaDB.TryGet(uiMap, out WorldMapArea wma))
-            return Vector4.Zero;
+        lock (routeQueryGate)
+        {
+            if (!worldMapAreaDB.TryGet(uiMap, out WorldMapArea wma))
+                return Vector4.Zero;
 
-        float worldX = wma.ToWorldX(mapY);
-        float worldY = wma.ToWorldY(mapX);
+            float worldX = wma.ToWorldX(mapY);
+            float worldY = wma.ToWorldY(mapX);
 
-        Initialise(wma.MapID);
+            InitialiseCore(wma.MapID);
 
-        return search?.CreateWorldLocation(worldX, worldY, z, wma.MapID, null)
-            ?? NavmeshWorldLocation(worldX, worldY, z, wma.MapID);
+            return search?.CreateWorldLocation(worldX, worldY, z, wma.MapID, null)
+                ?? NavmeshWorldLocation(worldX, worldY, z, wma.MapID);
+        }
     }
 
     public Vector4 ToWorldZ(int uiMap, float x, float y, float z, bool? startIndoors = null)
     {
-        if (!worldMapAreaDB.TryGet(uiMap, out WorldMapArea wma))
-            return Vector4.Zero;
+        lock (routeQueryGate)
+        {
+            if (!worldMapAreaDB.TryGet(uiMap, out WorldMapArea wma))
+                return Vector4.Zero;
 
-        Initialise(wma.MapID);
+            InitialiseCore(wma.MapID);
 
-        lastStartIndoors = startIndoors;
+            lastStartIndoors = startIndoors;
 
-        return search?.CreateWorldLocation(x, y, z, wma.MapID, startIndoors)
-            ?? NavmeshWorldLocation(x, y, z, wma.MapID);
+            return search?.CreateWorldLocation(x, y, z, wma.MapID, startIndoors)
+                ?? NavmeshWorldLocation(x, y, z, wma.MapID);
+        }
     }
 
     /// <summary>
@@ -563,25 +612,48 @@ public sealed class PPatherService : IDisposable
 
     public Path DoSearch(SearchStrategy searchType)
     {
-        SearchBegin?.Invoke();
-        IsSearching = true;
-
-        Path path = Engine == PathingEngine.Navmesh
-            ? NavmeshSearch()
-            : RequireGeometry().DoSearch(searchType);
-
-        IsSearching = false;
-        OnPathCreated?.Invoke(path);
-        return path;
+        lock (routeQueryGate)
+            return DoSearchCore(searchType, null);
     }
 
-    private Path NavmeshSearch()
+    /// <summary>
+    /// Atomically installs a route's locations and searches them. PathingAPI is
+    /// a singleton service used by concurrent requests, so the complete
+    /// location-to-result sequence must share one service-level gate.
+    /// </summary>
+    public Path DoSearchAtLocations(Vector4 from, Vector4 to, SearchStrategy searchType,
+        NavmeshPathQueryOverrides? navmeshOverrides = null,
+        bool? startIndoors = null, bool overrideStartIndoors = false)
+    {
+        lock (routeQueryGate)
+        {
+            SetLocationsCore(from, to);
+            lastStartIndoors = overrideStartIndoors ? startIndoors : null;
+            return DoSearchCore(searchType, navmeshOverrides);
+        }
+    }
+
+    private Path DoSearchCore(SearchStrategy searchType, NavmeshPathQueryOverrides? navmeshOverrides)
+    {
+        SearchBegin?.Invoke();
+        IsSearching = true;
+        try
+        {
+            Path path = Engine == PathingEngine.Navmesh
+                ? NavmeshSearch(navmeshOverrides)
+                : RequireGeometry().DoSearch(searchType);
+            OnPathCreated?.Invoke(path);
+            return path;
+        }
+        finally
+        {
+            IsSearching = false;
+        }
+    }
+
+    private Path NavmeshSearch(NavmeshPathQueryOverrides? overrides)
     {
         EnsureNavmeshPathfinder();
-
-        navmeshPathfinder.JitterYards = PathJitterYards;
-        navmeshPathfinder.JitterSeed = PathJitterSeed;
-        navmeshPathfinder.EdgeMarginYards = PathEdgeMarginYards ?? queryOptions.EdgeMargin;
 
         Vector3 from = activeFrom.AsVector3();
         Vector3 to = activeTarget.AsVector3();
@@ -604,7 +676,18 @@ public sealed class PPatherService : IDisposable
                 ?? NavmeshWorldLocation(to.X, to.Y, 0, activeMapId).AsVector3();
         }
 
-        return navmeshPathfinder.FindPath(from, to, lastStartIndoors);
+        bool overrideJitter = overrides.HasValue && overrides.Value.OverrideJitter;
+        bool overrideEdgeMargin = overrides.HasValue && overrides.Value.OverrideEdgeMargin;
+        float jitterYards = overrideJitter ? overrides!.Value.JitterYards : PathJitterYards;
+        int? jitterSeed = overrideJitter ? overrides!.Value.JitterSeed : PathJitterSeed;
+        float edgeMarginYards = overrideEdgeMargin
+            ? overrides!.Value.EdgeMarginYards ?? queryOptions.EdgeMargin
+            : PathEdgeMarginYards ?? queryOptions.EdgeMargin;
+
+        NavmeshPathQueryResult result = navmeshPathfinder.FindPathWithResult(from, to, lastStartIndoors,
+            new NavmeshPathQueryOptions(jitterYards, jitterSeed, edgeMarginYards));
+        Volatile.Write(ref latestNavmeshQueryResult, result);
+        return result.Path!;
     }
 
     /// <summary>
@@ -1099,7 +1182,16 @@ public sealed class PPatherService : IDisposable
 
     public void SetLocations(Vector4 from, Vector4 to)
     {
-        Initialise(from.W);
+        lock (routeQueryGate)
+        {
+            SetLocationsCore(from, to);
+            lastStartIndoors = null;
+        }
+    }
+
+    private void SetLocationsCore(Vector4 from, Vector4 to)
+    {
+        InitialiseCore(from.W);
 
         activeFrom = from;
         activeTarget = to;

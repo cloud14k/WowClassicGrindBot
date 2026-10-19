@@ -4,6 +4,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
+using System.Threading;
 
 using DotRecast.Core;
 using DotRecast.Detour;
@@ -108,6 +109,14 @@ public sealed class NavmeshPathfinder : IDisposable
     private readonly WowQueryFilter filter;
     private readonly NavmeshEndpointResolver resolver;
     private readonly ForeverNavmeshRuntimeCoverage? runtimeCoverage;
+    // DotRecast query objects, filter state, continuity hints and corridor
+    // retry memory are mutable. Serialize every public query against this one
+    // pathfinder even though the underlying DtNavMesh supports read locks.
+    private readonly object queryGate = new();
+    private NavmeshPathQueryResult? lastQueryResult;
+    private float jitterYards;
+    private int? jitterSeed;
+    private float edgeMarginYards;
 
     // Query knobs, resolved once from NavmeshQueryOptions in the constructor.
     private readonly int corridorTileRadius;
@@ -144,6 +153,9 @@ public sealed class NavmeshPathfinder : IDisposable
     /// <summary>Typed diagnostic for the most recent path query, or null when no failure was recorded.</summary>
     public NavmeshPathDiagnostic? LastDiagnostic { get; private set; }
 
+    /// <summary>Atomic snapshot for the last completed path query on this instance.</summary>
+    public NavmeshPathQueryResult? LastQueryResult => Volatile.Read(ref lastQueryResult);
+
     public NavmeshTileCache Tiles => tiles;
 
     /// <summary>
@@ -152,22 +164,38 @@ public sealed class NavmeshPathfinder : IDisposable
     /// </summary>
     public CostZones Zones
     {
-        get => filter.Zones;
-        set => filter.Zones = value;
+        get
+        {
+            lock (queryGate)
+                return filter.Zones;
+        }
+        set
+        {
+            lock (queryGate)
+                filter.Zones = value;
+        }
     }
 
     /// <summary>
     /// Radius in yards that interior waypoints may be displaced by, to keep
     /// repeated trips from retracing an identical line. 0 disables it.
     /// </summary>
-    public float JitterYards { get; set; }
+    public float JitterYards
+    {
+        get { lock (queryGate) return jitterYards; }
+        set { lock (queryGate) jitterYards = value; }
+    }
 
     /// <summary>
     /// Seed for the displacement. Null draws a fresh non-deterministic seed per
     /// query; a value makes the same route reproduce the same path, which is
     /// what repeatable measurement needs.
     /// </summary>
-    public int? JitterSeed { get; set; }
+    public int? JitterSeed
+    {
+        get { lock (queryGate) return jitterSeed; }
+        set { lock (queryGate) jitterSeed = value; }
+    }
 
     /// <summary>
     /// Query-time edge margin in yards: interior funnel corners closer than
@@ -178,7 +206,11 @@ public sealed class NavmeshPathfinder : IDisposable
     /// hash. Seeded from <see cref="SharedLib.NavmeshQueryOptions.EdgeMargin"/>;
     /// 0 disables. Settable per-query for a one-off override.
     /// </summary>
-    public float EdgeMarginYards { get; set; }
+    public float EdgeMarginYards
+    {
+        get { lock (queryGate) return edgeMarginYards; }
+        set { lock (queryGate) edgeMarginYards = value; }
+    }
 
     public struct NavmeshStats
     {
@@ -214,7 +246,8 @@ public sealed class NavmeshPathfinder : IDisposable
     // tiles (path/height queries) but never bakes, so it needs no game files.
     public NavmeshPathfinder(ILogger logger, ChunkedTriangleCollection? world, string cacheDir,
         NavmeshBakeOptions bake, NavmeshQueryOptions queryOptions, float? minWorldZ = null,
-        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null)
+        ForeverNavmeshRuntimeCoverage? runtimeCoverage = null,
+        int maxResidentTiles = NavmeshTileCache.MaxResidentTiles)
     {
         this.logger = logger;
         this.runtimeCoverage = runtimeCoverage;
@@ -228,7 +261,7 @@ public sealed class NavmeshPathfinder : IDisposable
         stickyCorridorRadius = corridorTileRadius;
 
         tiles = new NavmeshTileCache(logger, world, cacheDir, bake, corridorTileRadius, minWorldZ,
-            runtimeCoverage);
+            runtimeCoverage, maxResidentTiles);
         query = new DtNavMeshQuery(tiles.NavMesh);
         filter = new WowQueryFilter();
         resolver = new NavmeshEndpointResolver(query, filter);
@@ -236,7 +269,8 @@ public sealed class NavmeshPathfinder : IDisposable
 
     public void Dispose()
     {
-        tiles.Dispose();
+        lock (queryGate)
+            tiles.Dispose();
     }
 
     /// <summary>
@@ -247,6 +281,12 @@ public sealed class NavmeshPathfinder : IDisposable
     /// covers the point.
     /// </summary>
     public bool TryGetHeight(float worldX, float worldY, out float z)
+    {
+        lock (queryGate)
+            return TryGetHeightCore(worldX, worldY, out z);
+    }
+
+    private bool TryGetHeightCore(float worldX, float worldY, out float z)
     {
         z = 0f;
         Vector3 wow = new(worldX, worldY, 0f);
@@ -299,6 +339,12 @@ public sealed class NavmeshPathfinder : IDisposable
     /// </summary>
     public bool TrySnapWalkable(Vector3 wowPointHint, out Vector3 wowPoint, out long polyRef)
     {
+        lock (queryGate)
+            return TrySnapWalkableCore(wowPointHint, out wowPoint, out polyRef);
+    }
+
+    private bool TrySnapWalkableCore(Vector3 wowPointHint, out Vector3 wowPoint, out long polyRef)
+    {
         wowPoint = wowPointHint;
         polyRef = 0;
 
@@ -335,7 +381,31 @@ public sealed class NavmeshPathfinder : IDisposable
         return true;
     }
 
-    public Path? FindPath(Vector3 wowFrom, Vector3 wowTo, bool? startIndoors)
+    public Path? FindPath(Vector3 wowFrom, Vector3 wowTo, bool? startIndoors) =>
+        FindPathWithResult(wowFrom, wowTo, startIndoors).Path;
+
+    /// <summary>
+    /// Executes one complete path query while holding the pathfinder's query
+    /// gate and returns the path with the diagnostic and statistics captured
+    /// before another query can mutate shared Detour state.
+    /// </summary>
+    public NavmeshPathQueryResult FindPathWithResult(Vector3 wowFrom, Vector3 wowTo,
+        bool? startIndoors, NavmeshPathQueryOptions? options = null)
+    {
+        lock (queryGate)
+        {
+            NavmeshPathQueryOptions resolvedOptions = options ??
+                new NavmeshPathQueryOptions(jitterYards, jitterSeed, edgeMarginYards);
+            Path? path = FindPathCore(wowFrom, wowTo, startIndoors, resolvedOptions);
+            NavmeshPathQueryResult result = new(Guid.NewGuid(), wowFrom, wowTo,
+                path, LastDiagnostic, LastStats);
+            Volatile.Write(ref lastQueryResult, result);
+            return result;
+        }
+    }
+
+    private Path? FindPathCore(Vector3 wowFrom, Vector3 wowTo, bool? startIndoors,
+        NavmeshPathQueryOptions options)
     {
         LastStats = default;
         LastDiagnostic = null;
@@ -407,22 +477,22 @@ public sealed class NavmeshPathfinder : IDisposable
                 return Fail(NavmeshPathFailureReason.PathUnreachable, startTile, endTile, null);
             }
 
-            if (JitterYards > 0f)
+            if (options.JitterYards > 0f)
             {
-                ApplyJitter(rcPoints, pointRefs, JitterYards, JitterSeed);
+                ApplyJitter(rcPoints, pointRefs, options.JitterYards, options.JitterSeed);
             }
 
             // After jitter so a random displacement can never undo the safety
             // margin; before smoothing so the spline curves through the pushed
             // corners.
-            if (EdgeMarginYards > 0f)
+            if (options.EdgeMarginYards > 0f)
             {
-                ApplyEdgeMargin(rcPoints, pointRefs, EdgeMarginYards);
+                ApplyEdgeMargin(rcPoints, pointRefs, options.EdgeMarginYards);
             }
 
             long t3 = Stopwatch.GetTimestamp();
             List<Vector3> smoothed = CatmullRom.Smooth(rcPoints, pathSpacingYd);
-            ValidateOnMesh(smoothed, EdgeMarginYards);
+            ValidateOnMesh(smoothed, options.EdgeMarginYards);
             LastStats.SmoothMs = Stopwatch.GetElapsedTime(t3).TotalMilliseconds;
             LastStats.PointCount = smoothed.Count;
 
@@ -483,6 +553,9 @@ public sealed class NavmeshPathfinder : IDisposable
         if (startStatus == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage ||
             endStatus == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
             return NavmeshPathFailureReason.OutsideCertifiedCoverage;
+        if (startStatus == NavmeshRuntimeTileStatus.DynamicBakeFailed ||
+            endStatus == NavmeshRuntimeTileStatus.DynamicBakeFailed)
+            return NavmeshPathFailureReason.DynamicBakeFailed;
         return NavmeshPathFailureReason.NoWalkableSurface;
     }
 
@@ -500,6 +573,10 @@ public sealed class NavmeshPathfinder : IDisposable
         if (tiles.GetTileStatus(start.X, start.Z) == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
             return start;
         if (tiles.GetTileStatus(end.X, end.Z) == NavmeshRuntimeTileStatus.OutsideCertifiedCoverage)
+            return end;
+        if (tiles.GetTileStatus(start.X, start.Z) == NavmeshRuntimeTileStatus.DynamicBakeFailed)
+            return start;
+        if (tiles.GetTileStatus(end.X, end.Z) == NavmeshRuntimeTileStatus.DynamicBakeFailed)
             return end;
         return null;
     }

@@ -209,11 +209,10 @@
             clearPath = true;
             await InvokeAsync(StateHasChanged);
 
-            pPatherService.SetLocations(
+            var patherPath = pPatherService.DoSearchAtLocations(
                 IsReversed ? end : start,
-                IsReversed ? start : end);
-
-            var patherPath = pPatherService.DoSearch((SearchStrategy)SearchType);
+                IsReversed ? start : end,
+                (SearchStrategy)SearchType);
 
             IsDisabled = false;
         }

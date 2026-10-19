@@ -261,9 +261,9 @@ public sealed class AnTcpPathServer : BackgroundService
             start = SnapImplausibleZ(mapId, start, "start", remote);
             end = SnapImplausibleZ(mapId, end, "end", remote);
 
-            service.SetLocations(new(start, mapId), new(end, mapId));
             // Fully qualified: System.IO.Path is in scope for the stream code above.
-            PPather.Graph.Path? path = service.DoSearch(Search);
+            PPather.Graph.Path? path = service.DoSearchAtLocations(
+                new(start, mapId), new(end, mapId), Search);
 
             if (path == null || path.locations.Count == 0)
             {

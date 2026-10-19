@@ -129,6 +129,8 @@ public static class NavmeshTileBuilder
         ArgumentNullException.ThrowIfNull(cfg);
         bake ??= new NavmeshBakeOptions();
 
+        ValidateGeometry(geom, dtTileX, dtTileZ);
+
         if (geom.GroundTris.Length == 0 && geom.LiquidTris.Length == 0)
         {
             throw new InvalidDataException($"Tile geometry for ({dtTileX},{dtTileZ}) contains no ground or liquid triangles.");
@@ -255,5 +257,75 @@ public static class NavmeshTileBuilder
             throw new InvalidOperationException($"DotRecast produced {pmesh.npolys} polygons but no Detour mesh data for ({dtTileX},{dtTileZ}).");
         }
         return new NavmeshTileBakeResult(NavmeshTileBakeDisposition.Baked, result, pmesh.npolys);
+    }
+
+    /// <summary>
+    /// Legacy on-demand cache semantics. Before Forever's typed bake result,
+    /// the Classic path returned null for an extracted tile with no ground
+    /// triangles and continued the worker loop, including at coast/ocean edges
+    /// where some ADT chunks cannot be loaded. Keep that behavior at this
+    /// explicitly named dynamic-cache entry point; offline Forever publication
+    /// continues to call <see cref="BakeWithResult(TileGeometry,int,int,NavmeshBakeOptions?)"/>
+    /// and treats missing source geometry as an error.
+    /// </summary>
+    public static NavmeshTileBakeResult BakeLegacyDynamic(TileGeometry geom, int dtTileX, int dtTileZ,
+        NavmeshBakeOptions? bake = null)
+    {
+        ArgumentNullException.ThrowIfNull(geom);
+        ValidateGeometry(geom, dtTileX, dtTileZ);
+
+        if (geom.GroundTris.Length == 0)
+        {
+            return new NavmeshTileBakeResult(NavmeshTileBakeDisposition.NoWalkablePolygons, null, 0);
+        }
+
+        return BakeWithResult(geom, dtTileX, dtTileZ, bake);
+    }
+
+    private static void ValidateGeometry(TileGeometry geom, int dtTileX, int dtTileZ)
+    {
+        ValidateTriangleSet(geom.GroundVerts, geom.GroundTris, "ground", dtTileX, dtTileZ);
+        ValidateTriangleSet(geom.LiquidVerts, geom.LiquidTris, "liquid", dtTileX, dtTileZ);
+        if (geom.LiquidAreas.Length != geom.LiquidTriangleCount)
+        {
+            throw new InvalidDataException(
+                $"Tile geometry for ({dtTileX},{dtTileZ}) has {geom.LiquidTriangleCount} liquid triangles but {geom.LiquidAreas.Length} liquid areas.");
+        }
+
+        if (!float.IsFinite(geom.BMin.X) || !float.IsFinite(geom.BMin.Y) || !float.IsFinite(geom.BMin.Z) ||
+            !float.IsFinite(geom.BMax.X) || !float.IsFinite(geom.BMax.Y) || !float.IsFinite(geom.BMax.Z) ||
+            geom.BMin.X > geom.BMax.X || geom.BMin.Y > geom.BMax.Y || geom.BMin.Z > geom.BMax.Z)
+        {
+            throw new InvalidDataException($"Tile geometry for ({dtTileX},{dtTileZ}) has invalid Recast bounds.");
+        }
+    }
+
+    private static void ValidateTriangleSet(float[] vertices, int[] triangles, string name, int dtTileX, int dtTileZ)
+    {
+        if (vertices.Length % 3 != 0 || triangles.Length % 3 != 0 ||
+            (vertices.Length == 0) != (triangles.Length == 0))
+        {
+            throw new InvalidDataException(
+                $"Tile geometry for ({dtTileX},{dtTileZ}) has malformed {name} vertex/triangle arrays.");
+        }
+
+        foreach (float vertex in vertices)
+        {
+            if (!float.IsFinite(vertex))
+            {
+                throw new InvalidDataException(
+                    $"Tile geometry for ({dtTileX},{dtTileZ}) has a non-finite {name} vertex.");
+            }
+        }
+
+        int vertexCount = vertices.Length / 3;
+        foreach (int index in triangles)
+        {
+            if ((uint)index >= (uint)vertexCount)
+            {
+                throw new InvalidDataException(
+                    $"Tile geometry for ({dtTileX},{dtTileZ}) has an out-of-range {name} triangle index {index} (vertex count {vertexCount}).");
+            }
+        }
     }
 }
