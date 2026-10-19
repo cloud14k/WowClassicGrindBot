@@ -714,17 +714,31 @@ public static class ForeverGeometryBatchRunner
     }
 
     /// <summary>
-    /// Turns a selected batch into a continent manifest only after an independent
-    /// mapextractor --list-tiles log from the matching Forever client proves exact
-    /// WDT ADT coverage and every geometry-contributing Detour tile is verified.
-    /// This reads only the supplied log and batch artifacts; it does not open CASC.
+    /// Turns a selected batch into a continent manifest only after this process
+    /// runs the pinned mapextractor against the matching Forever CASC client and
+    /// verifies the complete WDT listing result.
     /// </summary>
     public static ForeverGeometryPublicationResult SealForPublication(string stateFile,
-        string clientRoot, string mapExtractorTileListLog)
+        string clientRoot, string mapExtractorDirectory, string locale = "zhCN") =>
+        SealForPublicationCore(stateFile, clientRoot, mapExtractorDirectory, locale, null, null);
+
+    internal static ForeverGeometryPublicationResult SealForPublicationForTest(string stateFile,
+        string clientRoot, string mapExtractorDirectory, string locale,
+        WdtEnumeratorProcessFactory processFactory, TimeSpan? timeout = null,
+        Action<string>? afterManifestWriteForTest = null) =>
+        SealForPublicationCore(stateFile, clientRoot, mapExtractorDirectory, locale,
+            processFactory ?? throw new ArgumentNullException(nameof(processFactory)), timeout,
+            afterManifestWriteForTest);
+
+    private static ForeverGeometryPublicationResult SealForPublicationCore(string stateFile,
+        string clientRoot, string mapExtractorDirectory, string locale,
+        WdtEnumeratorProcessFactory? processFactory, TimeSpan? timeout,
+        Action<string>? afterManifestWriteForTest = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(stateFile);
         ArgumentException.ThrowIfNullOrWhiteSpace(clientRoot);
-        ArgumentException.ThrowIfNullOrWhiteSpace(mapExtractorTileListLog);
+        ArgumentException.ThrowIfNullOrWhiteSpace(mapExtractorDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(locale);
 
         _ = VerifyState(stateFile);
         string statePath = Path.GetFullPath(stateFile);
@@ -743,9 +757,10 @@ public static class ForeverGeometryBatchRunner
                 $"{state.ClientProduct} Build {state.ClientBuild}.");
         }
 
-        string tileListLogPath = Path.GetFullPath(mapExtractorTileListLog);
-        HashSet<(int X, int Y)> wdtAdts = ParseMapExtractorTileList(tileListLogPath,
-            state.MapId, client.Build, clientRoot);
+        ForeverWdtEnumerationResult wdtEnumeration = ForeverWdtTileEnumerator.Enumerate(
+            clientRoot, mapExtractorDirectory, client.Product, client.Build, state.MapId, locale,
+            state.DnmOutputDirectory, processFactory, timeout);
+        HashSet<(int X, int Y)> wdtAdts = wdtEnumeration.Adts;
         (int X, int Y)[] requestedAdts = state.RequestedAdts
             .Select(static pair => (pair[0], pair[1])).ToArray();
         HashSet<(int X, int Y)> requestedSet = requestedAdts.ToHashSet();
@@ -804,23 +819,17 @@ public static class ForeverGeometryBatchRunner
         byte[] originalManifest = File.ReadAllBytes(manifestPath);
         JsonObject manifest = JsonNode.Parse(originalManifest)?.AsObject()
             ?? throw new InvalidDataException($"Selected batch manifest is malformed: {manifestPath}");
-        string tileListSha256 = HashFile(tileListLogPath);
         (int X, int Y)[] orderedAdts = wdtAdts.OrderBy(static item => item.Y).ThenBy(static item => item.X).ToArray();
         (int X, int Z)[] orderedTiles = requestedTiles.OrderBy(static item => item.X).ThenBy(static item => item.Z).ToArray();
-        string evidencePath = Path.Combine(dnmRoot, ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath
-            .Replace('/', Path.DirectorySeparatorChar));
-        byte[]? originalEvidence = File.Exists(evidencePath) ? File.ReadAllBytes(evidencePath) : null;
-        Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
-        WriteWdtCoverageEvidence(evidencePath, client.Product, client.Build, state.MapId, orderedAdts,
-            Path.GetFileName(tileListLogPath), tileListSha256);
-        string evidenceSha256 = HashFile(evidencePath);
+        (string evidenceRelativePath, string evidenceSha256) = WriteWdtCoverageEvidence(
+            dnmRoot, wdtEnumeration, orderedAdts);
         manifest["scope"] = "continent";
         manifest["complete_for_continent"] = true;
         manifest["publishable_as_continent_cache"] = true;
         manifest["coverage_provenance"] = "wdt_tile_list";
         manifest["coverage"] = new JsonObject
         {
-            ["wdt_tile_list_file"] = ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath,
+            ["wdt_tile_list_file"] = evidenceRelativePath,
             ["wdt_tile_list_sha256"] = evidenceSha256,
             ["wdt_client_product"] = client.Product,
             ["wdt_client_build"] = client.Build,
@@ -835,6 +844,7 @@ public static class ForeverGeometryBatchRunner
         WriteTextAtomically(manifestPath, manifest.ToJsonString(JsonOptions));
         try
         {
+            afterManifestWriteForTest?.Invoke(manifestPath);
             ForeverNavmeshCacheManifest.ValidateForPublication(dnmRoot, client.Product, client.Build,
                 state.SettingsHash!, state.MapId, state.Continent, orderedAdts, orderedTiles);
             ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, client.Product, client.Build,
@@ -842,17 +852,7 @@ public static class ForeverGeometryBatchRunner
         }
         catch
         {
-            File.WriteAllBytes(manifestPath + ".restore", originalManifest);
-            File.Move(manifestPath + ".restore", manifestPath, overwrite: true);
-            if (originalEvidence is null)
-            {
-                if (File.Exists(evidencePath)) File.Delete(evidencePath);
-            }
-            else
-            {
-                File.WriteAllBytes(evidencePath + ".restore", originalEvidence);
-                File.Move(evidencePath + ".restore", evidencePath, overwrite: true);
-            }
+            WriteBytesAtomically(manifestPath, originalManifest);
             throw;
         }
 
@@ -860,91 +860,47 @@ public static class ForeverGeometryBatchRunner
             orderedAdts.Length, orderedTiles.Length);
     }
 
-    private static void WriteWdtCoverageEvidence(string path, string product, int build, int mapId,
-        IReadOnlyList<(int X, int Y)> adts, string sourceLogFile, string sourceLogSha256)
+    private static (string RelativePath, string Sha256) WriteWdtCoverageEvidence(string cacheDirectory,
+        ForeverWdtEnumerationResult enumeration, IReadOnlyList<(int X, int Y)> adts)
     {
+        (string nativePath, string nativeSha) = WriteContentAddressedEvidence(cacheDirectory,
+            "wdt-native-", ".tilelist", enumeration.NativeTileList);
+        (string stdoutPath, string stdoutSha) = WriteContentAddressedEvidence(cacheDirectory,
+            "wdt-stdout-", ".txt", Encoding.UTF8.GetBytes(enumeration.Stdout));
+        (string stderrPath, string stderrSha) = WriteContentAddressedEvidence(cacheDirectory,
+            "wdt-stderr-", ".txt", Encoding.UTF8.GetBytes(enumeration.Stderr));
         var proof = new
         {
             format = ForeverNavmeshCacheManifest.WdtCoverageEvidenceFormat,
-            client_product = product,
-            client_build = build,
-            map_id = mapId,
-            source = "mapextractor --list-tiles",
-            source_log_file = sourceLogFile,
-            source_log_sha256 = sourceLogSha256,
+            client_product = enumeration.Product,
+            client_build = enumeration.Build,
+            map_id = enumeration.MapId,
+            source = "mapextractor --list-tiles process",
+            tool_source_repository = ForeverWdtTileEnumerator.SourceRepository,
+            tool_source_commit = ForeverWdtTileEnumerator.SourceCommit,
+            tool_patch_sha256 = ForeverWdtTileEnumerator.ExpectedPatchSha256,
+            mapextractor_sha256 = enumeration.ExecutableSha256,
+            locale = enumeration.Locale,
+            client_root = enumeration.ClientRoot,
+            casc_data_root = enumeration.DataRoot,
+            arguments = enumeration.Arguments,
+            process_exit_code = 0,
+            process_timed_out = false,
+            wdt_slots_visited = ForeverWdtTileEnumerator.ExpectedWdtSlots,
+            adt_count = adts.Count,
+            native_tile_list_file = nativePath,
+            native_tile_list_sha256 = nativeSha,
+            stdout_file = stdoutPath,
+            stdout_sha256 = stdoutSha,
+            stderr_file = stderrPath,
+            stderr_sha256 = stderrSha,
             adt_xy = adts.Select(static adt => new[] { adt.X, adt.Y }).ToArray(),
         };
-        WriteTextAtomically(path, JsonSerializer.Serialize(proof, JsonOptions));
-    }
-
-    private static HashSet<(int X, int Y)> ParseMapExtractorTileList(string logPath, int mapId, int build,
-        string clientRoot)
-    {
-        if (!File.Exists(logPath))
-        {
-            throw new FileNotFoundException("The independent mapextractor --list-tiles log does not exist.", logPath);
-        }
-
-        string[] lines = File.ReadAllLines(logPath);
-        string[] buildMarkers = lines.Select(static line => line.Trim())
-            .Where(static line => line.StartsWith("Detected client build:", StringComparison.Ordinal))
-            .ToArray();
-        string[] mapMarkers = lines.Select(static line => line.Trim())
-            .Where(static line => line.StartsWith("Restricted extraction to MapID ", StringComparison.Ordinal))
-            .ToArray();
-        string[] storageMarkers = lines.Select(static line => line.Trim())
-            .Where(static line => line.StartsWith("Opened casc storage", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
-        string expectedBuildMarker = $"Detected client build: {build}";
-        string expectedMapMarker = $"Restricted extraction to MapID {mapId}.";
-        string expectedDataPath = Path.GetFullPath(Path.Combine(clientRoot, "Data"))
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string? listedDataPath = storageMarkers.Length == 1
-            ? ExtractOpenedStoragePath(storageMarkers[0])
-            : null;
-        if (buildMarkers.Length != 1 || !string.Equals(buildMarkers[0], expectedBuildMarker, StringComparison.Ordinal) ||
-            mapMarkers.Length != 1 || !string.Equals(mapMarkers[0], expectedMapMarker, StringComparison.Ordinal) ||
-            listedDataPath is null ||
-            !string.Equals(Path.GetFullPath(listedDataPath).TrimEnd(Path.DirectorySeparatorChar,
-                Path.AltDirectorySeparatorChar), expectedDataPath, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException("The WDT tile-list log must contain exactly one matching CASC Data root, detected Build, and restricted MapID marker.");
-        }
-
-        HashSet<(int X, int Y)> result = [];
-        foreach (string line in lines)
-        {
-            string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (fields.Length == 0 || !fields[0].Equals("tile", StringComparison.OrdinalIgnoreCase)) continue;
-            if (fields.Length != 4 || !int.TryParse(fields[1], out int listedMap) ||
-                !int.TryParse(fields[2], out int x) || !int.TryParse(fields[3], out int y) ||
-                listedMap != mapId || x is < 0 or >= 64 || y is < 0 or >= 64 || !result.Add((x, y)))
-            {
-                throw new InvalidDataException($"The WDT tile-list log has an invalid, duplicate, or unexpected tile line: {line}");
-            }
-        }
-
-        if (result.Count == 0)
-        {
-            throw new InvalidDataException("The WDT tile-list log contains no tile records.");
-        }
-
-        return result;
-    }
-
-    private static string? ExtractOpenedStoragePath(string line)
-    {
-        const string Prefix = "Opened casc storage ";
-        string value = line.Trim();
-        if (!value.StartsWith(Prefix, StringComparison.OrdinalIgnoreCase)) return null;
-        value = value[Prefix.Length..].Trim();
-        if (value.Length >= 2 && ((value[0] == '\'' && value[^1] == '\'') ||
-                                  (value[0] == '"' && value[^1] == '"')))
-        {
-            value = value[1..^1];
-        }
-
-        return string.IsNullOrWhiteSpace(value) ? null : value;
+        byte[] proofBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(proof, JsonOptions));
+        string proofSha = Convert.ToHexString(SHA256.HashData(proofBytes)).ToLowerInvariant();
+        string relativePath = $"coverage/wdt-proof-{proofSha}.json";
+        WriteImmutableEvidence(cacheDirectory, relativePath, proofBytes, proofSha);
+        return (relativePath, proofSha);
     }
 
     private static string FormatAdtCoordinates(IEnumerable<(int X, int Y)> coordinates)
@@ -1005,11 +961,78 @@ public static class ForeverGeometryBatchRunner
         return result;
     }
 
-    private static void WriteTextAtomically(string path, string value)
+    private static (string RelativePath, string Sha256) WriteContentAddressedEvidence(
+        string cacheDirectory, string prefix, string suffix, byte[] bytes)
     {
-        string temporary = path + ".partial";
-        File.WriteAllText(temporary, value);
-        File.Move(temporary, path, overwrite: true);
+        string sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string relativePath = $"coverage/{prefix}{sha256}{suffix}";
+        WriteImmutableEvidence(cacheDirectory, relativePath, bytes, sha256);
+        return (relativePath, sha256);
+    }
+
+    private static void WriteImmutableEvidence(string cacheDirectory, string relativePath,
+        byte[] bytes, string expectedSha256)
+    {
+        string cacheRoot = Path.GetFullPath(cacheDirectory);
+        if (Path.IsPathRooted(relativePath) || relativePath.Contains('\\'))
+        {
+            throw new InvalidDataException($"WDT evidence path is not a canonical relative path: {relativePath}");
+        }
+        string fullPath = Path.GetFullPath(Path.Combine(cacheRoot,
+            relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        if (!IsSameOrChild(fullPath, cacheRoot))
+        {
+            throw new InvalidDataException($"WDT evidence path escapes the cache directory: {relativePath}");
+        }
+
+        string directory = Path.GetDirectoryName(fullPath)!;
+        Directory.CreateDirectory(directory);
+        if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"WDT evidence directory is a reparse point: {directory}");
+        }
+        if (File.Exists(fullPath))
+        {
+            if (HashFile(fullPath).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase)) return;
+            throw new InvalidDataException($"Content-addressed WDT evidence path already contains different data: {fullPath}");
+        }
+
+        string temporary = fullPath + "." + Guid.NewGuid().ToString("N") + ".partial";
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            try
+            {
+                File.Move(temporary, fullPath, overwrite: false);
+            }
+            catch (IOException) when (File.Exists(fullPath) &&
+                                     HashFile(fullPath).Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Delete(temporary);
+            }
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
+
+    private static void WriteTextAtomically(string path, string value) =>
+        WriteBytesAtomically(path, Encoding.UTF8.GetBytes(value));
+
+    private static void WriteBytesAtomically(string path, byte[] bytes)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".partial";
+        try
+        {
+            File.WriteAllBytes(temporary, bytes);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     private static BatchState CreateState(ForeverGeometryBatchRequest request, string inputRoot,

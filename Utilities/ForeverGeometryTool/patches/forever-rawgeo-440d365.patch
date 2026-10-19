@@ -1,5 +1,5 @@
 diff --git a/dep/CascLib/src/overwatch/aes.h b/dep/CascLib/src/overwatch/aes.h
-index f51406f..15e0b09 100644
+index f51406f8..15e0b09a 100644
 --- a/dep/CascLib/src/overwatch/aes.h
 +++ b/dep/CascLib/src/overwatch/aes.h
 @@ -18,6 +18,10 @@ extern "C" {
@@ -14,7 +14,7 @@ index f51406f..15e0b09 100644
   * Because array size can't be a const in C, the following two are macros.
   * Both sizes are in bytes.
 diff --git a/dep/boost/CMakeLists.txt b/dep/boost/CMakeLists.txt
-index 34f4750..3e715de 100644
+index 34f4750b..3e715de2 100644
 --- a/dep/boost/CMakeLists.txt
 +++ b/dep/boost/CMakeLists.txt
 @@ -44,16 +44,18 @@ else()
@@ -41,7 +41,7 @@ index 34f4750..3e715de 100644
  if(NOT Boost_FOUND)
    if(NOT DEFINED ENV{BOOST_ROOT} AND NOT DEFINED Boost_DIR AND NOT DEFINED BOOST_ROOT AND NOT DEFINED BOOSTROOT)
 diff --git a/dep/openssl/CMakeLists.txt b/dep/openssl/CMakeLists.txt
-index cd2706e..6420705 100644
+index cd2706ed..6420705d 100644
 --- a/dep/openssl/CMakeLists.txt
 +++ b/dep/openssl/CMakeLists.txt
 @@ -19,3 +19,9 @@ target_link_libraries(openssl
@@ -55,7 +55,7 @@ index cd2706e..6420705 100644
 +  target_link_libraries(openssl INTERFACE zlib)
 +endif()
 diff --git a/src/common/mmaps_common/Generator/TerrainBuilder.cpp b/src/common/mmaps_common/Generator/TerrainBuilder.cpp
-index 449a5cb..9e5b824 100644
+index 449a5cb7..9e5b824d 100644
 --- a/src/common/mmaps_common/Generator/TerrainBuilder.cpp
 +++ b/src/common/mmaps_common/Generator/TerrainBuilder.cpp
 @@ -616,8 +616,14 @@ namespace MMAP
@@ -74,7 +74,7 @@ index 449a5cb..9e5b824 100644
              // now handle liquid data
              VMAP::WmoLiquid const* liquid = it->GetLiquid();
 diff --git a/src/common/mmaps_common/Generator/TerrainBuilder.h b/src/common/mmaps_common/Generator/TerrainBuilder.h
-index a16d166..d7ec391 100644
+index a16d1669..d7ec3919 100644
 --- a/src/common/mmaps_common/Generator/TerrainBuilder.h
 +++ b/src/common/mmaps_common/Generator/TerrainBuilder.h
 @@ -20,6 +20,7 @@
@@ -97,7 +97,7 @@ index a16d166..d7ec391 100644
          std::vector<int> liquidTris;
          std::vector<uint8> liquidType;
 diff --git a/src/common/mmaps_common/Generator/TileBuilder.cpp b/src/common/mmaps_common/Generator/TileBuilder.cpp
-index 31ec90a..04249b8 100644
+index 31ec90a8..04249b8f 100644
 --- a/src/common/mmaps_common/Generator/TileBuilder.cpp
 +++ b/src/common/mmaps_common/Generator/TileBuilder.cpp
 @@ -23,9 +23,143 @@
@@ -282,7 +282,7 @@ index 31ec90a..04249b8 100644
          TerrainBuilder::cleanVertices(meshData.solidVerts, meshData.solidTris);
          TerrainBuilder::cleanVertices(meshData.liquidVerts, meshData.liquidTris);
 diff --git a/src/tools/map_extractor/System.cpp b/src/tools/map_extractor/System.cpp
-index 884e32f..1334255 100644
+index 884e32f1..042baa76 100644
 --- a/src/tools/map_extractor/System.cpp
 +++ b/src/tools/map_extractor/System.cpp
 @@ -83,6 +83,10 @@ std::set<uint32> CameraFileDataIds;
@@ -352,7 +352,7 @@ index 884e32f..1334255 100644
  }
  
  void TryLoadDB2(char const* name, DB2CascFileSource* source, DB2FileLoader* db2, DB2FileLoadInfo const* loadInfo)
-@@ -1088,6 +1127,38 @@ void ExtractMaps(uint32 build)
+@@ -1088,6 +1127,94 @@ void ExtractMaps(uint32 build)
  
      ReadMapDBC();
  
@@ -369,29 +369,85 @@ index 884e32f..1334255 100644
 +
 +    if (CONF_ListTiles)
 +    {
-+        for (MapEntry const& map : map_ids)
++        if (map_ids.size() != 1)
 +        {
-+            ChunkedFile wdt;
-+            if (!wdt.loadFile(CascStorage, map.WdtFileDataId,
-+                              Trinity::StringFormat("WDT for map {}", map.Id), false))
-+                continue;
-+
-+            FileChunk const* main = wdt.GetChunk("MAIN");
-+            if (!main)
-+                continue;
-+
-+            for (uint32 y = 0; y < WDT_MAP_SIZE; ++y)
-+                for (uint32 x = 0; x < WDT_MAP_SIZE; ++x)
-+                    if (main->As<wdt_MAIN>()->adt_list[y][x].flag & 0x1)
-+                        printf("tile\t%u\t%u\t%u\n", map.Id, x, y);
++            printf("FATAL: WDT listing requires exactly one selected MapID.\n");
++            std::exit(1);
 +        }
++
++        MapEntry const& map = map_ids.front();
++        ChunkedFile wdt;
++        if (!wdt.loadFile(CascStorage, map.WdtFileDataId,
++                          Trinity::StringFormat("WDT for map {}", map.Id), false))
++        {
++            printf("FATAL: failed to load WDT for MapID %u.\n", map.Id);
++            std::exit(1);
++        }
++
++        FileChunk const* main = wdt.GetChunk("MAIN");
++        if (!main || main->size != sizeof(wdt_MAIN) - 8)
++        {
++            printf("FATAL: MapID %u WDT has no complete 64x64 MAIN chunk.\n", map.Id);
++            std::exit(1);
++        }
++
++        CreateDir(output_path / "maps");
++        std::bitset<WDT_MAP_SIZE * WDT_MAP_SIZE> existingTiles;
++        uint32 visited = 0;
++        uint32 tileCount = 0;
++        for (uint32 y = 0; y < WDT_MAP_SIZE; ++y)
++        {
++            for (uint32 x = 0; x < WDT_MAP_SIZE; ++x)
++            {
++                ++visited;
++                bool present = (main->As<wdt_MAIN>()->adt_list[y][x].flag & 0x1) != 0;
++                existingTiles[y * WDT_MAP_SIZE + x] = present;
++                if (present)
++                {
++                    ++tileCount;
++                    printf("tile\t%u\t%u\t%u\n", map.Id, x, y);
++                }
++            }
++        }
++
++        if (visited != WDT_MAP_SIZE * WDT_MAP_SIZE || tileCount == 0)
++        {
++            printf("FATAL: MapID %u WDT enumeration was incomplete or contained no ADTs.\n", map.Id);
++            std::exit(1);
++        }
++
++        std::string tileListPath = Trinity::StringFormat("{}/maps/{:04}.tilelist", output_path.string(), map.Id);
++        std::string temporaryPath = tileListPath + ".partial";
++        FILE* tileList = fopen(temporaryPath.c_str(), "wb");
++        if (!tileList)
++        {
++            printf("FATAL: cannot create WDT tile-list output '%s'.\n", temporaryPath.c_str());
++            std::exit(1);
++        }
++
++        std::string const bits = existingTiles.to_string();
++        bool writeSucceeded = fwrite(MapMagic.data(), 1, MapMagic.size(), tileList) == MapMagic.size() &&
++            fwrite(&MapVersionMagic, 1, sizeof(MapVersionMagic), tileList) == sizeof(MapVersionMagic) &&
++            fwrite(&build, 1, sizeof(build), tileList) == sizeof(build) &&
++            fwrite(bits.data(), 1, bits.size(), tileList) == bits.size();
++        if (fclose(tileList) != 0)
++            writeSucceeded = false;
++        if (!writeSucceeded || std::rename(temporaryPath.c_str(), tileListPath.c_str()) != 0)
++        {
++            std::remove(temporaryPath.c_str());
++            printf("FATAL: failed to finalize WDT tile-list output '%s'.\n", tileListPath.c_str());
++            std::exit(1);
++        }
++
++        printf("wdt-enumeration-complete map=%u build=%u visited=%u tiles=%u\n",
++            map.Id, build, visited, tileCount);
 +        return;
 +    }
 +
      ReadLiquidMaterialTable();
      ReadLiquidObjectTable();
      ReadLiquidTypeTable();
-@@ -1101,6 +1172,7 @@ void ExtractMaps(uint32 build)
+@@ -1101,6 +1228,7 @@ void ExtractMaps(uint32 build)
          // Loadup map grid data
          ChunkedFile wdt;
          std::bitset<(WDT_MAP_SIZE) * (WDT_MAP_SIZE)> existingTiles;
@@ -399,7 +455,7 @@ index 884e32f..1334255 100644
          if (wdt.loadFile(CascStorage, map_ids[z].WdtFileDataId, Trinity::StringFormat("WDT for map {}", map_ids[z].Id), false))
          {
              FileChunk const* mphd = wdt.GetChunk("MPHD");
-@@ -1110,9 +1182,13 @@ void ExtractMaps(uint32 build)
+@@ -1110,9 +1238,13 @@ void ExtractMaps(uint32 build)
              {
                  for (uint32 x = 0; x < WDT_MAP_SIZE; ++x)
                  {
@@ -413,7 +469,7 @@ index 884e32f..1334255 100644
                      outputFileName = Trinity::StringFormat("{}/maps/{:04}_{:02}_{:02}.map", output_path.string(), map_ids[z].Id, y, x);
                      bool ignoreDeepWater = IsDeepWaterIgnored(map_ids[z].Id, y, x);
                      if (mphd && mphd->As<wdt_MPHD>()->flags & 0x200)
-@@ -1132,6 +1208,12 @@ void ExtractMaps(uint32 build)
+@@ -1132,6 +1264,12 @@ void ExtractMaps(uint32 build)
              }
          }
  
@@ -426,8 +482,24 @@ index 884e32f..1334255 100644
          if (auto tileList = Trinity::make_unique_ptr_with_deleter<&::fclose>(fopen(Trinity::StringFormat("{}/maps/{:04}.tilelist", output_path.string(), map_ids[z].Id).c_str(), "wb")))
          {
              fwrite(MapMagic.data(), 1, MapMagic.size(), tileList.get());
+@@ -1411,1 +1549,3 @@ bool OpenCascStorage(int locale)
++        printf("Opened casc storage '%s' product %s locale %s\n", storage_dir.string().c_str(), CONF_Product, localeNames[locale]);
++
+         return true;
+@@ -1551,3 +1691,3 @@ int main(int argc, char * arg[])
+         printf("No locales detected\n");
+-        return 0;
++        return CONF_ListTiles ? 1 : 0;
+     }
+@@ -1570,3 +1710,5 @@ int main(int argc, char * arg[])
+     {
+-        OpenCascStorage(firstInstalledLocale);
++        bool storageOpened = OpenCascStorage(firstInstalledLocale);
++        if (CONF_ListTiles && !storageOpened)
++            return 1;
+         ExtractMaps(build);
 diff --git a/src/tools/vmap4_extractor/vmapexport.cpp b/src/tools/vmap4_extractor/vmapexport.cpp
-index d9df06d..44e2944 100644
+index d9df06dd..44e2944e 100644
 --- a/src/tools/vmap4_extractor/vmapexport.cpp
 +++ b/src/tools/vmap4_extractor/vmapexport.cpp
 @@ -78,6 +78,9 @@ char const* CascRegion = "eu";
@@ -567,7 +639,7 @@ index d9df06d..44e2944 100644
      if (!success)
      {
 diff --git a/src/tools/vmap4_extractor/wmo.cpp b/src/tools/vmap4_extractor/wmo.cpp
-index be86f99..6f261db 100644
+index be86f99f..6f261db0 100644
 --- a/src/tools/vmap4_extractor/wmo.cpp
 +++ b/src/tools/vmap4_extractor/wmo.cpp
 @@ -37,6 +37,9 @@ WMORoot::WMORoot(std::string const& filename)
@@ -659,7 +731,7 @@ index be86f99..6f261db 100644
  
          // assign new vertex index numbers
 diff --git a/src/tools/vmap4_extractor/wmo.h b/src/tools/vmap4_extractor/wmo.h
-index 9bec54d..e832866 100644
+index 9bec54d0..e8328660 100644
 --- a/src/tools/vmap4_extractor/wmo.h
 +++ b/src/tools/vmap4_extractor/wmo.h
 @@ -20,11 +20,18 @@

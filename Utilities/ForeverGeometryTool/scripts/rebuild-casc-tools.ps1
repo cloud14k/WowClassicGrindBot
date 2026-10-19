@@ -134,4 +134,16 @@ $binDirectory = Join-Path $BuildDirectory 'bin\Release'
 foreach ($exe in 'mapextractor.exe','vmap4extractor.exe','vmap4assembler.exe','mmaps_generator.exe') {
     if (-not (Test-Path (Join-Path $binDirectory $exe))) { throw "Build did not produce $exe." }
 }
+$mapExtractorPath = Join-Path $binDirectory 'mapextractor.exe'
+$provenance = [ordered]@{
+    format = 'wow-forever-casc-tools-v1'
+    source_repository = $repositoryUrl
+    source_commit = $expectedCommit
+    patch_sha256 = (Get-FileHash -LiteralPath $patchPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    mapextractor_sha256 = (Get-FileHash -LiteralPath $mapExtractorPath -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$provenancePath = Join-Path $binDirectory 'forever-casc-tools.json'
+$provenanceJson = $provenance | ConvertTo-Json -Depth 4
+[System.IO.File]::WriteAllText($provenancePath, $provenanceJson,
+    [System.Text.UTF8Encoding]::new($false))
 Write-Host "Built the four scoped extraction tools in $binDirectory"

@@ -1,5 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Numerics;
@@ -26,6 +29,8 @@ internal static class P45GeometryRegression
         Directory.CreateDirectory(testOutputRoot);
         string root = Path.Combine(testOutputRoot, $"wowclassicgrindbot-p45-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
+
+        RunCoverageBoundaryRegression(root);
 
         string leftPath = WriteFixture(root, "adt33_46.rawgeo.json", 33, 46, 70094, 100f, false);
         string rightPath = WriteFixture(root, "adt34_46.rawgeo.json", 34, 46, 70094, 100f, false);
@@ -175,8 +180,7 @@ internal static class P45GeometryRegression
             "The runtime accepted a continent marker without a hashed WDT tile-list proof.");
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
-        string evidencePath = Path.Combine(validDir, ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath
-            .Replace('/', Path.DirectorySeparatorChar));
+        string evidencePath = ReadCoverageProofPath(validDir);
         byte[] completeEvidence = File.ReadAllBytes(evidencePath);
         File.Delete(evidencePath);
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
@@ -190,6 +194,39 @@ internal static class P45GeometryRegression
             "The runtime accepted modified WDT evidence without a matching hash.");
         File.WriteAllBytes(evidencePath, completeEvidence);
 
+        JsonObject validProof = JsonNode.Parse(completeEvidence)!.AsObject();
+        string nativeRelative = validProof["native_tile_list_file"]!.GetValue<string>();
+        string nativePath = Path.Combine(validDir, nativeRelative.Replace('/', Path.DirectorySeparatorChar));
+        byte[] validNativeList = File.ReadAllBytes(nativePath);
+        File.WriteAllBytes(nativePath, [.. validNativeList, 0x20]);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a modified native WDT .tilelist.");
+        File.WriteAllBytes(nativePath, validNativeList);
+
+        byte[] mismatchedNativeList = [.. validNativeList];
+        mismatchedNativeList[12 + ForeverWdtTileList.TileCount - 1] = (byte)'0';
+        (string mismatchedNativePath, string mismatchedNativeHash) = WriteCoverageBlob(validDir,
+            ForeverNavmeshCacheManifest.WdtNativeTileListPathPrefix, ".tilelist", mismatchedNativeList);
+        JsonObject mismatchedNativeProof = JsonNode.Parse(completeEvidence)!.AsObject();
+        mismatchedNativeProof["native_tile_list_file"] = mismatchedNativePath;
+        mismatchedNativeProof["native_tile_list_sha256"] = mismatchedNativeHash;
+        JsonObject mismatchedNativeManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, mismatchedNativeProof, mismatchedNativeManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a validly hashed native WDT list whose ADT set differs from the process proof.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject legacyProof = JsonNode.Parse(completeEvidence)!.AsObject();
+        legacyProof["format"] = "wow-forever-wdt-coverage-v1";
+        JsonObject legacyManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, legacyProof, legacyManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime upgraded an external-log v1 coverage proof to a trusted v2 process proof.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
         JsonObject changedEvidenceHashManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
         changedEvidenceHashManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] = new string('c', 64);
         File.WriteAllText(continentManifestPath, changedEvidenceHashManifest.ToJsonString());
@@ -200,28 +237,20 @@ internal static class P45GeometryRegression
 
         JsonObject wrongBuildEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
         wrongBuildEvidence["client_build"] = build + 1;
-        File.WriteAllText(evidencePath, wrongBuildEvidence.ToJsonString());
         JsonObject wrongBuildManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
-        wrongBuildManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
-            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
-        File.WriteAllText(continentManifestPath, wrongBuildManifest.ToJsonString());
+        WriteCoverageProofVariant(validDir, wrongBuildEvidence, wrongBuildManifest);
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
                 settingsHash, mapId, continent),
             "The runtime accepted WDT evidence from a different Build when its file hash was updated.");
-        File.WriteAllBytes(evidencePath, completeEvidence);
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
         JsonObject wrongMapEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
         wrongMapEvidence["map_id"] = mapId + 1;
-        File.WriteAllText(evidencePath, wrongMapEvidence.ToJsonString());
         JsonObject wrongMapManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
-        wrongMapManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
-            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
-        File.WriteAllText(continentManifestPath, wrongMapManifest.ToJsonString());
+        WriteCoverageProofVariant(validDir, wrongMapEvidence, wrongMapManifest);
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
                 settingsHash, mapId, continent),
             "The runtime accepted WDT evidence from a different MapID when its file hash was updated.");
-        File.WriteAllBytes(evidencePath, completeEvidence);
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
         foreach (int[][] changedAdts in new[]
@@ -233,15 +262,11 @@ internal static class P45GeometryRegression
         {
             JsonObject changedSetEvidence = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
             changedSetEvidence["adt_xy"] = JsonSerializer.SerializeToNode(changedAdts);
-            File.WriteAllText(evidencePath, changedSetEvidence.ToJsonString());
             JsonObject changedSetManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
-            changedSetManifest["coverage"]!.AsObject()["wdt_tile_list_sha256"] =
-                Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
-            File.WriteAllText(continentManifestPath, changedSetManifest.ToJsonString());
+            WriteCoverageProofVariant(validDir, changedSetEvidence, changedSetManifest);
             ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
                     settingsHash, mapId, continent),
                 "The runtime accepted deleted, duplicated, or extra ADTs in WDT evidence.");
-            File.WriteAllBytes(evidencePath, completeEvidence);
             File.WriteAllText(continentManifestPath, completeCoverageManifest);
         }
 
@@ -316,21 +341,59 @@ internal static class P45GeometryRegression
         }
 
         string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(tilePath))).ToLowerInvariant();
-        string evidenceRelativePath = ForeverNavmeshCacheManifest.WdtCoverageEvidenceRelativePath;
-        string evidencePath = Path.Combine(directory, evidenceRelativePath.Replace('/', Path.DirectorySeparatorChar));
-        Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
-        File.WriteAllText(evidencePath, JsonSerializer.Serialize(new
+        string clientRoot = Path.GetFullPath(Path.Combine(directory, "proof-client"));
+        string dataRoot = Path.Combine(clientRoot, "Data");
+        string outputRoot = Path.Combine(directory, "coverage", ".wdt-listing-fixture");
+        string[] arguments = ["-i", clientRoot, "-o", outputRoot, "-p", product,
+            "-l", "zhCN", "-e", "1", "-m", mapId.ToString(CultureInfo.InvariantCulture), "--list-tiles"];
+        (string nativePath, string nativeHash) = WriteCoverageBlob(directory,
+            ForeverNavmeshCacheManifest.WdtNativeTileListPathPrefix, ".tilelist",
+            CreateNativeTileList(build, [(0, 0)]));
+        string stdoutText = string.Join(Environment.NewLine,
+        [
+            $"Opened casc storage '{dataRoot}' product {product} locale zhCN",
+            $"Detected client build: {build}",
+            $"Opened casc storage '{dataRoot}' product {product} locale zhCN",
+            $"Restricted extraction to MapID {mapId}.",
+            $"tile\t{mapId}\t0\t0",
+            $"wdt-enumeration-complete map={mapId} build={build} visited=4096 tiles=1",
+        ]) + Environment.NewLine;
+        (string stdoutPath, string stdoutHash) = WriteCoverageBlob(directory,
+            ForeverNavmeshCacheManifest.WdtStdoutPathPrefix, ".txt", System.Text.Encoding.UTF8.GetBytes(stdoutText));
+        (string stderrPath, string stderrHash) = WriteCoverageBlob(directory,
+            ForeverNavmeshCacheManifest.WdtStderrPathPrefix, ".txt", []);
+        byte[] evidenceBytes = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
             format = ForeverNavmeshCacheManifest.WdtCoverageEvidenceFormat,
             client_product = product,
             client_build = build,
             map_id = mapId,
-            source = "mapextractor --list-tiles",
-            source_log_file = "test-list-tiles.log",
-            source_log_sha256 = new string('b', 64),
+            source = "mapextractor --list-tiles process",
+            tool_source_repository = ForeverNavmeshCacheManifest.WdtEnumeratorSourceRepository,
+            tool_source_commit = ForeverNavmeshCacheManifest.WdtEnumeratorSourceCommit,
+            tool_patch_sha256 = ForeverNavmeshCacheManifest.WdtEnumeratorPatchSha256,
+            mapextractor_sha256 = new string('d', 64),
+            locale = "zhCN",
+            client_root = clientRoot,
+            casc_data_root = dataRoot,
+            arguments,
+            process_exit_code = 0,
+            process_timed_out = false,
+            wdt_slots_visited = 4096,
+            adt_count = 1,
+            native_tile_list_file = nativePath,
+            native_tile_list_sha256 = nativeHash,
+            stdout_file = stdoutPath,
+            stdout_sha256 = stdoutHash,
+            stderr_file = stderrPath,
+            stderr_sha256 = stderrHash,
             adt_xy = new[] { new[] { 0, 0 } },
         }));
-        string evidenceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(evidencePath))).ToLowerInvariant();
+        string evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
+        string evidenceRelativePath = ForeverNavmeshCacheManifest.WdtCoverageEvidencePathPrefix + evidenceHash + ".json";
+        string evidencePath = Path.Combine(directory, evidenceRelativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(evidencePath)!);
+        File.WriteAllBytes(evidencePath, evidenceBytes);
         Dictionary<string, object?> manifest = new()
         {
             ["format"] = ForeverNavmeshCacheManifest.Format,
@@ -371,6 +434,280 @@ internal static class P45GeometryRegression
         }
 
         File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest));
+    }
+
+    private static byte[] CreateNativeTileList(int build, IReadOnlyCollection<(int X, int Y)> adts)
+    {
+        byte[] data = new byte[ForeverWdtTileList.FileLength];
+        "MAPS"u8.CopyTo(data);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4, sizeof(uint)), ForeverWdtTileList.Version);
+        BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(8, sizeof(uint)), checked((uint)build));
+        data.AsSpan(12).Fill((byte)'0');
+        foreach ((int x, int y) in adts)
+        {
+            int bitIndex = y * 64 + x;
+            data[12 + ForeverWdtTileList.TileCount - 1 - bitIndex] = (byte)'1';
+        }
+        return data;
+    }
+
+    private static (string RelativePath, string Sha256) WriteCoverageBlob(string cacheDirectory,
+        string pathPrefix, string suffix, byte[] content)
+    {
+        string sha256 = Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant();
+        string relativePath = pathPrefix + sha256 + suffix;
+        string fullPath = Path.Combine(cacheDirectory, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        File.WriteAllBytes(fullPath, content);
+        return (relativePath, sha256);
+    }
+
+    private static string ReadCoverageProofPath(string cacheDirectory)
+    {
+        using JsonDocument manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(cacheDirectory, "manifest.json")));
+        string relative = manifest.RootElement.GetProperty("coverage").GetProperty("wdt_tile_list_file").GetString()!;
+        return Path.Combine(cacheDirectory, relative.Replace('/', Path.DirectorySeparatorChar));
+    }
+
+    private static void WriteCoverageProofVariant(string cacheDirectory, JsonObject proof, JsonObject manifest)
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(proof.ToJsonString());
+        string hash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        string relative = ForeverNavmeshCacheManifest.WdtCoverageEvidencePathPrefix + hash + ".json";
+        string path = Path.Combine(cacheDirectory, relative.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllBytes(path, bytes);
+        JsonObject coverage = manifest["coverage"]!.AsObject();
+        coverage["wdt_tile_list_file"] = relative;
+        coverage["wdt_tile_list_sha256"] = hash;
+        File.WriteAllText(Path.Combine(cacheDirectory, "manifest.json"), manifest.ToJsonString());
+    }
+
+    private static void RunCoverageBoundaryRegression(string root)
+    {
+        double origin = NavmeshCoords.Origin;
+        double size = NavmeshSettings.TileWorldSize;
+        const int tileX = 80;
+        const int tileZ = 120;
+        GeometryExportRequest noPadding = new(0, 33, 46, AgentRadius: 0f, PaddingYards: 0f);
+        double worldY = origin + tileX * size;
+        double worldX = origin + tileZ * size;
+
+        AssertCoverage("triangle inside one tile",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(worldX + 45, worldX + 55, worldY + 45, worldY + 55)), noPadding),
+            (80, 120));
+
+        AssertCoverage("triangle crossing two adjacent tiles",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(worldX + 45, worldX + 55, origin + 81 * size - 4, origin + 81 * size + 4)), noPadding),
+            (80, 120), (81, 120));
+
+        AssertCoverage("triangle crossing a four-tile corner",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(origin + 121 * size - 4, origin + 121 * size + 4,
+                    origin + 81 * size - 4, origin + 81 * size + 4)), noPadding),
+            (80, 120), (80, 121), (81, 120), (81, 121));
+
+        double exactYBoundary = origin + 81 * size;
+        AssertCoverage("triangle exactly on a tile edge",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(worldX + 45, worldX + 55, exactYBoundary, exactYBoundary)), noPadding),
+            (80, 120), (81, 120));
+        AssertCoverage("sub-centimetre boundary tolerance includes the adjacent tile",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(worldX + 45, worldX + 55,
+                    exactYBoundary - TileGeometryExtractor.BorderCells(0f) * NavmeshSettings.CellSize - 0.005,
+                    exactYBoundary - TileGeometryExtractor.BorderCells(0f) * NavmeshSettings.CellSize - 0.005)), noPadding),
+            (80, 120), (81, 120));
+        AssertCoverage("geometry beyond boundary tolerance stays in its tile",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(worldX + 45, worldX + 55,
+                    exactYBoundary - TileGeometryExtractor.BorderCells(0f) * NavmeshSettings.CellSize - 0.02,
+                    exactYBoundary - TileGeometryExtractor.BorderCells(0f) * NavmeshSettings.CellSize - 0.02)), noPadding),
+            (80, 120));
+
+        double negativeWorldX = origin + 45 * size;
+        double negativeWorldY = origin + 33 * size;
+        if (negativeWorldX >= 0 || negativeWorldY >= 0)
+            throw new InvalidOperationException("The negative-coordinate boundary fixture did not use negative world coordinates.");
+        AssertCoverage("negative world coordinates",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(negativeWorldX + 45, negativeWorldX + 55,
+                    negativeWorldY + 45, negativeWorldY + 55)), noPadding),
+            (33, 45));
+
+        AssertCoverage("lower map edge clamps to tile zero",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(origin + 7, origin + 9, origin + 7, origin + 9)), noPadding),
+            (0, 0));
+        int lastTile = NavmeshSettings.TilesPerSide - 1;
+        double lastTileOrigin = origin + lastTile * size;
+        AssertCoverage("upper map edge clamps to the last valid tile",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(
+                CoverageTriangle(lastTileOrigin + size - 9, lastTileOrigin + size - 7,
+                    lastTileOrigin + size - 9, lastTileOrigin + size - 7)), noPadding),
+            (lastTile, lastTile));
+
+        float[][] nearBoundary = CoverageTriangle(worldX + 45, worldX + 55,
+            origin + 81 * size - 3, origin + 81 * size - 2);
+        AssertCoverage("padding disabled",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(nearBoundary), noPadding),
+            (80, 120));
+        GeometryExportRequest padded = noPadding with { PaddingYards = 4f };
+        AssertCoverage("padding adds the neighboring tile",
+            RawGeometryTileCoverageVerifier.Calculate(CollisionDocument(nearBoundary), padded),
+            (80, 120), (81, 120));
+
+        double secondWorldX = origin + 123 * size;
+        double secondWorldY = origin + 84 * size;
+        RawGeometryDocument floorDocument = CollisionDocument(
+            CoverageTriangle(worldX + 45, worldX + 55, worldY + 45, worldY + 55, height: 5),
+            CoverageTriangle(secondWorldX + 45, secondWorldX + 55,
+                secondWorldY + 45, secondWorldY + 55, height: 30));
+        AssertCoverage("MinWorldZ before filtering",
+            RawGeometryTileCoverageVerifier.Calculate(floorDocument, noPadding),
+            (80, 120), (84, 123));
+        AssertCoverage("MinWorldZ after filtering low geometry",
+            RawGeometryTileCoverageVerifier.Calculate(floorDocument, noPadding with { MinWorldZ = 20f }),
+            (84, 123));
+
+        float[][] crossingTriangle = CoverageTriangle(worldX + 45, worldX + 55,
+            origin + 81 * size - 4, origin + 81 * size + 4);
+        string fixturePath = WriteCoverageRawGeoFixture(root, crossingTriangle);
+        IReadOnlyList<ForeverGeometryTile> exported = RawGeometryTileExporter.Export(fixturePath, noPadding);
+        AssertTileSet("rawgeo exporter crossing edge", exported.Select(static tile => (tile.DtTileX, tile.DtTileZ)),
+            (80, 120), (81, 120));
+
+        string missing = CaptureFailure(() => RawGeometryTileExporter.ExportWithCoverageOverridesForTest(
+            fixturePath, noPadding, null, tiles => tiles.Take(1).ToArray()));
+        if (!missing.Contains("missing=[(81,120)]", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Exporter omission did not report the exact missing tile: {missing}");
+
+        string extra = CaptureFailure(() => RawGeometryTileExporter.ExportWithCoverageOverridesForTest(
+            fixturePath, noPadding, null, tiles => [.. tiles, CreateCoverageTile(82, 120)]));
+        if (!extra.Contains("extra=[(82,120)]", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Exporter extra tile did not report the exact extra tile: {extra}");
+
+        HashSet<(int X, int Z)> inconsistentIndependentSet = [(81, 120)];
+        string independentMismatch = CaptureFailure(() => RawGeometryTileExporter.ExportWithCoverageOverridesForTest(
+            fixturePath, noPadding, inconsistentIndependentSet, null));
+        if (!independentMismatch.Contains("extra=[(80,120)]", StringComparison.Ordinal))
+            throw new InvalidOperationException($"Independent coverage mismatch did not reject the exact disagreement: {independentMismatch}");
+    }
+
+    private static void AssertCoverage(string name, HashSet<(int X, int Z)> actual,
+        params (int X, int Z)[] expected) => AssertTileSet(name, actual, expected);
+
+    private static void AssertTileSet(string name, IEnumerable<(int X, int Z)> actual,
+        params (int X, int Z)[] expected)
+    {
+        HashSet<(int X, int Z)> actualSet = actual.ToHashSet();
+        HashSet<(int X, int Z)> expectedSet = expected.ToHashSet();
+        if (!actualSet.SetEquals(expectedSet))
+        {
+            string Format(IEnumerable<(int X, int Z)> tiles) => string.Join(",", tiles.OrderBy(t => t.X)
+                .ThenBy(t => t.Z).Select(t => $"({t.X},{t.Z})"));
+            throw new InvalidOperationException(
+                $"{name}: expected [{Format(expectedSet)}], actual [{Format(actualSet)}].");
+        }
+    }
+
+    private static float[][] CoverageTriangle(double minWowX, double maxWowX,
+        double minWowY, double maxWowY, float height = 10f) =>
+    [
+        [(float)minWowX, height, (float)minWowY],
+        [(float)maxWowX, height, (float)minWowY],
+        [(float)minWowX, height + 1f, (float)maxWowY],
+    ];
+
+    private static RawGeometryDocument CollisionDocument(params float[][][] triangles)
+    {
+        float[][] vertices = triangles.SelectMany(static triangle => triangle).ToArray();
+        int[][] indices = Enumerable.Range(0, triangles.Length)
+            .Select(static triangle => new[] { triangle * 3, triangle * 3 + 1, triangle * 3 + 2 }).ToArray();
+        return new RawGeometryDocument
+        {
+            CollisionVertices = vertices,
+            CollisionTriangles = indices,
+        };
+    }
+
+    private static string WriteCoverageRawGeoFixture(string root, float[][] collisionVertices)
+    {
+        string path = Path.Combine(root, "coverage-boundary.rawgeo.json");
+        var raw = new
+        {
+            format = "wow-raw-geometry-v1",
+            map_id = 0,
+            adt_xy = new[] { 33, 46 },
+            mmap_xy = new[] { 46, 33 },
+            client_product = "wow_cn_beta",
+            client_build = 70094,
+            units = "yard",
+            coordinates = "[WoW_X,WoW_Z,WoW_Y]",
+            target_rc_transform = "[raw_Z,raw_Y,raw_X]",
+            terrain_vertex_count = 0,
+            terrain_triangle_count = 0,
+            collision_vertex_count = collisionVertices.Length,
+            collision_triangle_count = 1,
+            wmo_triangle_count = 1,
+            m2_triangle_count = 0,
+            liquid_vertex_count = 0,
+            liquid_triangle_count = 0,
+            liquid_type_count = 0,
+            terrain_vertices = Array.Empty<float[]>(),
+            terrain_triangles = Array.Empty<int[]>(),
+            collision_vertices = collisionVertices,
+            collision_triangles = new[] { new[] { 0, 1, 2 } },
+            liquid_vertices = Array.Empty<float[]>(),
+            liquid_triangles = Array.Empty<int[]>(),
+            liquid_types = Array.Empty<int>(),
+        };
+        File.WriteAllText(path, JsonSerializer.Serialize(raw));
+        return path;
+    }
+
+    private static ForeverGeometryTile CreateCoverageTile(int tileX, int tileZ)
+    {
+        GeometryCounts counts = new()
+        {
+            TerrainTriangles = 0,
+            CollisionTriangles = 1,
+            WmoCollisionTriangles = 1,
+            M2CollisionTriangles = 0,
+            LiquidTriangles = 0,
+            WaterTriangles = 0,
+            MagmaSlimeTriangles = 0,
+        };
+        return new ForeverGeometryTile
+        {
+            ClientProduct = "wow_cn_beta",
+            ClientBuild = 70094,
+            SourceSha256 = new string('0', 64),
+            MapId = 0,
+            AdtXY = [33, 46],
+            DtTileX = tileX,
+            DtTileZ = tileZ,
+            BMinRc = [0, 0, 0],
+            BMaxRc = [1, 1, 1],
+            SourceCounts = counts,
+            TileCounts = counts,
+            TerrainVerticesRc = [],
+            TerrainTriangles = [],
+            CollisionVerticesRc = [],
+            CollisionTriangles = [],
+            LiquidVerticesRc = [],
+            LiquidTriangles = [],
+            LiquidAreas = [],
+        };
+    }
+
+    private static string CaptureFailure(Action action)
+    {
+        try { action(); }
+        catch (Exception ex) { return ex.Message; }
+        throw new InvalidOperationException("An expected tile coverage mismatch was accepted.");
     }
 
     private static void RunBatchRunnerRegression(string root)
@@ -452,15 +789,22 @@ internal static class P45GeometryRegression
 
         string clientRoot = Path.Combine(root, "batch-client");
         Directory.CreateDirectory(clientRoot);
+        Directory.CreateDirectory(Path.Combine(clientRoot, "Data"));
         File.WriteAllText(Path.Combine(clientRoot, ".build.info"),
             "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_cn_beta\n");
+        string toolDirectory = CreateFakeMapExtractorTool(root);
         string wdtListLog = Path.Combine(root, "full-wdt-tile-list.log");
         string cascDataPath = Path.Combine(clientRoot, "Data");
         File.WriteAllText(wdtListLog,
             $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
+        byte[] rectangleManifestBeforeSeal = File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"));
+        ExpectSealRejectedBeforeWdt(configChanged.StateFile, clientRoot, toolDirectory,
+            "A rectangle batch was accepted for continent publication.");
+        if (!rectangleManifestBeforeSeal.SequenceEqual(File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"))))
+            throw new InvalidOperationException("Rejecting rectangle publication changed the existing manifest.");
         ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(configChanged.StateFile,
                 clientRoot, wdtListLog),
-            "A rectangle batch was accepted for continent publication.");
+            "An external text log was accepted as a verified mapextractor tool directory.");
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
                 "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
                     new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
@@ -484,27 +828,103 @@ internal static class P45GeometryRegression
             }
         }
 
+        ExpectSealRejectedBeforeWdt(Path.Combine(failedOutputRoot, "batch-state.json"), clientRoot, toolDirectory,
+            "A failed ADT source task reached WDT enumeration or publication.");
+
+        byte[] validRawGeometry = File.ReadAllBytes(rawPath);
+        try
+        {
+            File.AppendAllText(rawPath, "tampered");
+            ExpectSealRejectedBeforeWdt(explicitBatch.StateFile, clientRoot, toolDirectory,
+                "Publication accepted rawgeo whose SHA-256 changed after processing.");
+        }
+        finally
+        {
+            File.WriteAllBytes(rawPath, validRawGeometry);
+        }
+
+        string explicitDnmPath;
+        using (JsonDocument state = JsonDocument.Parse(File.ReadAllBytes(explicitBatch.StateFile)))
+        {
+            explicitDnmPath = state.RootElement.GetProperty("TileTasks")[0].GetProperty("DnmOutputPath").GetString()!;
+        }
+        byte[] validDnm = File.ReadAllBytes(explicitDnmPath);
+        try
+        {
+            File.Delete(explicitDnmPath);
+            ExpectSealRejectedBeforeWdt(explicitBatch.StateFile, clientRoot, toolDirectory,
+                "Publication accepted a missing DNM tile.");
+            File.WriteAllBytes(explicitDnmPath, validDnm);
+            using (FileStream stream = File.Open(explicitDnmPath, FileMode.Append, FileAccess.Write, FileShare.None))
+                stream.WriteByte(0x7F);
+            ExpectSealRejectedBeforeWdt(explicitBatch.StateFile, clientRoot, toolDirectory,
+                "Publication accepted a DNM tile whose SHA-256 changed after baking.");
+        }
+        finally
+        {
+            File.WriteAllBytes(explicitDnmPath, validDnm);
+        }
+        _ = ForeverGeometryBatchRunner.VerifyState(explicitBatch.StateFile);
+
+        string buildInfoPath = Path.Combine(clientRoot, ".build.info");
+        string validBuildInfo = File.ReadAllText(buildInfoPath);
+        byte[] selectedManifestBeforeIdentityMismatch = File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"));
+        File.WriteAllText(buildInfoPath,
+            "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_classic\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(explicitBatch.StateFile,
+                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "33,46")),
+            "A client Product different from the batch identity was accepted.");
+        File.WriteAllText(buildInfoPath,
+            "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70095|wow_cn_beta\n");
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(explicitBatch.StateFile,
+                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "33,46")),
+            "A client Build different from the batch identity was accepted.");
+        File.WriteAllText(buildInfoPath, validBuildInfo);
+        if (!selectedManifestBeforeIdentityMismatch.SequenceEqual(File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"))))
+            throw new InvalidOperationException("Client Product/Build mismatch damaged the selected batch manifest.");
+
+        string invalidToolDirectory = CreateFakeMapExtractorTool(root, validProvenance: false);
+        bool invalidToolStartedProcess = false;
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(explicitBatch.StateFile,
+                clientRoot, invalidToolDirectory, "zhCN", (executable, arguments) =>
+                {
+                    invalidToolStartedProcess = true;
+                    return CreateWdtFixtureProcessFactory("success", "33,46")(executable, arguments);
+                }),
+            "A tool built from an unexpected TrinityCore patch was accepted.");
+        if (invalidToolStartedProcess)
+            throw new InvalidOperationException("An unverified mapextractor executable was started.");
+
         File.WriteAllText(wdtListLog,
             $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
-        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(explicitBatch.StateFile,
-                clientRoot, wdtListLog),
-            "A requested ADT set different from the matching WDT list was published.");
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "33,45",
+            "A requested ADT set different from the matching WDT list was published.",
+            expectedFailureContains: "WDT-only=[(33,45)]");
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "33,46;33,47",
+            "A WDT list with an extra ADT was published.", expectedFailureContains: "WDT-only=[(33,47)]");
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
                 "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
                     new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
             "A rejected WDT coverage mismatch changed the selected manifest.");
 
-        File.WriteAllText(wdtListLog,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
-        File.AppendAllText(wdtListLog, "Detected client build: 70095\n");
-        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublication(explicitBatch.StateFile,
-                clientRoot, wdtListLog),
-            "The publication gate accepted contradictory Build markers in the WDT coverage log.");
+        foreach (string failureMode in new[]
+                 {
+                     "nonzero", "truncated", "incomplete", "duplicate", "wrong-map", "wrong-build",
+                     "wrong-product", "wrong-locale", "wrong-casc-root", "fatal", "stderr-fatal",
+                     "missing-native", "native-mismatch", "native-wrong-build", "native-truncated",
+                 })
+        {
+            ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, failureMode, "33,46",
+                $"The WDT publication gate accepted controlled failure mode '{failureMode}'.");
+        }
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "timeout", "33,46",
+            "The WDT publication gate accepted an interrupted enumeration.", TimeSpan.FromSeconds(2));
 
         File.WriteAllText(wdtListLog,
             $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
-        ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublication(
-            explicitBatch.StateFile, clientRoot, wdtListLog);
+        ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublicationForTest(
+            explicitBatch.StateFile, clientRoot, toolDirectory, "zhCN",
+            CreateWdtFixtureProcessFactory("success", "33,46"));
         if (sealedBatch.SourceCount != 1 || sealedBatch.TileCount != 1)
         {
             throw new InvalidOperationException("The complete fixture WDT coverage did not seal the verified batch.");
@@ -514,11 +934,42 @@ internal static class P45GeometryRegression
         ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
             sealedProfile.SettingsHash, 0, "Azeroth");
 
-        RunSparseAdtBatchRegression(root, clientRoot);
+        byte[] publishedManifest = File.ReadAllBytes(sealedBatch.ManifestFile);
+        ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(
+                explicitBatch.StateFile, clientRoot, toolDirectory, "zhCN",
+                CreateWdtFixtureProcessFactory("success", "33,46"),
+                afterManifestWriteForTest: candidateManifestPath =>
+                {
+                    string proofRelativePath;
+                    using (JsonDocument candidate = JsonDocument.Parse(File.ReadAllBytes(candidateManifestPath)))
+                    {
+                        proofRelativePath = candidate.RootElement.GetProperty("coverage")
+                            .GetProperty("wdt_tile_list_file").GetString()!;
+                    }
+                    string proofPath = Path.Combine(dnmRoot, proofRelativePath.Replace('/', Path.DirectorySeparatorChar));
+                    File.AppendAllText(proofPath, " ");
+                }),
+            "A proof changed after manifest write did not abort publication.");
+        if (!publishedManifest.SequenceEqual(File.ReadAllBytes(sealedBatch.ManifestFile)))
+            throw new InvalidOperationException("A post-write proof validation failure did not restore the prior manifest byte-for-byte.");
+        ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
+            sealedProfile.SettingsHash, 0, "Azeroth");
+
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "nonzero", "33,46",
+            "A failed reseal did not leave the previous valid continent manifest untouched.");
+        if (!publishedManifest.SequenceEqual(File.ReadAllBytes(sealedBatch.ManifestFile)))
+        {
+            throw new InvalidOperationException("A failed reseal replaced the previously valid continent manifest.");
+        }
+        ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
+            sealedProfile.SettingsHash, 0, "Azeroth");
+
+        RunSparseAdtBatchRegression(root, clientRoot, toolDirectory);
         RunCrossTileBoundaryRegression(root);
+        RunDisconnectedIslandRegression(root);
     }
 
-    private static void RunSparseAdtBatchRegression(string root, string clientRoot)
+    private static void RunSparseAdtBatchRegression(string root, string clientRoot, string toolDirectory)
     {
         string inputRoot = Path.Combine(root, "sparse-batch-input");
         foreach (AdtCoordinate adt in new[] { new AdtCoordinate(33, 46), new AdtCoordinate(35, 46) })
@@ -587,8 +1038,9 @@ internal static class P45GeometryRegression
             throw new InvalidOperationException("Restoring the sparse ADT set did not rebuild the changed batch state.");
         }
 
-        ForeverGeometryPublicationResult publication = ForeverGeometryBatchRunner.SealForPublication(
-            restoredSet.StateFile, clientRoot, tileListPath);
+        ForeverGeometryPublicationResult publication = ForeverGeometryBatchRunner.SealForPublicationForTest(
+            restoredSet.StateFile, clientRoot, toolDirectory, "zhCN",
+            CreateWdtFixtureProcessFactory("success", "33,46;35,46"));
         if (publication.SourceCount != 2 || publication.TileCount != restoredSet.TileCount)
         {
             throw new InvalidOperationException("A matching sparse WDT list did not seal the complete sparse batch.");
@@ -597,6 +1049,130 @@ internal static class P45GeometryRegression
             new NavmeshBakeOptions());
         ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
             profile.SettingsHash, 0, "Azeroth");
+    }
+
+    private static string CreateFakeMapExtractorTool(string root, bool validProvenance = true)
+    {
+        string toolDirectory = Path.Combine(root, validProvenance ? "fake-mapextractor" : "fake-mapextractor-invalid");
+        Directory.CreateDirectory(toolDirectory);
+        string executable = Path.Combine(toolDirectory, "mapextractor.exe");
+        File.WriteAllText(executable, "controlled test fixture; never executed as a native tool");
+        string executableHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(executable))).ToLowerInvariant();
+        var provenance = new
+        {
+            format = ForeverWdtTileEnumerator.ProvenanceFormat,
+            source_repository = ForeverWdtTileEnumerator.SourceRepository,
+            source_commit = ForeverWdtTileEnumerator.SourceCommit,
+            patch_sha256 = validProvenance ? ForeverWdtTileEnumerator.ExpectedPatchSha256 : new string('a', 64),
+            mapextractor_sha256 = executableHash,
+        };
+        File.WriteAllText(Path.Combine(toolDirectory, ForeverWdtTileEnumerator.ProvenanceFileName),
+            JsonSerializer.Serialize(provenance));
+        return toolDirectory;
+    }
+
+    private static WdtEnumeratorProcessFactory CreateWdtFixtureProcessFactory(string mode,
+        string adts, string? markerPath = null) => (executable, arguments) =>
+    {
+        string host = Environment.ProcessPath
+            ?? throw new InvalidOperationException("Cannot determine the CoreTests process host for the WDT fixture.");
+        ProcessStartInfo startInfo = new(host)
+        {
+            UseShellExecute = false,
+            WorkingDirectory = Environment.CurrentDirectory,
+        };
+        if (Path.GetFileNameWithoutExtension(host).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            startInfo.ArgumentList.Add(typeof(Program).Assembly.Location);
+        }
+        startInfo.ArgumentList.Add("--forever-wdt-mapextractor-fixture");
+        foreach (string argument in arguments) startInfo.ArgumentList.Add(argument);
+        startInfo.Environment["WOW_TEST_WDT_MODE"] = mode;
+        startInfo.Environment["WOW_TEST_WDT_ADTS"] = adts;
+        if (markerPath is not null) startInfo.Environment["WOW_TEST_WDT_MARKER"] = markerPath;
+        return startInfo;
+    };
+
+    private static void ExpectSealRejectedBeforeWdt(string stateFile, string clientRoot, string toolDirectory,
+        string message)
+    {
+        string dnmRoot;
+        using (JsonDocument state = JsonDocument.Parse(File.ReadAllBytes(stateFile)))
+        {
+            dnmRoot = state.RootElement.GetProperty("DnmOutputDirectory").GetString()!;
+        }
+        string manifestPath = Path.Combine(dnmRoot, "manifest.json");
+        byte[]? originalManifest = File.Exists(manifestPath) ? File.ReadAllBytes(manifestPath) : null;
+        string markerPath = Path.Combine(Path.GetDirectoryName(stateFile)!, $"wdt-not-started-{Guid.NewGuid():N}.marker");
+        Exception? failure = null;
+        try
+        {
+            ForeverGeometryBatchRunner.SealForPublicationForTest(stateFile, clientRoot, toolDirectory,
+                "zhCN", CreateWdtFixtureProcessFactory("success", "33,46", markerPath));
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        if (failure is null)
+            throw new InvalidOperationException(message);
+        if (File.Exists(markerPath))
+            throw new InvalidOperationException($"{message} The WDT child process started before rejection.", failure);
+        if (originalManifest is null)
+        {
+            if (File.Exists(manifestPath))
+                throw new InvalidOperationException($"{message} A failed seal created a manifest.", failure);
+        }
+        else if (!originalManifest.SequenceEqual(File.ReadAllBytes(manifestPath)))
+        {
+            throw new InvalidOperationException($"{message} The existing manifest changed on failure.", failure);
+        }
+    }
+
+    private static void ExpectSealFailure(string stateFile, string clientRoot, string toolDirectory,
+        string mode, string adts, string message, TimeSpan? timeout = null,
+        string? expectedFailureContains = null)
+    {
+        string dnmRoot;
+        using (JsonDocument state = JsonDocument.Parse(File.ReadAllBytes(stateFile)))
+        {
+            dnmRoot = state.RootElement.GetProperty("DnmOutputDirectory").GetString()!;
+        }
+        string manifestPath = Path.Combine(dnmRoot, "manifest.json");
+        byte[]? originalManifest = File.Exists(manifestPath) ? File.ReadAllBytes(manifestPath) : null;
+        string markerPath = Path.Combine(Path.GetDirectoryName(stateFile)!, $"wdt-fixture-{Guid.NewGuid():N}.marker");
+        Exception? failure = null;
+        try
+        {
+            ForeverGeometryBatchRunner.SealForPublicationForTest(stateFile, clientRoot, toolDirectory,
+                "zhCN", CreateWdtFixtureProcessFactory(mode, adts, markerPath), timeout);
+        }
+        catch (Exception ex)
+        {
+            failure = ex;
+        }
+
+        if (failure is null)
+            throw new InvalidOperationException(message);
+        if (expectedFailureContains is not null &&
+            !failure.Message.Contains(expectedFailureContains, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{message} Expected diagnostic fragment '{expectedFailureContains}', got '{failure.Message}'.", failure);
+        }
+        if (!File.Exists(markerPath) || File.ReadAllText(markerPath) != mode)
+            throw new InvalidOperationException($"{message} The controlled child process did not run for mode '{mode}'.", failure);
+        if (originalManifest is null)
+        {
+            if (File.Exists(manifestPath))
+                throw new InvalidOperationException($"{message} A failed seal created a manifest.", failure);
+        }
+        else if (!originalManifest.SequenceEqual(File.ReadAllBytes(manifestPath)))
+        {
+            throw new InvalidOperationException($"{message} The existing manifest changed on failure.", failure);
+        }
+        File.Delete(markerPath);
     }
 
     private static void WriteBatchFixture(string path, int adtX = 33, int adtY = 46)
@@ -663,6 +1239,26 @@ internal static class P45GeometryRegression
             !verification.ConnectedPathSucceeded || verification.CrossTileLinkCount == 0)
         {
             throw new InvalidOperationException("Matching walkable tile boundaries did not produce a verified cross-tile Detour connection.");
+        }
+    }
+
+    private static void RunDisconnectedIslandRegression(string root)
+    {
+        string directory = Path.Combine(root, "disconnected-island-dnm");
+        Directory.CreateDirectory(directory);
+        foreach ((int tileX, int tileZ) in new[] { (1, 2), (3, 2) })
+        {
+            DtMeshData data = CreateGroundTileData(tileX, tileZ);
+            using FileStream stream = File.Create(Path.Combine(directory, $"tile_{tileX}_{tileZ}.dnm"));
+            using BinaryWriter writer = new(stream);
+            new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
+        }
+
+        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(directory, [(1, 2), (3, 2)]);
+        if (verification.TileCount != 2 || !verification.HeightQuerySucceeded ||
+            !verification.ConnectedPathSucceeded || verification.CrossTileLinkCount != 0)
+        {
+            throw new InvalidOperationException("A valid isolated navmesh island was rejected or falsely connected to another component.");
         }
     }
 

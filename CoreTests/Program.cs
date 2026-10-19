@@ -63,7 +63,18 @@ internal sealed class Program
     private static readonly HashSet<string> offlineSuites =
         new(StringComparer.OrdinalIgnoreCase) { "navmesh", "p45", "routegen", "npc-regression", "combat-recovery", "state", "keybindings", "record" };
 
-    public static async Task Main(string[] args)
+    public static Task Main(string[] args)
+    {
+        if (args.Length > 0 && args[0].Equals("--forever-wdt-mapextractor-fixture", StringComparison.Ordinal))
+        {
+            Environment.ExitCode = ForeverWdtMapExtractorFixture.Run(args.Skip(1).ToArray());
+            return Task.CompletedTask;
+        }
+
+        return MainCore(args);
+    }
+
+    private static async Task MainCore(string[] args)
     {
         var logConfig = new LoggerConfiguration()
             .WriteTo.File("names.log")

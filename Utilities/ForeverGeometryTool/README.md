@@ -96,32 +96,39 @@ dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c
 The batch manifest always starts with `scope=explicit_adt_and_tile_set` and
 `publishable_as_continent_cache=false`. It does not infer continent coverage
 from an ADT rectangle. A separate sealing command can change those fields only
-after a complete MapID-specific WDT tile listing from the matching Forever
-client exactly matches the requested, successfully processed and WDT ADT sets,
-every source and tile task is still current by SHA/configuration, every
-contributed Detour tile is present,
-and independent DNM read-back, height, path and cross-tile checks pass:
+after it runs the verified `mapextractor.exe` against the matching Forever
+client for exactly one MapID. It checks the process arguments, Product, Locale,
+CASC Data root, Build, exit code, fatal output, final WDT completion record,
+all 4096 MAIN slots, stdout ADT rows and the native binary `.tilelist`. Those
+WDT ADTs must exactly match the requested and successfully processed ADTs.
+Every source and tile task is checked again by SHA/configuration, every
+contributed Detour tile must be present, and independent DNM read-back, height,
+path and cross-tile checks must pass:
 
 ```powershell
 dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c Release -- batch-seal `
   --state tmp/p5-small-batch/batch-state.json `
   --client-root 'E:\games\World of Warcraft Forever' `
-  --tile-list-log tmp/wdt-list-tiles-0000.log
+  --tool-directory tmp/p1-trinitycore-build/bin/Release `
+  --locale zhCN
 ```
 
-Create that log by running the already-built `mapextractor.exe` with
-`-i <client-root> -o <empty-output> -p wow_cn_beta -l zhCN -m <MapID>
---list-tiles`. This reads the selected map's WDT tile metadata only; it does
-not extract ADTs or bake tiles. The seal command itself does not open CASC. A
-partial ADT range fails closed and leaves the selected-scope manifest
-unchanged. On success, the manifest records the tile-list log's basename and
-SHA-256 alongside the exact expected/processed ADT and target/completed tile
-sets. `ValidateForPublication` and the official runtime validator both require
-this coverage proof. The sealed cache contains `coverage/wdt-coverage.json`; the
-runtime checks its fixed relative path, containment, file hash, product, Build,
-MapID and normalized ADT set. The seal command accepts only one exact CASC Data
-root, Build and restricted MapID marker in the listing log, then consumes the
-validated log without starting a WDT listing or continent extraction itself.
+The command starts the tool with `-i <client-root> -o <isolated-output>
+-p <Product> -l <Locale> -e 1 -m <MapID> --list-tiles`. This reads the
+selected map's WDT metadata only; it does not extract ADTs or bake tiles. The
+build script writes `forever-casc-tools.json` beside the executable with the
+pinned source commit, checked-in patch hash and executable hash. A caller
+supplied text log cannot seal a cache. Text listings remain useful to provide
+an explicit `--adt-list`, but they are not publication proof.
+
+On success, the cache contains content-addressed WDT process output, native
+`.tilelist`, and a v2 proof. The runtime verifies their paths and SHA-256 hashes,
+tool source identity, process arguments and completion record, native tile-list
+Build and ADT set, plus the exact expected/processed ADT and target/completed
+tile sets. Existing manifest v2 identity and DNM hashes remain required. A
+failed seal writes no manifest pointing to new evidence; evidence files are
+immutable and an earlier manifest remains recoverable. The old external-log
+proof format is rejected and must be resealed by the process-driven command.
 
 Both output directories must be empty. `--bake-tile` uses Detour coordinates
 `X,Z`, and every requested tile must exist in the aggregate. Geometry and DNM

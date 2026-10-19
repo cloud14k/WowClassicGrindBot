@@ -37,7 +37,8 @@ internal static class Program
                 ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublication(
                     RequiredSingle(sealValues, "--state"),
                     RequiredSingle(sealValues, "--client-root"),
-                    RequiredSingle(sealValues, "--tile-list-log"));
+                    RequiredSingle(sealValues, "--tool-directory"),
+                    sealValues.ContainsKey("--locale") ? RequiredSingle(sealValues, "--locale") : "zhCN");
                 Console.WriteLine(JsonSerializer.Serialize(new { status = "PASS", publication = sealedBatch }, JsonOptions));
                 return 0;
             }
@@ -182,7 +183,7 @@ internal static class Program
         {
             "--state", "--map", "--adt-range", "--adt-list", "--input-dir", "--output-dir", "--dnm-output",
             "--continent", "--tile", "--agent-radius", "--agent-climb", "--walkable-slope",
-            "--padding-yards", "--min-world-z", "--client-root", "--tile-list-log",
+            "--padding-yards", "--min-world-z", "--client-root", "--tool-directory", "--locale",
         };
         if (allowResume) allowed.Add("--resume");
         Dictionary<string, List<string>> values = new(StringComparer.OrdinalIgnoreCase);
@@ -322,7 +323,7 @@ internal static class Program
     {
         Console.WriteLine("Batch mode: ForeverGeometryTool batch --map <id> (--adt-list <coordinate file or mapextractor tile-list log> | --adt-range <X0,Y0:X1,Y1>) --input-dir <rawgeo root> --output-dir <state/geometry dir> --dnm-output <DNM dir> --continent <name> [--tile X,Z ...] [--resume]");
         Console.WriteLine("Verify a completed selected batch independently: ForeverGeometryTool batch-verify --state <batch-state.json>");
-        Console.WriteLine("Seal only after complete WDT ADT coverage and all contributed tiles verify: ForeverGeometryTool batch-seal --state <batch-state.json> --client-root <Forever client> --tile-list-log <mapextractor --list-tiles log>");
+        Console.WriteLine("Seal only after batch-seal runs the verified mapextractor --list-tiles process: ForeverGeometryTool batch-seal --state <batch-state.json> --client-root <Forever client> --tool-directory <verified mapextractor folder> [--locale zhCN]");
         Console.WriteLine("Usage: ForeverGeometryTool --input <rawgeo.json> --adt <X,Y> [--input <rawgeo.json> --adt <X,Y> ...] --expect-adt <X,Y> [--expect-adt ...] --output <empty directory> --map <MapID>");
         Console.WriteLine("       [--agent-radius <yd> --agent-climb <yd> --walkable-slope <degrees> --padding-yards <yd> --min-world-z <yd>]");
         Console.WriteLine("       [--continent <name> required when --dnm-output is used]");

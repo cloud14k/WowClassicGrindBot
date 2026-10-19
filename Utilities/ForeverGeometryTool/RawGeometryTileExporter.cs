@@ -35,7 +35,16 @@ public static class RawGeometryTileExporter
         => ExportWithIndependentCoverage(inputPath, request).Tiles;
 
     internal static RawGeometryTileExportResult ExportWithIndependentCoverage(string inputPath,
-        GeometryExportRequest request)
+        GeometryExportRequest request) => ExportCore(inputPath, request, null, null);
+
+    internal static RawGeometryTileExportResult ExportWithCoverageOverridesForTest(string inputPath,
+        GeometryExportRequest request, HashSet<(int X, int Z)>? independentCoverageOverride,
+        Func<IReadOnlyList<ForeverGeometryTile>, IReadOnlyList<ForeverGeometryTile>>? exportedTilesOverride) =>
+        ExportCore(inputPath, request, independentCoverageOverride, exportedTilesOverride);
+
+    private static RawGeometryTileExportResult ExportCore(string inputPath, GeometryExportRequest request,
+        HashSet<(int X, int Z)>? independentCoverageOverride,
+        Func<IReadOnlyList<ForeverGeometryTile>, IReadOnlyList<ForeverGeometryTile>>? exportedTilesOverride)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPath);
         ArgumentNullException.ThrowIfNull(request);
@@ -65,7 +74,9 @@ public static class RawGeometryTileExporter
         }
 
         ValidateInput(raw, request);
-        HashSet<(int X, int Z)> independentCoverage = RawGeometryTileCoverageVerifier.Calculate(raw, request);
+        HashSet<(int X, int Z)> independentCoverage = independentCoverageOverride is null
+            ? RawGeometryTileCoverageVerifier.Calculate(raw, request)
+            : [.. independentCoverageOverride];
         string sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(inputPath))).ToLowerInvariant();
         GeometryCounts sourceCounts = new()
         {
@@ -139,7 +150,9 @@ public static class RawGeometryTileExporter
             throw new InvalidDataException("The selected raw geometry contained no ground triangles in valid navmesh tiles.");
         }
 
-        HashSet<(int X, int Z)> exportedCoverage = result.Select(static tile => (tile.DtTileX, tile.DtTileZ)).ToHashSet();
+        IReadOnlyList<ForeverGeometryTile> tilesToVerify = exportedTilesOverride?.Invoke(result) ?? result;
+        HashSet<(int X, int Z)> exportedCoverage = tilesToVerify
+            .Select(static tile => (tile.DtTileX, tile.DtTileZ)).ToHashSet();
         if (!independentCoverage.SetEquals(exportedCoverage))
         {
             string missing = string.Join(',', independentCoverage.Except(exportedCoverage).OrderBy(static tile => tile.X)
@@ -284,7 +297,9 @@ public static class RawGeometryTileExporter
                 }
 
                 NavmeshCoords.GetTileWowBounds(tileX, 0, out _, out float tileMinY, out _, out float tileMaxY);
-                if (minWowY > tileMaxY + border || maxWowY < tileMinY - border)
+                float boundaryTolerance = (float)RawGeometryTileCoverageVerifier.BoundaryToleranceYards;
+                if (minWowY > tileMaxY + border + boundaryTolerance ||
+                    maxWowY < tileMinY - border - boundaryTolerance)
                 {
                     continue;
                 }
@@ -297,7 +312,8 @@ public static class RawGeometryTileExporter
                     }
 
                     NavmeshCoords.GetTileWowBounds(0, tileZ, out float tileMinX, out _, out float tileMaxX, out _);
-                    if (minWowX > tileMaxX + border || maxWowX < tileMinX - border)
+                    if (minWowX > tileMaxX + border + boundaryTolerance ||
+                        maxWowX < tileMinX - border - boundaryTolerance)
                     {
                         continue;
                     }

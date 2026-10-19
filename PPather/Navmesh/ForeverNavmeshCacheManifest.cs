@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 using DotRecast.Detour;
@@ -18,8 +20,15 @@ namespace PPather.Navmesh;
 public static class ForeverNavmeshCacheManifest
 {
     public const string Format = "wow-forever-dnm-manifest-v2";
-    public const string WdtCoverageEvidenceFormat = "wow-forever-wdt-coverage-v1";
+    public const string WdtCoverageEvidenceFormat = "wow-forever-wdt-coverage-v2";
     public const string WdtCoverageEvidenceRelativePath = "coverage/wdt-coverage.json";
+    public const string WdtCoverageEvidencePathPrefix = "coverage/wdt-proof-";
+    public const string WdtNativeTileListPathPrefix = "coverage/wdt-native-";
+    public const string WdtStdoutPathPrefix = "coverage/wdt-stdout-";
+    public const string WdtStderrPathPrefix = "coverage/wdt-stderr-";
+    public const string WdtEnumeratorSourceRepository = "https://github.com/advocaite/TrinityCore.git";
+    public const string WdtEnumeratorSourceCommit = "440d365e791baff1cdf555ed2179c71bd6ebd014";
+    public const string WdtEnumeratorPatchSha256 = "7acf42579137365809265819cd685ec7b8f1749e81a74f9bb2e7a51314d91d54";
 
     /// <summary>Explicit test entry for packs that are intentionally incomplete.</summary>
     public static void ValidateSelectedPackForTest(string cacheDirectory, string expectedProduct,
@@ -72,9 +81,10 @@ public static class ForeverNavmeshCacheManifest
         {
             throw new ArgumentOutOfRangeException(nameof(expectedBuild), "Forever cache identity requires a positive Build, non-negative MapID, and a non-empty continent when specified.");
         }
-        if (!Directory.Exists(cacheDirectory))
+        if (!Directory.Exists(cacheDirectory) ||
+            (File.GetAttributes(Path.GetFullPath(cacheDirectory)) & FileAttributes.ReparsePoint) != 0)
         {
-            throw new DirectoryNotFoundException($"Forever navmesh cache directory does not exist: {cacheDirectory}");
+            throw new DirectoryNotFoundException($"Forever navmesh cache directory does not exist or is a reparse point: {cacheDirectory}");
         }
 
         string manifestPath = Path.Combine(cacheDirectory, "manifest.json");
@@ -372,10 +382,10 @@ public static class ForeverNavmeshCacheManifest
             return ("", "", "", 0, -1, []);
         }
 
-        if (file.Length == 0 || !string.Equals(file, WdtCoverageEvidenceRelativePath, StringComparison.Ordinal) ||
+        if (file.Length == 0 || !string.Equals(file, WdtCoverageEvidencePathPrefix + sha256 + ".json", StringComparison.Ordinal) ||
             Path.IsPathRooted(file) || file.Contains('\\'))
         {
-            throw new InvalidDataException($"WDT coverage evidence path is missing, non-canonical, or unsafe: {manifestPath}");
+            throw new InvalidDataException($"WDT coverage proof path is missing, non-canonical, or does not bind its SHA-256: {manifestPath}");
         }
 
         if (!IsSha256(sha256))
@@ -391,40 +401,62 @@ public static class ForeverNavmeshCacheManifest
         }
 
         string cacheRoot = Path.GetFullPath(cacheDirectory);
-        string evidencePath = Path.GetFullPath(Path.Combine(cacheRoot,
-            file.Replace('/', Path.DirectorySeparatorChar)));
-        if (!IsSameOrChild(evidencePath, cacheRoot) ||
-            !Directory.Exists(Path.GetDirectoryName(evidencePath)!) || !File.Exists(evidencePath) ||
-            (File.GetAttributes(Path.GetDirectoryName(evidencePath)!) & FileAttributes.ReparsePoint) != 0 ||
-            (File.GetAttributes(evidencePath) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException($"WDT coverage evidence is missing or resolves outside the cache directory: {evidencePath}");
-        }
-
-        string actualHash;
-        using (FileStream evidenceStream = File.OpenRead(evidencePath))
-        {
-            actualHash = Convert.ToHexString(SHA256.HashData(evidenceStream)).ToLowerInvariant();
-        }
-        if (!actualHash.Equals(sha256, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidDataException($"WDT coverage evidence hash does not match the manifest: {evidencePath}");
-        }
-
-        using JsonDocument evidenceDocument = JsonDocument.Parse(File.ReadAllBytes(evidencePath));
+        byte[] evidenceBytes = ReadVerifiedCoverageFile(cacheRoot, file, sha256,
+            WdtCoverageEvidencePathPrefix, ".json", manifestPath);
+        string evidencePath = Path.Combine(cacheRoot, file.Replace('/', Path.DirectorySeparatorChar));
+        using JsonDocument evidenceDocument = JsonDocument.Parse(evidenceBytes);
         JsonElement evidence = evidenceDocument.RootElement;
         string evidenceProduct = ReadRequiredString(evidence, "client_product", evidencePath);
         int evidenceBuild = ReadRequiredInt(evidence, "client_build", evidencePath);
         int evidenceMap = ReadRequiredInt(evidence, "map_id", evidencePath);
         if (ReadRequiredString(evidence, "format", evidencePath) != WdtCoverageEvidenceFormat ||
-            !string.Equals(ReadRequiredString(evidence, "source", evidencePath), "mapextractor --list-tiles", StringComparison.Ordinal) ||
+            !string.Equals(ReadRequiredString(evidence, "source", evidencePath), "mapextractor --list-tiles process", StringComparison.Ordinal) ||
             !string.Equals(evidenceProduct, proofProduct, StringComparison.OrdinalIgnoreCase) || evidenceBuild != proofBuild ||
             evidenceMap != proofMapId ||
-            !string.Equals(ReadRequiredString(evidence, "source_log_file", evidencePath),
-                Path.GetFileName(ReadRequiredString(evidence, "source_log_file", evidencePath)), StringComparison.Ordinal) ||
-            !IsSha256(ReadRequiredString(evidence, "source_log_sha256", evidencePath)))
+            ReadRequiredString(evidence, "tool_source_repository", evidencePath) != WdtEnumeratorSourceRepository ||
+            ReadRequiredString(evidence, "tool_source_commit", evidencePath) != WdtEnumeratorSourceCommit ||
+            !ReadRequiredString(evidence, "tool_patch_sha256", evidencePath).Equals(WdtEnumeratorPatchSha256, StringComparison.OrdinalIgnoreCase) ||
+            !IsSha256(ReadRequiredString(evidence, "mapextractor_sha256", evidencePath)) ||
+            ReadRequiredInt(evidence, "process_exit_code", evidencePath) != 0 ||
+            ReadOptionalBool(evidence, "process_timed_out") ||
+            ReadRequiredInt(evidence, "wdt_slots_visited", evidencePath) != ForeverWdtTileList.TileCount)
         {
             throw new InvalidDataException($"WDT coverage evidence format or client identity is invalid: {evidencePath}");
+        }
+
+        string locale = ReadRequiredString(evidence, "locale", evidencePath);
+        if (!IsSupportedLocale(locale))
+        {
+            throw new InvalidDataException($"WDT coverage evidence has an unsupported mapextractor locale: {evidencePath}");
+        }
+        string clientRoot = Path.GetFullPath(ReadRequiredString(evidence, "client_root", evidencePath));
+        string dataRoot = Path.GetFullPath(ReadRequiredString(evidence, "casc_data_root", evidencePath));
+        if (!PathEquals(dataRoot, Path.Combine(clientRoot, "Data")))
+        {
+            throw new InvalidDataException($"WDT coverage evidence CASC root is inconsistent with its client directory: {evidencePath}");
+        }
+
+        string[] arguments = ReadRequiredStringArray(evidence, "arguments", evidencePath);
+        if (arguments.Length != 13 || arguments[0] != "-i" || !PathEquals(arguments[1], clientRoot) ||
+            arguments[2] != "-o" || arguments[4] != "-p" || !arguments[5].Equals(proofProduct, StringComparison.OrdinalIgnoreCase) ||
+            arguments[6] != "-l" || arguments[7] != locale || arguments[8] != "-e" || arguments[9] != "1" ||
+            arguments[10] != "-m" || arguments[11] != proofMapId.ToString(CultureInfo.InvariantCulture) ||
+            arguments[12] != "--list-tiles")
+        {
+            throw new InvalidDataException($"WDT coverage evidence does not record the exact MapID-only invocation: {evidencePath}");
+        }
+        string outputDirectory = Path.GetFullPath(arguments[3]);
+        string cacheCoverageRoot = Path.Combine(cacheRoot, "coverage");
+        if (!IsSameOrChild(outputDirectory, cacheCoverageRoot) ||
+            !Path.GetFileName(outputDirectory).StartsWith(".wdt-listing-", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"WDT coverage evidence output directory is outside the isolated cache workspace: {evidencePath}");
+        }
+
+        if (!evidence.TryGetProperty("adt_count", out JsonElement adtCountValue) ||
+            !adtCountValue.TryGetInt32(out int expectedAdtCount) || expectedAdtCount <= 0)
+        {
+            throw new InvalidDataException($"WDT coverage evidence ADT count is missing or invalid: {evidencePath}");
         }
 
         if (!evidence.TryGetProperty("adt_xy", out JsonElement adtValues) || adtValues.ValueKind != JsonValueKind.Array ||
@@ -446,8 +478,134 @@ public static class ForeverNavmeshCacheManifest
             previous = (x, y);
         }
 
+        if (adts.Count != expectedAdtCount)
+        {
+            throw new InvalidDataException($"WDT coverage evidence ADT count does not match its unique coordinate list: {evidencePath}");
+        }
+
+        string nativeFile = ReadRequiredString(evidence, "native_tile_list_file", evidencePath);
+        string nativeSha = ReadRequiredString(evidence, "native_tile_list_sha256", evidencePath);
+        byte[] nativeBytes = ReadVerifiedCoverageFile(cacheRoot, nativeFile, nativeSha,
+            WdtNativeTileListPathPrefix, ".tilelist", evidencePath);
+        ForeverWdtTileList.Parsed nativeTileList = ForeverWdtTileList.Parse(nativeBytes);
+        if (nativeTileList.Build != proofBuild || !nativeTileList.Adts.SetEquals(adts))
+        {
+            throw new InvalidDataException($"Native WDT .tilelist does not match the process evidence ADT set or Build: {evidencePath}");
+        }
+
+        string stdoutFile = ReadRequiredString(evidence, "stdout_file", evidencePath);
+        string stdoutSha = ReadRequiredString(evidence, "stdout_sha256", evidencePath);
+        byte[] stdoutBytes = ReadVerifiedCoverageFile(cacheRoot, stdoutFile, stdoutSha,
+            WdtStdoutPathPrefix, ".txt", evidencePath);
+        string stderrFile = ReadRequiredString(evidence, "stderr_file", evidencePath);
+        string stderrSha = ReadRequiredString(evidence, "stderr_sha256", evidencePath);
+        byte[] stderrBytes = ReadVerifiedCoverageFile(cacheRoot, stderrFile, stderrSha,
+            WdtStderrPathPrefix, ".txt", evidencePath);
+        ValidateProcessOutput(Encoding.UTF8.GetString(stdoutBytes), Encoding.UTF8.GetString(stderrBytes),
+            dataRoot, proofProduct, locale, proofBuild, proofMapId, adts, expectedAdtCount, evidencePath);
+
         return (file, sha256, proofProduct, proofBuild, proofMapId, adts);
     }
+
+    private static byte[] ReadVerifiedCoverageFile(string cacheRoot, string relativePath, string sha256,
+        string expectedPrefix, string suffix, string ownerPath)
+    {
+        if (!IsSha256(sha256) || !string.Equals(relativePath, expectedPrefix + sha256 + suffix, StringComparison.Ordinal) ||
+            Path.IsPathRooted(relativePath) || relativePath.Contains('\\'))
+        {
+            throw new InvalidDataException($"Coverage evidence path does not bind its SHA-256: {ownerPath}");
+        }
+        string fullPath = Path.GetFullPath(Path.Combine(cacheRoot,
+            relativePath.Replace('/', Path.DirectorySeparatorChar)));
+        string coverageDirectory = Path.Combine(cacheRoot, "coverage");
+        if (!IsSameOrChild(fullPath, cacheRoot) ||
+            (File.GetAttributes(cacheRoot) & FileAttributes.ReparsePoint) != 0 ||
+            !Directory.Exists(coverageDirectory) ||
+            (File.GetAttributes(coverageDirectory) & FileAttributes.ReparsePoint) != 0 ||
+            !File.Exists(fullPath) || (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"Coverage evidence is missing or resolves outside the cache directory: {fullPath}");
+        }
+        byte[] bytes = File.ReadAllBytes(fullPath);
+        string actualHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        if (!actualHash.Equals(sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Coverage evidence SHA-256 does not match: {fullPath}");
+        }
+        return bytes;
+    }
+
+    private static string[] ReadRequiredStringArray(JsonElement parent, string name, string path)
+    {
+        if (!parent.TryGetProperty(name, out JsonElement values) || values.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"WDT coverage evidence field '{name}' is missing or malformed: {path}");
+        }
+        string[] result = values.EnumerateArray().Select(value => value.ValueKind == JsonValueKind.String
+            ? value.GetString()!
+            : throw new InvalidDataException($"WDT coverage evidence field '{name}' contains a non-string: {path}")).ToArray();
+        return result;
+    }
+
+    private static void ValidateProcessOutput(string stdout, string stderr, string dataRoot,
+        string product, string locale, int build, int mapId, HashSet<(int X, int Y)> expectedAdts,
+        int expectedAdtCount, string evidencePath)
+    {
+        string[] lines = stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Trim()).ToArray();
+        string expectedBuild = $"Detected client build: {build.ToString(CultureInfo.InvariantCulture)}";
+        string expectedMap = $"Restricted extraction to MapID {mapId.ToString(CultureInfo.InvariantCulture)}.";
+        string[] storage = lines.Where(static line => line.StartsWith("Opened casc storage '", StringComparison.Ordinal)).ToArray();
+        string expectedStorageSuffix = $"' product {product} locale {locale}";
+        string[] buildMarkers = lines.Where(static line => line.StartsWith("Detected client build:", StringComparison.Ordinal)).ToArray();
+        string[] mapMarkers = lines.Where(static line => line.StartsWith("Restricted extraction to MapID ", StringComparison.Ordinal)).ToArray();
+        string[] completion = lines.Where(static line => line.StartsWith("wdt-enumeration-complete ", StringComparison.Ordinal)).ToArray();
+        string expectedCompletion = $"wdt-enumeration-complete map={mapId} build={build} visited={ForeverWdtTileList.TileCount} tiles={expectedAdtCount}";
+        if (storage.Length != 2 || storage.Any(line => !StorageOutputMatches(line, dataRoot, expectedStorageSuffix)) ||
+            buildMarkers.Length != 1 || buildMarkers[0] != expectedBuild || mapMarkers.Length != 1 || mapMarkers[0] != expectedMap ||
+            completion.Length != 1 || completion[0] != expectedCompletion || lines.Length == 0 || lines[^1] != expectedCompletion ||
+            lines.Any(static line => line.StartsWith("FATAL:", StringComparison.OrdinalIgnoreCase)) ||
+            stderr.Contains("fatal", StringComparison.OrdinalIgnoreCase) || stderr.Contains("error opening casc", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"Saved mapextractor output is incomplete or contradicts its WDT process proof: {evidencePath}");
+        }
+
+        HashSet<(int X, int Y)> observedAdts = [];
+        foreach (string line in lines)
+        {
+            string[] fields = line.Split('\t');
+            if (fields.Length == 0 || !fields[0].Equals("tile", StringComparison.OrdinalIgnoreCase)) continue;
+            if (fields.Length != 4 || !int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out int listedMap) ||
+                !int.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out int x) ||
+                !int.TryParse(fields[3], NumberStyles.None, CultureInfo.InvariantCulture, out int y) ||
+                listedMap != mapId || x is < 0 or >= 64 || y is < 0 or >= 64 || !observedAdts.Add((x, y)))
+            {
+                throw new InvalidDataException($"Saved mapextractor output contains an invalid or duplicate WDT ADT row: {evidencePath}");
+            }
+        }
+        if (!observedAdts.SetEquals(expectedAdts) || observedAdts.Count != expectedAdtCount)
+        {
+            throw new InvalidDataException($"Saved mapextractor output ADT rows do not match the WDT coverage proof: {evidencePath}");
+        }
+    }
+
+    private static bool StorageOutputMatches(string line, string dataRoot, string expectedSuffix)
+    {
+        const string markerPrefix = "Opened casc storage '";
+        if (!line.StartsWith(markerPrefix, StringComparison.Ordinal)) return false;
+        int suffixStart = line.LastIndexOf(expectedSuffix, StringComparison.Ordinal);
+        if (suffixStart < markerPrefix.Length || suffixStart + expectedSuffix.Length != line.Length) return false;
+        string listedPath = line[markerPrefix.Length..suffixStart];
+        return PathEquals(listedPath, dataRoot);
+    }
+
+    private static bool IsSupportedLocale(string locale) => locale is
+        "enUS" or "enGB" or "koKR" or "frFR" or "deDE" or "zhCN" or "zhTW" or "esES" or "esMX" or "ruRU" or "ptBR" or "itIT";
+
+    private static bool PathEquals(string left, string right) =>
+        string.Equals(Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
 
     private static bool IsSameOrChild(string path, string parent)
     {
