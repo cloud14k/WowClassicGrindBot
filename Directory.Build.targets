@@ -1,0 +1,10 @@
+<Project>
+  <ItemGroup>
+    <!--
+      Keep ignored per-project experiment/build outputs out of SDK default
+      Compile globs. Release artifacts placed under a project's own tmp folder
+      otherwise get compiled as application source on a later normal build.
+    -->
+    <Compile Remove="tmp\**\*.cs" />
+  </ItemGroup>
+</Project>

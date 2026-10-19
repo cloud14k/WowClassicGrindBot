@@ -1006,14 +1006,50 @@ internal static class P45GeometryRegression
             cache, product, build, settingsHash, mapId, continent);
         using (NavmeshPathfinder reload = CreateDiagnosticPathfinder(cache, reloadCoverage, maxResidentTiles: 1))
         {
+            if (!reload.TryGetHeight(start.X, start.Y, out float height) || MathF.Abs(height - 10f) > NavmeshSettings.CellHeight)
+                throw new InvalidOperationException($"TryGetHeight did not return the fixture ground height (actual={height}).");
+            if (!reload.TrySnapWalkable(start, out Vector3 snapped, out long snappedRef) || snappedRef == 0 ||
+                MathF.Abs(snapped.Z - 10f) > NavmeshSettings.CellHeight)
+                throw new InvalidOperationException("TrySnapWalkable did not resolve the fixture ground polygon.");
+
+            if (!RunQueryBehindDetourWriter(reload, () =>
+                    reload.TryGetHeight(start.X, start.Y, out float lockedHeight) && MathF.Abs(lockedHeight - 10f) <= NavmeshSettings.CellHeight,
+                    "TryGetHeight") ||
+                !RunQueryBehindDetourWriter(reload, () =>
+                    reload.TrySnapWalkable(start, out _, out long lockedRef) && lockedRef != 0,
+                    "TrySnapWalkable"))
+            {
+                throw new InvalidOperationException("A Detour query changed its result while waiting for the tile-cache write lock.");
+            }
+
+            // A negative Detour query must also release its read lock on the
+            // early return path, so a worker can acquire the write lock next.
+            if (reload.TrySnapWalkable(new Vector3(start.X, start.Y, 1000f), out _, out _))
+                throw new InvalidOperationException("TrySnapWalkable unexpectedly found a polygon outside its vertical search range.");
+            if (!reload.Tiles.Lock.TryEnterWriteLock(0))
+                throw new InvalidOperationException("A failed TrySnapWalkable call leaked the Detour read lock.");
+            reload.Tiles.Lock.ExitWriteLock();
+
             NavmeshPathQueryResult firstLoad = reload.FindPathWithResult(start, start, null);
             NavmeshPathQueryResult secondLoad = reload.FindPathWithResult(end, end, null);
             if (firstLoad.Path is null || firstLoad.Diagnostic is not null ||
                 secondLoad.Path is null || secondLoad.Diagnostic is not null ||
-                reload.Tiles.ResidentTiles.Contains((1, 2)))
+                reload.Tiles.ResidentTiles.Contains((1, 2)) ||
+                reload.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded ||
+                reload.Tiles.GetTileStatus(2, 2) != NavmeshRuntimeTileStatus.VerifiedEmptyNavmeshTile)
             {
-                throw new InvalidOperationException("The DNM reload fixture did not load two tiles and evict the first tile.");
+                throw new InvalidOperationException("The DNM reload fixture did not load two tiles, evict the first, and report it as ExpectedDnmNotLoaded.");
             }
+
+            NavmeshPathQueryResult validReload = reload.FindPathWithResult(start, start, null);
+            if (validReload.Path is null || validReload.Diagnostic is not null ||
+                reload.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.Loaded)
+                throw new InvalidOperationException("A valid Forever DNM did not reload as Loaded after LRU eviction.");
+
+            NavmeshPathQueryResult evictAgain = reload.FindPathWithResult(end, end, null);
+            if (evictAgain.Path is null || evictAgain.Diagnostic is not null ||
+                reload.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded)
+                throw new InvalidOperationException("A reloaded Forever DNM did not return to ExpectedDnmNotLoaded after eviction.");
 
             byte[] substitutedDnm = CreateDnmBytes(1, 2, groundHeight: 12f);
             File.WriteAllBytes(tileOne, substitutedDnm);
@@ -1066,9 +1102,20 @@ internal static class P45GeometryRegression
         string legacyCache = Path.Combine(root, "runtime-diagnostic-legacy-no-manifest");
         Directory.CreateDirectory(legacyCache);
         WriteDnm(legacyCache, 1, 2);
-        using NavmeshPathfinder legacy = CreateDiagnosticPathfinder(legacyCache, runtimeCoverage: null);
-        if (legacy.FindPath(start, start, null) is null || legacy.LastDiagnostic is not null)
+        WriteDnm(legacyCache, 3, 2);
+        using NavmeshPathfinder legacy = CreateDiagnosticPathfinder(legacyCache, runtimeCoverage: null, maxResidentTiles: 1);
+        if (legacy.FindPath(start, start, null) is null || legacy.LastDiagnostic is not null ||
+            legacy.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.Loaded)
             throw new InvalidOperationException("A Classic-era-style cache without a Forever manifest changed its legacy path behavior.");
+        if (legacy.FindPath(end, end, null) is null || legacy.LastDiagnostic is not null ||
+            legacy.Tiles.GetTileStatus(1, 2) == NavmeshRuntimeTileStatus.Loaded)
+            throw new InvalidOperationException("A Classic dynamic cache continued reporting an LRU-evicted tile as Loaded.");
+        if (legacy.FindPath(start, start, null) is null || legacy.LastDiagnostic is not null ||
+            legacy.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.Loaded)
+            throw new InvalidOperationException("A Classic dynamic tile did not reload after LRU eviction.");
+
+        RunBackgroundLoadDuringHeightRegression(root, product, build, mapId, settingsHash, continent, start);
+        RunLruEvictionDuringSnapRegression(root, product, build, mapId, settingsHash, continent, start);
 
         using NavmeshPathfinder concurrent = CreateDiagnosticPathfinder(cache, coverage);
         using ManualResetEventSlim startTogether = new(false);
@@ -1122,6 +1169,159 @@ internal static class P45GeometryRegression
         {
             throw new InvalidOperationException("Concurrent failure queries cross-assigned their failure reasons, coordinates, or affected tiles.");
         }
+
+        RunInterleavedHeightSnapPathRegression(concurrent, start, end);
+    }
+
+    private static bool RunQueryBehindDetourWriter(NavmeshPathfinder pathfinder, Func<bool> query,
+        string scenario, Action? whileWriteLocked = null)
+    {
+        using ManualResetEventSlim started = new(false);
+        bool succeeded = false;
+        Exception? failure = null;
+        Thread thread = new(() =>
+        {
+            started.Set();
+            try
+            {
+                succeeded = query();
+            }
+            catch (Exception ex)
+            {
+                failure = ex;
+            }
+        });
+
+        bool waitedForLock = false;
+        pathfinder.Tiles.Lock.EnterWriteLock();
+        try
+        {
+            whileWriteLocked?.Invoke();
+            thread.Start();
+            if (!started.Wait(TimeSpan.FromSeconds(2)))
+                throw new InvalidOperationException($"{scenario} query thread did not start.");
+            waitedForLock = SpinWait.SpinUntil(
+                () => (thread.ThreadState & System.Threading.ThreadState.WaitSleepJoin) != 0,
+                TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            pathfinder.Tiles.Lock.ExitWriteLock();
+        }
+
+        if (!thread.Join(TimeSpan.FromSeconds(5)))
+            throw new InvalidOperationException($"{scenario} deadlocked after the Detour write lock was released.");
+        if (!waitedForLock)
+            throw new InvalidOperationException($"{scenario} accessed DtNavMesh without waiting for its write lock.");
+        if (failure is not null)
+            throw new InvalidOperationException($"{scenario} threw while waiting for the Detour write lock.", failure);
+        return succeeded;
+    }
+
+    private static void RunBackgroundLoadDuringHeightRegression(string root, string product, int build,
+        int mapId, string settingsHash, string continent, Vector3 point)
+    {
+        string cache = Path.Combine(root, "runtime-diagnostic-background-height-load");
+        WriteCache(cache, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent,
+            bakedTiles: new[] { (1, 2), (3, 2) });
+        ForeverNavmeshRuntimeCoverage coverage = ForeverNavmeshCacheManifest.ReadCoverageForRuntime(
+            cache, product, build, settingsHash, mapId, continent);
+        using NavmeshPathfinder pathfinder = CreateDiagnosticPathfinder(cache, coverage, maxResidentTiles: 2);
+        using ManualResetEventSlim startTogether = new(false);
+        using ManualResetEventSlim tileThreeAdded = new(false);
+        pathfinder.Tiles.NotifyTileAdded += (x, z, _) =>
+        {
+            if (x == 3 && z == 2)
+                tileThreeAdded.Set();
+        };
+
+        Task prefetch = Task.Run(() =>
+        {
+            startTogether.Wait();
+            pathfinder.Tiles.Prefetch(3, 2);
+        });
+        Task heightQueries = Task.Run(() =>
+        {
+            startTogether.Wait();
+            for (int i = 0; i < 8; i++)
+            {
+                if (!pathfinder.TryGetHeight(point.X, point.Y, out float height) || MathF.Abs(height - 10f) > NavmeshSettings.CellHeight)
+                    throw new InvalidOperationException("TryGetHeight failed while a background worker loaded another DNM tile.");
+            }
+        });
+
+        startTogether.Set();
+        if (!Task.WaitAll([prefetch, heightQueries], TimeSpan.FromSeconds(10)) ||
+            !tileThreeAdded.Wait(TimeSpan.FromSeconds(5)) ||
+            pathfinder.Tiles.GetTileStatus(3, 2) != NavmeshRuntimeTileStatus.Loaded)
+            throw new InvalidOperationException("The controlled background DNM load did not complete alongside height queries.");
+    }
+
+    private static void RunLruEvictionDuringSnapRegression(string root, string product, int build,
+        int mapId, string settingsHash, string continent, Vector3 point)
+    {
+        string cache = Path.Combine(root, "runtime-diagnostic-background-lru-snap");
+        WriteCache(cache, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent,
+            bakedTiles: new[] { (1, 2), (3, 2), (5, 2) });
+        ForeverNavmeshRuntimeCoverage coverage = ForeverNavmeshCacheManifest.ReadCoverageForRuntime(
+            cache, product, build, settingsHash, mapId, continent);
+        using NavmeshPathfinder pathfinder = CreateDiagnosticPathfinder(cache, coverage, maxResidentTiles: 2);
+        Vector3 olderTile = TileWorldPoint(3, 2);
+        if (pathfinder.FindPath(olderTile, olderTile, null) is null ||
+            pathfinder.FindPath(point, point, null) is null)
+            throw new InvalidOperationException("Could not establish the deterministic LRU order for the snap query fixture.");
+
+        using ManualResetEventSlim tileFiveAdded = new(false);
+        using ManualResetEventSlim tileThreeRemoved = new(false);
+        pathfinder.Tiles.NotifyTileAdded += (x, z, _) =>
+        {
+            if (x == 5 && z == 2)
+                tileFiveAdded.Set();
+        };
+        pathfinder.Tiles.NotifyTileRemoved += (x, z) =>
+        {
+            if (x == 3 && z == 2)
+                tileThreeRemoved.Set();
+        };
+
+        bool snapped = RunQueryBehindDetourWriter(pathfinder, () =>
+            pathfinder.TrySnapWalkable(point, out _, out long polyRef) && polyRef != 0,
+            "TrySnapWalkable during LRU eviction",
+            whileWriteLocked: () => pathfinder.Tiles.Prefetch(5, 2));
+        if (!snapped || !tileFiveAdded.Wait(TimeSpan.FromSeconds(5)) ||
+            !tileThreeRemoved.Wait(TimeSpan.FromSeconds(5)) ||
+            pathfinder.Tiles.GetTileStatus(1, 2) != NavmeshRuntimeTileStatus.Loaded ||
+            pathfinder.Tiles.GetTileStatus(3, 2) != NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded ||
+            pathfinder.Tiles.GetTileStatus(5, 2) != NavmeshRuntimeTileStatus.Loaded)
+        {
+            throw new InvalidOperationException("TrySnapWalkable did not remain valid while a worker loaded a tile and LRU-evicted a different resident tile.");
+        }
+    }
+
+    private static void RunInterleavedHeightSnapPathRegression(NavmeshPathfinder pathfinder,
+        Vector3 first, Vector3 second)
+    {
+        using ManualResetEventSlim startTogether = new(false);
+        Task[] queries = Enumerable.Range(0, 4).Select(worker => Task.Run(() =>
+        {
+            startTogether.Wait();
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 point = ((worker + i) & 1) == 0 ? first : second;
+                if (!pathfinder.TryGetHeight(point.X, point.Y, out float height) || MathF.Abs(height - 10f) > NavmeshSettings.CellHeight ||
+                    !pathfinder.TrySnapWalkable(point, out _, out long polyRef) || polyRef == 0)
+                    throw new InvalidOperationException("Interleaved height/snap queries returned an invalid result.");
+
+                NavmeshPathQueryResult result = pathfinder.FindPathWithResult(point, point, null);
+                if (result.Path is null || result.Diagnostic is not null)
+                    throw new InvalidOperationException("FindPath changed behavior while height and snap queries ran concurrently.");
+            }
+        })).ToArray();
+        startTogether.Set();
+        if (!Task.WaitAll(queries, TimeSpan.FromSeconds(15)))
+            throw new InvalidOperationException("Concurrent height, snap, and FindPath queries deadlocked or exceeded the regression timeout.");
     }
 
     private static void AddVerifiedEmptyTile(string cacheDirectory, string product, int build, int mapId,

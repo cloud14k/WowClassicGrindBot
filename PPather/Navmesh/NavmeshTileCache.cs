@@ -730,6 +730,11 @@ public sealed class NavmeshTileCache : IDisposable
                 navMesh.RemoveTile(refs);
             }
 
+            if (runtimeCoverage?.ContainsBakedTile(oldest.x, oldest.z) == true)
+                runtimeTileStates[oldest] = NavmeshRuntimeTileStatus.ExpectedDnmNotLoaded;
+            else
+                runtimeTileStates.TryRemove(oldest, out _);
+
             resident.TryRemove(oldest, out _);
             NotifyTileRemoved?.Invoke(oldest.x, oldest.z);
         }

@@ -302,21 +302,29 @@ public sealed class NavmeshPathfinder : IDisposable
         Vector3 extents = new(8f, 4096f, 8f);
         Vector3 rc = NavmeshCoords.ToRc(wow);
 
-        filter.BeginQuery();
-        DtStatus status = query.FindNearestPoly(rc, extents, filter,
-            out long refs, out Vector3 nearest, out _);
-        if (!status.Succeeded() || refs == 0)
+        tiles.Lock.EnterReadLock();
+        try
         {
-            return false;
-        }
+            filter.BeginQuery();
+            DtStatus status = query.FindNearestPoly(rc, extents, filter,
+                out long refs, out Vector3 nearest, out _);
+            if (!status.Succeeded() || refs == 0)
+            {
+                return false;
+            }
 
-        if (!query.ClosestPointOnPoly(refs, rc, out Vector3 closest, out _).Succeeded())
+            if (!query.ClosestPointOnPoly(refs, rc, out Vector3 closest, out _).Succeeded())
+            {
+                closest = nearest;
+            }
+
+            z = NavmeshCoords.ToWow(closest).Z;
+            return true;
+        }
+        finally
         {
-            closest = nearest;
+            tiles.Lock.ExitReadLock();
         }
-
-        z = NavmeshCoords.ToWow(closest).Z;
-        return true;
     }
 
     /// <summary>
@@ -358,27 +366,35 @@ public sealed class NavmeshPathfinder : IDisposable
 
         Vector3 rc = NavmeshCoords.ToRc(wowPointHint);
 
-        filter.BeginQuery();
-
-        // Tight box on purpose. The caller supplies a hint whose height it trusts (it is
-        // offset from a real spawn position), and a tall box is exactly what lets a probe
-        // climb onto a roof or canopy above the floor that was meant.
-        DtStatus status = query.FindNearestPoly(rc, SampleAnchorExtents, filter,
-            out long refs, out Vector3 nearest, out _);
-
-        if (!status.Succeeded() || refs == 0)
+        tiles.Lock.EnterReadLock();
+        try
         {
-            return false;
-        }
+            filter.BeginQuery();
 
-        if (!query.ClosestPointOnPoly(refs, rc, out Vector3 closest, out _).Succeeded())
+            // Tight box on purpose. The caller supplies a hint whose height it trusts (it is
+            // offset from a real spawn position), and a tall box is exactly what lets a probe
+            // climb onto a roof or canopy above the floor that was meant.
+            DtStatus status = query.FindNearestPoly(rc, SampleAnchorExtents, filter,
+                out long refs, out Vector3 nearest, out _);
+
+            if (!status.Succeeded() || refs == 0)
+            {
+                return false;
+            }
+
+            if (!query.ClosestPointOnPoly(refs, rc, out Vector3 closest, out _).Succeeded())
+            {
+                closest = nearest;
+            }
+
+            wowPoint = NavmeshCoords.ToWow(closest);
+            polyRef = refs;
+            return true;
+        }
+        finally
         {
-            closest = nearest;
+            tiles.Lock.ExitReadLock();
         }
-
-        wowPoint = NavmeshCoords.ToWow(closest);
-        polyRef = refs;
-        return true;
     }
 
     public Path? FindPath(Vector3 wowFrom, Vector3 wowTo, bool? startIndoors) =>
