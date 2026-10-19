@@ -1,6 +1,7 @@
 using System.Numerics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 using DotRecast.Core;
 using DotRecast.Detour;
@@ -24,7 +25,8 @@ public sealed record BakedTileRecord(
 
 public sealed record BakeVerification(int TileCount, int AddTileCount, int CrossTileLinkCount,
     bool HeightQuerySucceeded, bool ConnectedPathSucceeded, int PathPolyCount,
-    float[] StartWow, float[] EndWow, string SettingsHash, IReadOnlyList<BakedTileRecord> Tiles);
+    float[] StartWow, float[] EndWow, string SettingsHash, IReadOnlyList<BakedTileRecord> Tiles,
+    IReadOnlyList<(int X, int Z)>? EmptyTiles = null);
 
 public sealed record DnmSetVerification(int TileCount, int AddTileCount, int CrossTileLinkCount,
     bool HeightQuerySucceeded, bool ConnectedPathSucceeded, int PathPolyCount,
@@ -292,11 +294,23 @@ public static class ForeverGeometryBakeVerifier
         }
 
         List<(ForeverGeometryTile Source, DtMeshData Data, string Path, string Sha256)> loadedTiles = [];
+        List<ForeverGeometryTile> emptyTiles = [];
         foreach (ForeverGeometryTile source in selected)
         {
             TileGeometry geometry = source.ToTileGeometry();
-            DtMeshData data = NavmeshTileBuilder.Bake(geometry, source.DtTileX, source.DtTileZ, bake)
-                ?? throw new InvalidDataException($"NavmeshTileBuilder returned no polygons for tile ({source.DtTileX},{source.DtTileZ}).");
+            NavmeshTileBakeResult bakeResult = NavmeshTileBuilder.BakeWithResult(
+                geometry, source.DtTileX, source.DtTileZ, bake);
+            if (bakeResult.Disposition == NavmeshTileBakeDisposition.NoWalkablePolygons)
+            {
+                if (bakeResult.PolygonCount != 0 || bakeResult.MeshData is not null)
+                    throw new InvalidDataException($"Empty tile ({source.DtTileX},{source.DtTileZ}) returned polygons or Detour data.");
+                emptyTiles.Add(source);
+                continue;
+            }
+            DtMeshData data = bakeResult.MeshData
+                ?? throw new InvalidDataException($"NavmeshTileBuilder returned success without mesh data for ({source.DtTileX},{source.DtTileZ}).");
+            if (bakeResult.PolygonCount <= 0)
+                throw new InvalidDataException($"NavmeshTileBuilder returned no polygons for tile ({source.DtTileX},{source.DtTileZ}).");
 
             string fileName = $"tile_{source.DtTileX}_{source.DtTileZ}.dnm";
             string dnmPath = Path.Combine(outputDirectory, fileName);
@@ -470,9 +484,9 @@ public static class ForeverGeometryBakeVerifier
                 string.Join(", ", missingBoundaryLinks.Select(static pair => $"({pair.Ax},{pair.Az})-({pair.Bx},{pair.Bz})")));
         }
 
-        bool heightQuerySucceeded = locallyVerifiedTiles.Count == loadedTiles.Count;
+        bool heightQuerySucceeded = loadedTiles.Count > 0 && locallyVerifiedTiles.Count == loadedTiles.Count;
         bool pathSucceeded = heightQuerySucceeded && !invalidCrossTilePath;
-        if (!heightQuerySucceeded || !pathSucceeded)
+        if (loadedTiles.Count > 0 && (!heightQuerySucceeded || !pathSucceeded))
         {
             throw new InvalidDataException(
                 $"The loaded .dnm set failed local height/path verification for {loadedTiles.Count - locallyVerifiedTiles.Count} tile(s), " +
@@ -485,6 +499,9 @@ public static class ForeverGeometryBakeVerifier
             item.Data.header.polyCount, item.Data.header.vertCount,
             item.Source.TileCounts.TerrainTriangles, item.Source.TileCounts.CollisionTriangles,
             item.Source.TileCounts.LiquidTriangles)).ToArray();
+        JsonArray emptyEvidence = WriteEmptyTileEvidence(outputDirectory, aggregate, profile, emptyTiles);
+        int[][] completedTilePairs = requestedTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z)
+            .Select(static tile => new[] { tile.X, tile.Z }).ToArray();
         var manifest = new
         {
             format = ForeverNavmeshCacheManifest.Format,
@@ -525,14 +542,24 @@ public static class ForeverGeometryBakeVerifier
                 start_wow = new[] { startWow.X, startWow.Y, startWow.Z },
                 end_wow = new[] { endWow.X, endWow.Y, endWow.Z },
             },
+            coverage = new
+            {
+                expected_tile_indices = completedTilePairs,
+                completed_tile_indices = completedTilePairs,
+            },
             tiles = records,
+            empty_navmesh_tiles = emptyEvidence,
         };
         using FileStream manifestStream = File.Create(Path.Combine(outputDirectory, "manifest.json"));
         JsonSerializer.Serialize(manifestStream, manifest, JsonOptions);
 
+        ForeverNavmeshCacheManifest.ValidateSelectedPackForTest(outputDirectory, profile.ClientProduct,
+            profile.ClientBuild, profile.SettingsHash, aggregate.MapId);
+
         return new BakeVerification(loadedTiles.Count, loadedTiles.Count, crossTileLinks,
             heightQuerySucceeded, pathSucceeded, pathPolyCount,
-            [startWow.X, startWow.Y, startWow.Z], [endWow.X, endWow.Y, endWow.Z], settingsHash, records);
+            [startWow.X, startWow.Y, startWow.Z], [endWow.X, endWow.Y, endWow.Z], settingsHash, records,
+            emptyTiles.Select(static tile => (tile.DtTileX, tile.DtTileZ)).ToArray());
     }
 
     private static IEnumerable<(int Ax, int Az, int Bx, int Bz)> FindExpectedBoundaryLinks(
@@ -552,6 +579,82 @@ public static class ForeverGeometryBakeVerifier
                 yield return (x, z, x, z + 1);
             }
         }
+    }
+
+    private static JsonArray WriteEmptyTileEvidence(string outputDirectory, GeometryAggregate aggregate,
+        ForeverNavmeshBakeProfile profile, IReadOnlyCollection<ForeverGeometryTile> emptyTiles)
+    {
+        JsonArray records = [];
+        if (emptyTiles.Count == 0) return records;
+
+        string fullRoot = Path.GetFullPath(outputDirectory);
+        if ((File.GetAttributes(fullRoot) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException($"The DNM output directory must not be a reparse point: {fullRoot}");
+        string coverageRoot = Path.Combine(fullRoot, "coverage");
+        Directory.CreateDirectory(coverageRoot);
+        if ((File.GetAttributes(coverageRoot) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException($"The DNM coverage evidence directory must not be a reparse point: {coverageRoot}");
+
+        foreach (ForeverGeometryTile tile in emptyTiles.OrderBy(static tile => tile.DtTileX)
+                     .ThenBy(static tile => tile.DtTileZ))
+        {
+            HashSet<(int X, int Y)> contributors = tile.SourceAdtsXY
+                .Select(static pair => (pair[0], pair[1])).ToHashSet();
+            GeometrySourceRecord[] sources = aggregate.Sources.Where(source =>
+                    contributors.Contains((source.AdtXY[0], source.AdtXY[1])))
+                .OrderBy(static source => source.AdtXY[1]).ThenBy(static source => source.AdtXY[0]).ToArray();
+            if (sources.Length == 0 || sources.Length != contributors.Count ||
+                sources.Length != tile.SourceSha256s.Length ||
+                sources.Select(static source => source.Sha256)
+                    .SequenceEqual(tile.SourceSha256s, StringComparer.OrdinalIgnoreCase) == false ||
+                tile.TileCounts.TerrainTriangles + tile.TileCounts.CollisionTriangles + tile.TileCounts.LiquidTriangles <= 0)
+            {
+                throw new InvalidDataException($"Empty tile ({tile.DtTileX},{tile.DtTileZ}) has no consistent geometry source evidence.");
+            }
+
+            byte[] geometryBytes = JsonSerializer.SerializeToUtf8Bytes(tile, JsonOptions);
+            string geometrySha = Convert.ToHexString(SHA256.HashData(geometryBytes)).ToLowerInvariant();
+            string sourceSetSha = ForeverGeometryAggregator.ComputeSourceSetHash(sources);
+            JsonObject payload = new()
+            {
+                ["format"] = ForeverNavmeshCacheManifest.EmptyNavmeshEvidenceFormat,
+                ["result"] = "completed_no_walkable_polygons",
+                ["client_product"] = aggregate.ClientProduct,
+                ["client_build"] = aggregate.ClientBuild,
+                ["map_id"] = aggregate.MapId,
+                ["dt_tile_x"] = tile.DtTileX,
+                ["dt_tile_z"] = tile.DtTileZ,
+                ["settings_hash"] = profile.SettingsHash,
+                ["dotrecast_version"] = profile.DotRecastVersion,
+                ["geometry_export_version"] = profile.GeometryExportVersion,
+                ["raw_geometry_format"] = profile.RawGeometryFormat,
+                ["polygon_count"] = 0,
+                ["geometry_sha256"] = geometrySha,
+                ["source_set_sha256"] = sourceSetSha,
+                ["source_adts_xy"] = JsonSerializer.SerializeToNode(sources.Select(static source => source.AdtXY).ToArray(), JsonOptions),
+                ["source_sha256s"] = JsonSerializer.SerializeToNode(sources.Select(static source => source.Sha256).ToArray(), JsonOptions),
+                ["terrain_triangles"] = tile.TileCounts.TerrainTriangles,
+                ["collision_triangles"] = tile.TileCounts.CollisionTriangles,
+                ["liquid_triangles"] = tile.TileCounts.LiquidTriangles,
+            };
+            byte[] evidenceBytes = System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            string evidenceSha = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
+            string relativePath = $"{ForeverNavmeshCacheManifest.EmptyNavmeshEvidencePathPrefix}" +
+                                  $"{tile.DtTileX}-{tile.DtTileZ}-{evidenceSha}.json";
+            string evidencePath = Path.Combine(fullRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
+            if (File.Exists(evidencePath))
+                throw new IOException($"Empty navmesh evidence path unexpectedly exists in a new output directory: {evidencePath}");
+            string temporaryPath = evidencePath + ".partial";
+            File.WriteAllBytes(temporaryPath, evidenceBytes);
+            File.Move(temporaryPath, evidencePath, overwrite: false);
+            records.Add(new JsonObject
+            {
+                ["evidence_file"] = relativePath,
+                ["evidence_sha256"] = evidenceSha,
+                ["evidence"] = payload.DeepClone(),
+            });
+        }
+        return records;
     }
 
     private static (int Ax, int Az, int Bx, int Bz) NormalizeTilePair(int ax, int az, int bx, int bz) =>

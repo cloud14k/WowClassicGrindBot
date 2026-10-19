@@ -14,8 +14,10 @@ internal sealed record ForeverWdtEnumerationResult(
     int Build,
     string Product,
     string Locale,
+    string CacheRoot,
     string ClientRoot,
     string DataRoot,
+    string ExecutablePath,
     string OutputDirectory,
     string[] Arguments,
     string ExecutableSha256,
@@ -123,6 +125,13 @@ internal static class ForeverWdtTileEnumerator
             {
                 throw new InvalidOperationException("The mapextractor process must run without a shell.");
             }
+            if (processFactory is null &&
+                (!PathEquals(startInfo.FileName, executable) ||
+                 !PathEquals(startInfo.WorkingDirectory, toolRoot) ||
+                 !startInfo.ArgumentList.SequenceEqual(arguments, StringComparer.Ordinal)))
+            {
+                throw new InvalidOperationException("The production mapextractor invocation differs from its validated executable, working directory or exact argument list.");
+            }
             startInfo.RedirectStandardOutput = true;
             startInfo.RedirectStandardError = true;
             startInfo.StandardOutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
@@ -213,8 +222,9 @@ internal static class ForeverWdtTileEnumerator
                     $"stdout={adts.Count} native={parsed.Adts.Count} Build={parsed.Build}.");
             }
 
-            return new ForeverWdtEnumerationResult(mapId, build, product, locale, fullClientRoot,
-                dataRoot, fullScratch, arguments, executableHash, stdout, stderr, nativeTileList, adts);
+            return new ForeverWdtEnumerationResult(mapId, build, product, locale, fullCacheRoot,
+                fullClientRoot, dataRoot, executable, fullScratch, arguments, executableHash,
+                stdout, stderr, nativeTileList, adts);
         }
         finally
         {
@@ -250,11 +260,21 @@ internal static class ForeverWdtTileEnumerator
         }
 
         string[] storageMarkers = lines.Where(static line => line.StartsWith("Opened casc storage '", StringComparison.Ordinal)).ToArray();
+        string[] storageIdentityMarkers = storageMarkers
+            .Where(static marker => marker.Contains("' product ", StringComparison.Ordinal)).ToArray();
         string[] buildMarkers = lines.Where(static line => line.StartsWith("Detected client build:", StringComparison.Ordinal)).ToArray();
         string[] mapMarkers = lines.Where(static line => line.StartsWith("Restricted extraction to MapID ", StringComparison.Ordinal)).ToArray();
         string expectedBuild = $"Detected client build: {build.ToString(CultureInfo.InvariantCulture)}";
         string expectedMap = $"Restricted extraction to MapID {mapId.ToString(CultureInfo.InvariantCulture)}.";
-        if (storageMarkers.Length != 2 || storageMarkers.Any(marker => !StorageMarkerMatches(marker, dataRoot, product, locale)) ||
+        // CascLib prints an unqualified storage-open line for each open, while
+        // the pinned mapextractor wrapper prints its own product/locale identity
+        // line around the two opens (once for build detection and once for map
+        // extraction). Validate every observed path, but require exactly those
+        // two identity-bearing wrapper lines.
+        if (storageMarkers.Length <= storageIdentityMarkers.Length ||
+            storageMarkers.Any(marker => !StoragePathMatches(marker, dataRoot)) ||
+            storageIdentityMarkers.Length != 2 ||
+            storageIdentityMarkers.Any(marker => !StorageIdentityMatches(marker, product, locale)) ||
             buildMarkers.Length != 1 || buildMarkers[0] != expectedBuild ||
             mapMarkers.Length != 1 || mapMarkers[0] != expectedMap)
         {
@@ -300,16 +320,25 @@ internal static class ForeverWdtTileEnumerator
         return adts;
     }
 
-    private static bool StorageMarkerMatches(string marker, string expectedDataRoot,
-        string expectedProduct, string expectedLocale)
+    private static bool StoragePathMatches(string marker, string expectedDataRoot)
     {
         const string prefix = "Opened casc storage '";
-        int pathEnd = marker.IndexOf("' product ", prefix.Length, StringComparison.Ordinal);
-        if (!marker.StartsWith(prefix, StringComparison.Ordinal) || pathEnd < prefix.Length) return false;
+        if (!marker.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        int pathEnd = marker.IndexOf('\'', prefix.Length);
+        if (pathEnd < prefix.Length) return false;
         string listedPath = marker[prefix.Length..pathEnd];
-        string suffix = marker[(pathEnd + "' product ".Length)..];
+        string suffix = marker[(pathEnd + 1)..];
         return PathEquals(listedPath, expectedDataRoot) &&
-               suffix.Equals($"{expectedProduct} locale {expectedLocale}", StringComparison.Ordinal);
+               (suffix.Length == 0 || suffix.StartsWith(" product ", StringComparison.Ordinal));
+    }
+
+    private static bool StorageIdentityMatches(string marker, string expectedProduct, string expectedLocale)
+    {
+        const string identitySeparator = "' product ";
+        int identityStart = marker.IndexOf(identitySeparator, StringComparison.Ordinal);
+        if (identityStart < 0) return false;
+        string suffix = marker[(identityStart + identitySeparator.Length)..];
+        return suffix.Equals($"{expectedProduct} locale {expectedLocale}", StringComparison.Ordinal);
     }
 
     private static void ValidateToolProvenance(string path, string executableHash)

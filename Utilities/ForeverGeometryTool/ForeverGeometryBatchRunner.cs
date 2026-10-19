@@ -204,6 +204,16 @@ public static class ForeverGeometryBatchRunner
         if (state.SourceTasks.Any(static task => task.Status != "succeeded"))
         {
             const string failure = "One or more source ADT tasks failed; see batch-state.json.";
+            foreach (BatchTileTask tile in state.TileTasks)
+            {
+                if (tile.Status == "succeeded" || tile.Status == "empty")
+                {
+                    tile.Status = "failed";
+                    tile.EmptyNavmeshVerified = false;
+                    tile.FailureReason = "A requested source ADT failed or changed; prior tile result is no longer complete for this batch.";
+                    tile.UpdatedUtc = DateTimeOffset.UtcNow;
+                }
+            }
             RecordFailedBatch(statePath, state, outputRoot, dnmRoot, totalTimer, peakWorkingSet, failure);
             throw new InvalidDataException(failure);
         }
@@ -260,9 +270,13 @@ public static class ForeverGeometryBatchRunner
             string contributorHash = ForeverGeometryAggregator.ComputeSourceSetHash(contributorRecords);
             string dnmPath = Path.Combine(dnmRoot, $"tile_{tileX}_{tileZ}.dnm");
             string geometryPath = Path.Combine(outputRoot, "tiles", $"tile_{tileX}_{tileZ}.geometry.json");
+            bool geometryMatches = File.Exists(geometryPath) && task.GeometrySha256 == HashFile(geometryPath);
             bool canReuse = task.Status == "succeeded" && task.SourceSetHash == contributorHash &&
-                task.ConfigHash == resolvedProfile.SettingsHash && File.Exists(dnmPath) && File.Exists(geometryPath) &&
-                task.DnmSha256 == HashFile(dnmPath) && task.GeometrySha256 == HashFile(geometryPath);
+                task.ConfigHash == resolvedProfile.SettingsHash && File.Exists(dnmPath) && geometryMatches &&
+                task.DnmSha256 == HashFile(dnmPath);
+            bool canReuseEmpty = task.Status == "empty" && task.EmptyNavmeshVerified &&
+                task.SourceSetHash == contributorHash && task.ConfigHash == resolvedProfile.SettingsHash &&
+                !File.Exists(dnmPath) && geometryMatches;
             task.SourceSetHash = contributorHash;
             task.ConfigHash = resolvedProfile.SettingsHash;
             task.ClientProduct = resolvedProfile.ClientProduct;
@@ -290,6 +304,21 @@ public static class ForeverGeometryBatchRunner
                 }
             }
 
+            if (canReuseEmpty)
+            {
+                ForeverGeometryTile savedGeometry = ReadTileGeometry(geometryPath);
+                ValidateTileGeometryIdentity(savedGeometry, request.MapId, tileX, tileZ,
+                    resolvedProfile.ClientProduct, resolvedProfile.ClientBuild, contributors);
+                NavmeshTileBakeResult priorEmptyResult = NavmeshTileBuilder.BakeWithResult(
+                    savedGeometry.ToTileGeometry(), tileX, tileZ, CreateOptions(request));
+                if (priorEmptyResult.Disposition == NavmeshTileBakeDisposition.NoWalkablePolygons &&
+                    priorEmptyResult.PolygonCount == 0 && priorEmptyResult.MeshData is null)
+                {
+                    reusedTiles++;
+                    continue;
+                }
+            }
+
             task.Status = task.AttemptCount > 0 ? "retry" : "pending";
             task.AttemptCount++;
             task.FailureReason = null;
@@ -308,6 +337,8 @@ public static class ForeverGeometryBatchRunner
                     request.PaddingYards, request.WalkableSlope, request.MinWorldZ, request.Continent));
                 ForeverGeometryTile tile = aggregate.Tiles.SingleOrDefault(item => item.DtTileX == tileX && item.DtTileZ == tileZ)
                     ?? throw new InvalidDataException($"Tile-wise aggregation produced no geometry for ({tileX},{tileZ}).");
+                ValidateTileGeometryIdentity(tile, request.MapId, tileX, tileZ,
+                    resolvedProfile.ClientProduct, resolvedProfile.ClientBuild, contributors);
 
                 Directory.CreateDirectory(Path.GetDirectoryName(geometryPath)!);
                 using (FileStream geometryStream = File.Create(geometryPath))
@@ -315,18 +346,39 @@ public static class ForeverGeometryBatchRunner
                     JsonSerializer.Serialize(geometryStream, tile, JsonOptions);
                 }
 
-                DtMeshData data = NavmeshTileBuilder.Bake(tile.ToTileGeometry(), tileX, tileZ, CreateOptions(request))
-                    ?? throw new InvalidDataException($"NavmeshTileBuilder returned no navmesh polygons for ({tileX},{tileZ}).");
-                WriteDnmAtomically(dnmPath, data);
                 task.GeometryOutputPath = geometryPath;
                 task.GeometrySha256 = HashFile(geometryPath);
-                task.DnmOutputPath = dnmPath;
-                task.DnmSha256 = HashFile(dnmPath);
                 task.TerrainTriangles = tile.TileCounts.TerrainTriangles;
                 task.CollisionTriangles = tile.TileCounts.CollisionTriangles;
                 task.LiquidTriangles = tile.TileCounts.LiquidTriangles;
-                task.DnmReadbackSucceeded = true;
-                task.Status = "succeeded";
+                NavmeshTileBakeResult bakeResult = NavmeshTileBuilder.BakeWithResult(
+                    tile.ToTileGeometry(), tileX, tileZ, CreateOptions(request));
+                if (bakeResult.Disposition == NavmeshTileBakeDisposition.NoWalkablePolygons)
+                {
+                    if (bakeResult.PolygonCount != 0 || bakeResult.MeshData is not null)
+                    {
+                        throw new InvalidDataException($"The empty navmesh result for ({tileX},{tileZ}) contains mesh data or polygons.");
+                    }
+                    if (File.Exists(dnmPath)) File.Delete(dnmPath);
+                    task.DnmOutputPath = "";
+                    task.DnmSha256 = "";
+                    task.DnmReadbackSucceeded = false;
+                    task.EmptyNavmeshVerified = true;
+                    task.Status = "empty";
+                }
+                else
+                {
+                    DtMeshData data = bakeResult.MeshData
+                        ?? throw new InvalidDataException($"NavmeshTileBuilder returned a success result without mesh data for ({tileX},{tileZ}).");
+                    if (bakeResult.PolygonCount <= 0)
+                        throw new InvalidDataException($"NavmeshTileBuilder returned a success result with no polygons for ({tileX},{tileZ}).");
+                    WriteDnmAtomically(dnmPath, data);
+                    task.DnmOutputPath = dnmPath;
+                    task.DnmSha256 = HashFile(dnmPath);
+                    task.DnmReadbackSucceeded = true;
+                    task.EmptyNavmeshVerified = false;
+                    task.Status = "succeeded";
+                }
             }
             catch (Exception ex)
             {
@@ -345,20 +397,27 @@ public static class ForeverGeometryBatchRunner
             }
         }
 
-        if (state.TileTasks.Any(static task => task.Status != "succeeded"))
+        if (state.TileTasks.Any(static task => task.Status is not ("succeeded" or "empty")))
         {
             const string failure = "One or more target tile tasks failed; see batch-state.json.";
             RecordFailedBatch(statePath, state, outputRoot, dnmRoot, totalTimer, peakWorkingSet, failure);
             throw new InvalidDataException(failure);
         }
 
-        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(dnmRoot, targetTiles);
+        (int X, int Z)[] bakedTiles = state.TileTasks.Where(static task => task.Status == "succeeded")
+            .Select(static task => (task.TileX, task.TileZ)).OrderBy(static tile => tile.TileX)
+            .ThenBy(static tile => tile.TileZ).ToArray();
+        DnmSetVerification verification = VerifyBatchDnmSet(dnmRoot, bakedTiles);
         foreach (BatchTileTask task in state.TileTasks)
         {
-            task.DnmReadbackSucceeded = true;
-            task.HeightQuerySucceeded = verification.HeightQuerySucceeded;
-            task.ConnectedPathSucceeded = verification.ConnectedPathSucceeded;
-            task.CrossTileLinkCount = verification.CrossTileLinkCount;
+            if (task.Status == "succeeded")
+            {
+                task.DnmReadbackSucceeded = true;
+                task.HeightQuerySucceeded = verification.HeightQuerySucceeded;
+                task.ConnectedPathSucceeded = verification.ConnectedPathSucceeded;
+                task.CrossTileLinkCount = verification.CrossTileLinkCount;
+                task.EmptyNavmeshVerified = false;
+            }
         }
 
         foreach (BatchSourceTask source in state.SourceTasks)
@@ -497,17 +556,26 @@ public static class ForeverGeometryBatchRunner
         foreach (BatchSourceTask task in state.SourceTasks)
         {
             if (task.Status != "succeeded" || !File.Exists(task.InputPath) ||
+                HashFile(task.InputPath) != task.InputSha256 ||
                 task.ConfigHash != profile.SettingsHash)
             {
                 throw new InvalidDataException($"Source task for ADT ({task.AdtX},{task.AdtY}) is stale or incomplete.");
             }
         }
 
+        string dnmRoot = Path.GetFullPath(state.DnmOutputDirectory);
         foreach (BatchTileTask task in state.TileTasks)
         {
-            if (task.Status != "succeeded" || task.ConfigHash != profile.SettingsHash ||
-                !File.Exists(task.DnmOutputPath) || HashFile(task.DnmOutputPath) != task.DnmSha256 ||
-                !File.Exists(task.GeometryOutputPath) || HashFile(task.GeometryOutputPath) != task.GeometrySha256)
+            string dnmPath = Path.Combine(dnmRoot, $"tile_{task.TileX}_{task.TileZ}.dnm");
+            bool geometryValid = task.ConfigHash == profile.SettingsHash &&
+                File.Exists(task.GeometryOutputPath) && HashFile(task.GeometryOutputPath) == task.GeometrySha256;
+            bool bakedTaskValid = task.Status == "succeeded" && !task.EmptyNavmeshVerified &&
+                task.DnmReadbackSucceeded && File.Exists(dnmPath) && task.DnmOutputPath == dnmPath &&
+                HashFile(dnmPath) == task.DnmSha256;
+            bool emptyTaskValid = task.Status == "empty" && task.EmptyNavmeshVerified &&
+                !File.Exists(dnmPath) && string.IsNullOrEmpty(task.DnmOutputPath) &&
+                string.IsNullOrEmpty(task.DnmSha256);
+            if ((!bakedTaskValid && !emptyTaskValid) || !geometryValid)
             {
                 throw new InvalidDataException($"Tile task ({task.TileX},{task.TileZ}) is stale or incomplete.");
             }
@@ -525,6 +593,26 @@ public static class ForeverGeometryBatchRunner
             {
                 throw new InvalidDataException($"Tile task ({task.TileX},{task.TileZ}) has a stale contributor set.");
             }
+
+            ForeverGeometryTile geometry = ReadTileGeometry(task.GeometryOutputPath);
+            ValidateTileGeometryIdentity(geometry, state.MapId, task.TileX, task.TileZ,
+                profile.ClientProduct, profile.ClientBuild, contributors);
+            if (task.TerrainTriangles != geometry.TileCounts.TerrainTriangles ||
+                task.CollisionTriangles != geometry.TileCounts.CollisionTriangles ||
+                task.LiquidTriangles != geometry.TileCounts.LiquidTriangles)
+            {
+                throw new InvalidDataException($"Tile task ({task.TileX},{task.TileZ}) geometry counts do not match its cached tile geometry.");
+            }
+            if (emptyTaskValid)
+            {
+                NavmeshTileBakeResult emptyResult = NavmeshTileBuilder.BakeWithResult(
+                    geometry.ToTileGeometry(), task.TileX, task.TileZ, options);
+                if (emptyResult.Disposition != NavmeshTileBakeDisposition.NoWalkablePolygons ||
+                    emptyResult.PolygonCount != 0 || emptyResult.MeshData is not null)
+                {
+                    throw new InvalidDataException($"Empty tile task ({task.TileX},{task.TileZ}) no longer reproduces a completed zero-polygon DotRecast result.");
+                }
+            }
         }
 
         int[][] targetTilePairs = state.TargetTiles;
@@ -537,8 +625,9 @@ public static class ForeverGeometryBatchRunner
         }
 
         (int X, int Z)[] tiles = state.TargetTiles.Select(static pair => (pair[0], pair[1])).ToArray();
-        string dnmRoot = Path.GetFullPath(state.DnmOutputDirectory);
-        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(dnmRoot, tiles);
+        (int X, int Z)[] bakedTiles = state.TileTasks.Where(static task => task.Status == "succeeded")
+            .Select(static task => (task.TileX, task.TileZ)).ToArray();
+        DnmSetVerification verification = VerifyBatchDnmSet(dnmRoot, bakedTiles);
         string manifestPath = Path.Combine(dnmRoot, "manifest.json");
         using (JsonDocument manifest = JsonDocument.Parse(File.ReadAllText(manifestPath)))
         {
@@ -799,17 +888,24 @@ public static class ForeverGeometryBatchRunner
             requestedTiles.Count != state.TargetTiles.Length ||
             completedTiles.Count != state.TileTasks.Count || !contributedTiles.SetEquals(requestedTiles) ||
             !requestedTiles.SetEquals(completedTiles) || state.TileTasks.Any(static tile =>
-                tile.Status != "succeeded" || !tile.DnmReadbackSucceeded || !tile.HeightQuerySucceeded ||
-                !tile.ConnectedPathSucceeded))
+                tile.Status == "succeeded"
+                    ? !tile.DnmReadbackSucceeded || !tile.HeightQuerySucceeded || !tile.ConnectedPathSucceeded ||
+                      tile.EmptyNavmeshVerified
+                    : tile.Status != "empty" || !tile.EmptyNavmeshVerified ||
+                      tile.DnmReadbackSucceeded || !string.IsNullOrEmpty(tile.DnmOutputPath) ||
+                      !string.IsNullOrEmpty(tile.DnmSha256)))
         {
             throw new InvalidDataException(
                 "Publication refused: every geometry-contributing target tile must have one successful, read-back, height- and path-verified task.");
         }
 
-        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(
-            Path.GetFullPath(state.DnmOutputDirectory), requestedTiles);
-        if (verification.TileCount != requestedTiles.Count || !verification.HeightQuerySucceeded ||
+        (int X, int Z)[] bakedTiles = state.TileTasks.Where(static tile => tile.Status == "succeeded")
+            .Select(static tile => (tile.TileX, tile.TileZ)).ToArray();
+        DnmSetVerification verification = VerifyBatchDnmSet(Path.GetFullPath(state.DnmOutputDirectory), bakedTiles);
+        if (verification.TileCount != bakedTiles.Length || bakedTiles.Length > 0 &&
+            (!verification.HeightQuerySucceeded ||
             !verification.ConnectedPathSucceeded)
+           )
         {
             throw new InvalidDataException("Publication refused: the exact DNM set failed independent read-back or query verification.");
         }
@@ -881,8 +977,10 @@ public static class ForeverGeometryBatchRunner
             tool_patch_sha256 = ForeverWdtTileEnumerator.ExpectedPatchSha256,
             mapextractor_sha256 = enumeration.ExecutableSha256,
             locale = enumeration.Locale,
+            publication_cache_root = enumeration.CacheRoot,
             client_root = enumeration.ClientRoot,
             casc_data_root = enumeration.DataRoot,
+            mapextractor_path = enumeration.ExecutablePath,
             arguments = enumeration.Arguments,
             process_exit_code = 0,
             process_timed_out = false,
@@ -1172,6 +1270,57 @@ public static class ForeverGeometryBatchRunner
         }).ToArray();
         GeometrySourceRecord[] sources = state.SourceTasks.OrderBy(static task => task.AdtY)
             .ThenBy(static task => task.AdtX).Select(ToSourceRecord).ToArray();
+        JsonArray emptyTiles = [];
+        foreach (BatchTileTask task in state.TileTasks.Where(static task => task.Status == "empty")
+                     .OrderBy(static task => task.TileX).ThenBy(static task => task.TileZ))
+        {
+            if (!task.EmptyNavmeshVerified || string.IsNullOrWhiteSpace(task.GeometrySha256) ||
+                !File.Exists(task.GeometryOutputPath) || HashFile(task.GeometryOutputPath) != task.GeometrySha256 ||
+                !IsSha256(task.SourceSetHash) || task.SourceAdts.Length == 0 ||
+                task.SourceAdts.Length != task.SourceSha256s.Length || task.SourceSha256s.Any(hash => !IsSha256(hash)) ||
+                task.TerrainTriangles + task.CollisionTriangles + task.LiquidTriangles <= 0)
+            {
+                throw new InvalidDataException($"Empty tile task ({task.TileX},{task.TileZ}) has no verified geometry/source evidence.");
+            }
+
+            JsonObject payload = new()
+            {
+                ["format"] = ForeverNavmeshCacheManifest.EmptyNavmeshEvidenceFormat,
+                ["result"] = "completed_no_walkable_polygons",
+                ["client_product"] = profile.ClientProduct,
+                ["client_build"] = profile.ClientBuild,
+                ["map_id"] = state.MapId,
+                ["dt_tile_x"] = task.TileX,
+                ["dt_tile_z"] = task.TileZ,
+                ["settings_hash"] = profile.SettingsHash,
+                ["dotrecast_version"] = profile.DotRecastVersion,
+                ["geometry_export_version"] = profile.GeometryExportVersion,
+                ["raw_geometry_format"] = profile.RawGeometryFormat,
+                ["polygon_count"] = 0,
+                ["geometry_sha256"] = task.GeometrySha256,
+                ["source_set_sha256"] = task.SourceSetHash,
+                ["source_adts_xy"] = JsonSerializer.SerializeToNode(task.SourceAdts, JsonOptions),
+                ["source_sha256s"] = JsonSerializer.SerializeToNode(task.SourceSha256s, JsonOptions),
+                ["terrain_triangles"] = task.TerrainTriangles,
+                ["collision_triangles"] = task.CollisionTriangles,
+                ["liquid_triangles"] = task.LiquidTriangles,
+            };
+            byte[] payloadBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            string evidenceSha = Convert.ToHexString(SHA256.HashData(payloadBytes)).ToLowerInvariant();
+            string evidenceFile = $"{ForeverNavmeshCacheManifest.EmptyNavmeshEvidencePathPrefix}" +
+                                  $"{task.TileX}-{task.TileZ}-{evidenceSha}.json";
+            WriteImmutableEvidence(dnmRoot, evidenceFile, payloadBytes, evidenceSha);
+            emptyTiles.Add(new JsonObject
+            {
+                ["evidence_file"] = evidenceFile,
+                ["evidence_sha256"] = evidenceSha,
+                ["evidence"] = payload.DeepClone(),
+            });
+        }
+
+        int[][] completedTilePairs = state.TileTasks.OrderBy(static task => task.TileX)
+            .ThenBy(static task => task.TileZ)
+            .Select(static task => new[] { task.TileX, task.TileZ }).ToArray();
         var manifest = new
         {
             format = ForeverNavmeshCacheManifest.Format,
@@ -1212,9 +1361,63 @@ public static class ForeverGeometryBatchRunner
                 path_succeeded = verification.ConnectedPathSucceeded,
                 path_polygon_count = verification.PathPolyCount,
             },
+            coverage = new
+            {
+                expected_tile_indices = completedTilePairs,
+                completed_tile_indices = completedTilePairs,
+            },
             tiles = records,
+            empty_navmesh_tiles = emptyTiles,
         };
-        File.WriteAllText(Path.Combine(dnmRoot, "manifest.json"), JsonSerializer.Serialize(manifest, JsonOptions));
+        WriteTextAtomically(Path.Combine(dnmRoot, "manifest.json"), JsonSerializer.Serialize(manifest, JsonOptions));
+    }
+
+    private static DnmSetVerification VerifyBatchDnmSet(string dnmRoot,
+        IReadOnlyCollection<(int X, int Z)> bakedTiles)
+    {
+        if (bakedTiles.Count > 0)
+        {
+            return ForeverGeometryBakeVerifier.VerifyDnmFiles(dnmRoot, bakedTiles);
+        }
+        string[] files = Directory.EnumerateFiles(dnmRoot, "*.dnm").ToArray();
+        if (files.Length > 0)
+        {
+            throw new InvalidDataException($"No target tile produced a navmesh, but DNM files remain: {string.Join(',', files.Select(Path.GetFileName))}.");
+        }
+        return new DnmSetVerification(0, 0, 0, false, false, 0, []);
+    }
+
+    private static ForeverGeometryTile ReadTileGeometry(string path) =>
+        JsonSerializer.Deserialize<ForeverGeometryTile>(File.ReadAllText(path), JsonOptions)
+        ?? throw new InvalidDataException($"Cached tile geometry is empty or malformed: {path}");
+
+    private static void ValidateTileGeometryIdentity(ForeverGeometryTile tile, int mapId,
+        int tileX, int tileZ, string product, int build, IReadOnlyCollection<BatchSourceTask> contributors)
+    {
+        if (tile.MapId != mapId || tile.DtTileX != tileX || tile.DtTileZ != tileZ ||
+            !tile.ClientProduct.Equals(product, StringComparison.OrdinalIgnoreCase) || tile.ClientBuild != build ||
+            tile.TileCounts.TerrainTriangles + tile.TileCounts.CollisionTriangles + tile.TileCounts.LiquidTriangles <= 0)
+        {
+            throw new InvalidDataException($"Tile geometry identity or raw geometry is invalid for ({tileX},{tileZ}).");
+        }
+
+        Dictionary<(int X, int Y), string> expectedSources = contributors.ToDictionary(
+            static source => (source.AdtX, source.AdtY), static source => source.InputSha256);
+        if (tile.SourceAdtsXY.Length != tile.SourceSha256s.Length ||
+            tile.SourceAdtsXY.Length != expectedSources.Count ||
+            tile.SourceAdtsXY.Select(static pair => (pair[0], pair[1])).Distinct().Count() != expectedSources.Count)
+        {
+            throw new InvalidDataException($"Tile geometry source ADT list is incomplete or duplicated for ({tileX},{tileZ}).");
+        }
+        for (int i = 0; i < tile.SourceAdtsXY.Length; i++)
+        {
+            int[] pair = tile.SourceAdtsXY[i];
+            if (pair is not { Length: 2 } || !expectedSources.TryGetValue((pair[0], pair[1]), out string? expectedHash) ||
+                !expectedHash.Equals(tile.SourceSha256s[i], StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"Tile geometry source ADT/hash identity is invalid for ({tileX},{tileZ}).");
+            }
+        }
     }
 
     private static GeometrySourceRecord ToSourceRecord(BatchSourceTask task) => new(
@@ -1332,6 +1535,8 @@ public static class ForeverGeometryBatchRunner
 
     private static string HashFile(string path) =>
         HashFileStreaming(path);
+
+    private static bool IsSha256(string value) => value.Length == 64 && value.All(Uri.IsHexDigit);
 
     private static string HashFileStreaming(string path)
     {
@@ -1452,6 +1657,7 @@ public static class ForeverGeometryBatchRunner
         public string GeometrySha256 { get; set; } = "";
         public string DnmOutputPath { get; set; } = "";
         public string DnmSha256 { get; set; } = "";
+        public bool EmptyNavmeshVerified { get; set; }
         public int TerrainTriangles { get; set; }
         public int CollisionTriangles { get; set; }
         public int LiquidTriangles { get; set; }

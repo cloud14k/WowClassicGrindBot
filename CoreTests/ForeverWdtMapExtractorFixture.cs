@@ -43,9 +43,17 @@ internal static class ForeverWdtMapExtractorFixture
         string listedProduct = mode == "wrong-product" ? "wow_classic" : product;
         string listedLocale = mode == "wrong-locale" ? "zhTW" : locale;
         string listedRoot = mode == "wrong-casc-root" ? Path.Combine(clientRoot, "WrongData") : dataRoot;
+        string plainListedRoot = mode == "wrong-casc-root-unqualified"
+            ? Path.Combine(clientRoot, "WrongData")
+            : dataRoot;
 
+        // Match the real pinned extractor output: CascLib writes unqualified
+        // opens, while the wrapper writes two product/locale identity lines.
+        Console.WriteLine($"Opened casc storage '{plainListedRoot}'");
+        Console.WriteLine($"Opened casc storage '{dataRoot}'");
         Console.WriteLine($"Opened casc storage '{listedRoot}' product {listedProduct} locale {listedLocale}");
         Console.WriteLine($"Detected client build: {listedBuild}");
+        Console.WriteLine($"Opened casc storage '{dataRoot}'");
         Console.WriteLine($"Opened casc storage '{listedRoot}' product {listedProduct} locale {listedLocale}");
         Console.WriteLine($"Restricted extraction to MapID {listedMap}.");
         foreach ((int x, int y) in adts)

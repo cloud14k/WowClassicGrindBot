@@ -1,6 +1,7 @@
 using DataConfigNamespace = global::DataConfig;
 
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 
@@ -139,9 +140,49 @@ internal static class P45Regression
             }
         }
 
+        if (args.Length > 1)
+        {
+            ValidateLegacyClassicClient(args[1], logger);
+        }
+
         P45GeometryRegression.Run();
 
         logger.LogInformation("P4.5 client identity and cache isolation checks passed.");
+    }
+
+    private static void ValidateLegacyClassicClient(string executablePath, ILogger logger)
+    {
+        string fullExecutablePath = Path.GetFullPath(executablePath);
+        if (!File.Exists(fullExecutablePath))
+            throw new FileNotFoundException("The supplied Classic client executable does not exist.", fullExecutablePath);
+
+        string? versionText = FileVersionInfo.GetVersionInfo(fullExecutablePath).FileVersion;
+        string[] versionParts = versionText?.Split('.') ?? [];
+        if (!Version.TryParse(versionText, out Version? executableVersion) || versionParts.Length < 2 ||
+            !int.TryParse(versionParts[^1], NumberStyles.None, CultureInfo.InvariantCulture, out int executableBuild))
+        {
+            throw new InvalidDataException($"The Classic client executable has no parseable file version: {fullExecutablePath}");
+        }
+
+        string executableDirectory = Path.GetDirectoryName(fullExecutablePath)!;
+        WowClientBuildInfo? identity = WowClientBuildInfo.Read(executableDirectory, executableVersion);
+        if (identity is null || identity.Product != "wow_classic_era" || identity.Build != executableBuild ||
+            identity.Version != versionText)
+        {
+            throw new InvalidDataException(
+                $"Classic Era .build.info identity does not match executable {executableVersion}: {fullExecutablePath}");
+        }
+
+        StartupClientVersion client = new(executableVersion, identity.Product, identity.Build);
+        if (client.Version != ClientVersion.SoM || client.Path != "som" ||
+            DataConfigNamespace.ClientEra(client.Path) != "precata")
+        {
+            throw new InvalidDataException(
+                $"Classic Era client {identity.Product} {identity.Version} resolved to unsupported pathing era '{client.Path}'.");
+        }
+
+        logger.LogInformation("Classic Era client identity/pathing compatibility passed: {Product} {Version} Build {Build} -> {Era}",
+            identity.Product, identity.Version, identity.Build, DataConfigNamespace.ClientEra(client.Path));
     }
 
     private static void RunBuildInfoResolverRegression()

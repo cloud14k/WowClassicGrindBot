@@ -911,11 +911,12 @@ public sealed class PPatherService : IDisposable
         return System.IO.Path.Join(dataConfig.Navmesh, continent, hash);
     }
 
-    private void ValidateForeverNavmeshCache(string cacheDir, float expectedMapId, string continent)
+    private IReadOnlyCollection<(int X, int Z)> ValidateForeverNavmeshCache(string cacheDir,
+        float expectedMapId, string continent)
     {
         if (DataConfig.ClientEra(dataConfig.Exp) != "forever")
         {
-            return;
+            return Array.Empty<(int X, int Z)>();
         }
 
         if (!float.IsFinite(expectedMapId) || expectedMapId < 0 || expectedMapId > int.MaxValue ||
@@ -926,7 +927,7 @@ public sealed class PPatherService : IDisposable
 
         ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(continent,
             dataConfig.ClientProduct, dataConfig.ClientBuild!.Value, bakeOptions);
-        ForeverNavmeshCacheManifest.ValidateForRuntime(cacheDir, profile.ClientProduct,
+        return ForeverNavmeshCacheManifest.ReadEmptyTilesForRuntime(cacheDir, profile.ClientProduct,
             profile.ClientBuild, profile.SettingsHash, (int)expectedMapId, profile.Continent);
     }
 
@@ -988,7 +989,8 @@ public sealed class PPatherService : IDisposable
 
         string continent = ContinentDB.IdToName[activeMapId];
         string cacheDir = NavmeshCacheDir(continent);
-        ValidateForeverNavmeshCache(cacheDir, activeMapId, continent);
+        IReadOnlyCollection<(int X, int Z)> certifiedEmptyTiles =
+            ValidateForeverNavmeshCache(cacheDir, activeMapId, continent);
 
         navmeshPathfinder = new NavmeshPathfinder(logger, TriangleWorld, cacheDir, bakeOptions, queryOptions,
             bakeOptions.ResolveMinWorldZ(continent));
@@ -1004,8 +1006,9 @@ public sealed class PPatherService : IDisposable
 
         if (logger.IsEnabled(LogLevel.Information))
         {
-            logger.LogInformation("Navmesh engine ready for {Continent} ({Mode}) - {Tiles} baked tiles in {CacheDir}",
-                continent, search == null ? "disk-only, no game files" : "geometry available", bakedTiles, cacheDir);
+            logger.LogInformation("Navmesh engine ready for {Continent} ({Mode}) - {Tiles} baked tiles, {EmptyTiles} verified empty tiles in {CacheDir}",
+                continent, search == null ? "disk-only, no game files" : "geometry available", bakedTiles,
+                certifiedEmptyTiles.Count, cacheDir);
         }
 
         // An empty cache directory with no geometry behind it cannot answer a
@@ -1013,7 +1016,13 @@ public sealed class PPatherService : IDisposable
         // stuck". Said here, once per continent, it is the first line the user
         // sees - and it names the directory that is actually being read, which
         // is the half of the problem a bare tile count would miss.
-        if (bakedTiles == 0 && search == null)
+        if (bakedTiles == 0 && certifiedEmptyTiles.Count > 0)
+        {
+            logger.LogWarning(
+                "The validated cache for {Continent} contains {EmptyTiles} geometry-verified tiles with no walkable polygons and no baked navmesh tiles; path queries cannot succeed.",
+                continent, certifiedEmptyTiles.Count);
+        }
+        else if (bakedTiles == 0 && search == null)
         {
             logger.LogError(
                 "No baked navmesh tiles for {Continent} in {CacheDir} - pathing on this continent will " +

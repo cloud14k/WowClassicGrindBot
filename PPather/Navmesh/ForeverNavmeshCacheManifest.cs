@@ -20,7 +20,12 @@ namespace PPather.Navmesh;
 public static class ForeverNavmeshCacheManifest
 {
     public const string Format = "wow-forever-dnm-manifest-v2";
-    public const string WdtCoverageEvidenceFormat = "wow-forever-wdt-coverage-v2";
+    // v3 keeps the original process paths as historical provenance. Runtime
+    // validates their lexical relationship without requiring the build-time
+    // client, tool or temporary directory to still exist.
+    public const string WdtCoverageEvidenceFormat = "wow-forever-wdt-coverage-v3";
+    public const string EmptyNavmeshEvidenceFormat = "wow-forever-empty-navmesh-v1";
+    public const string EmptyNavmeshEvidencePathPrefix = "coverage/empty-tile-";
     public const string WdtCoverageEvidenceRelativePath = "coverage/wdt-coverage.json";
     public const string WdtCoverageEvidencePathPrefix = "coverage/wdt-proof-";
     public const string WdtNativeTileListPathPrefix = "coverage/wdt-native-";
@@ -40,6 +45,14 @@ public static class ForeverNavmeshCacheManifest
             !manifest.CompleteForRequestedSourcesAndTiles || manifest.PublishableAsContinentCache)
         {
             throw new InvalidDataException("The selected-pack test entry accepts only complete-for-requested, non-publishable test packs.");
+        }
+        if (manifest.ExpectedTiles.Count > 0)
+        {
+            ValidateTileResultSets(manifest);
+        }
+        else if (manifest.EmptyTiles.Count > 0)
+        {
+            throw new InvalidDataException("A selected pack with empty navmesh tiles must record its complete expected tile set.");
         }
     }
 
@@ -68,6 +81,17 @@ public static class ForeverNavmeshCacheManifest
         ManifestSnapshot manifest = ReadAndValidateFiles(cacheDirectory, expectedProduct,
             expectedBuild, expectedSettingsHash, expectedMapId, expectedContinent);
         ValidateContinentEligibility(manifest);
+    }
+
+    /// <summary>Returns certified no-navmesh tiles after full runtime validation.</summary>
+    public static IReadOnlyCollection<(int X, int Z)> ReadEmptyTilesForRuntime(string cacheDirectory,
+        string expectedProduct, int expectedBuild, string expectedSettingsHash, int expectedMapId,
+        string expectedContinent)
+    {
+        ManifestSnapshot manifest = ReadAndValidateFiles(cacheDirectory, expectedProduct,
+            expectedBuild, expectedSettingsHash, expectedMapId, expectedContinent);
+        ValidateContinentEligibility(manifest);
+        return manifest.EmptyTiles.OrderBy(static tile => tile.X).ThenBy(static tile => tile.Z).ToArray();
     }
 
     private static ManifestSnapshot ReadAndValidateFiles(string cacheDirectory, string expectedProduct,
@@ -121,8 +145,11 @@ public static class ForeverNavmeshCacheManifest
         bool completeForRequested = ReadOptionalBool(root, "complete_for_requested_sources_and_tiles");
         bool completeForContinent = ReadOptionalBool(root, "complete_for_continent");
         bool publishable = ReadOptionalBool(root, "publishable_as_continent_cache");
-        HashSet<(int X, int Y)> sourceAdts = ReadSourceAdts(root, manifestPath);
+        Dictionary<(int X, int Y), string> sourceHashes = ReadSourceAdtHashes(root, manifestPath);
+        HashSet<(int X, int Y)> sourceAdts = sourceHashes.Keys.ToHashSet();
         TileRecord[] tiles = ReadAndValidateTiles(cacheDirectory, root, manifestPath);
+        HashSet<(int X, int Z)> emptyTiles = ReadEmptyNavmeshTiles(cacheDirectory, root,
+            manifestPath, product, build, mapId, settingsHash, sourceHashes);
         (string tileListFile, string tileListSha256, string tileListProduct, int tileListBuild,
             int tileListMapId, HashSet<(int X, int Y)> wdtAdts) = ReadCoverageTileList(cacheDirectory,
                 root, manifestPath, product, build, mapId);
@@ -140,7 +167,7 @@ public static class ForeverNavmeshCacheManifest
             ReadOptionalCoverageAdts(root, "processed_source_adts_xy", manifestPath),
             ReadOptionalCoverageTiles(root, "expected_tile_indices", manifestPath),
             ReadOptionalCoverageTiles(root, "completed_tile_indices", manifestPath),
-            tiles.Select(static tile => (tile.X, tile.Z)).ToHashSet());
+            tiles.Select(static tile => (tile.X, tile.Z)).ToHashSet(), emptyTiles);
     }
 
     private static void ValidateContinentEligibility(ManifestSnapshot manifest)
@@ -162,10 +189,27 @@ public static class ForeverNavmeshCacheManifest
         if (manifest.ExpectedAdts.Count == 0 || !manifest.ExpectedAdts.SetEquals(manifest.WdtAdts) ||
             !manifest.ExpectedAdts.SetEquals(manifest.ProcessedAdts) ||
             !manifest.ExpectedAdts.SetEquals(manifest.SourceAdts) ||
-            manifest.ExpectedTiles.Count == 0 || !manifest.ExpectedTiles.SetEquals(manifest.CompletedTiles) ||
-            !manifest.ExpectedTiles.SetEquals(manifest.ManifestTiles))
+            manifest.ExpectedTiles.Count == 0 || !manifest.ExpectedTiles.SetEquals(manifest.CompletedTiles))
         {
             throw new InvalidDataException("Forever continent coverage proof is incomplete or does not match its source/tile records.");
+        }
+        ValidateTileResultSets(manifest);
+    }
+
+    private static void ValidateTileResultSets(ManifestSnapshot manifest)
+    {
+        HashSet<(int X, int Z)> overlap = manifest.ManifestTiles.Intersect(manifest.EmptyTiles).ToHashSet();
+        HashSet<(int X, int Z)> completed = manifest.ManifestTiles.Concat(manifest.EmptyTiles).ToHashSet();
+        if (manifest.ExpectedTiles.Count == 0 || manifest.CompletedTiles.Count == 0 || overlap.Count != 0 ||
+            !manifest.ExpectedTiles.SetEquals(manifest.CompletedTiles) ||
+            !manifest.ExpectedTiles.SetEquals(completed))
+        {
+            string Format(IEnumerable<(int X, int Z)> tiles) => string.Join(',', tiles.OrderBy(static tile => tile.X)
+                .ThenBy(static tile => tile.Z).Select(static tile => $"({tile.X},{tile.Z})"));
+            throw new InvalidDataException(
+                "Navmesh tile result sets are incomplete or overlap; " +
+                $"expected=[{Format(manifest.ExpectedTiles)}], baked=[{Format(manifest.ManifestTiles)}], " +
+                $"verified-empty=[{Format(manifest.EmptyTiles)}], overlap=[{Format(overlap)}].");
         }
     }
 
@@ -188,21 +232,21 @@ public static class ForeverNavmeshCacheManifest
         }
     }
 
-    private static HashSet<(int X, int Y)> ReadSourceAdts(JsonElement root, string manifestPath)
+    private static Dictionary<(int X, int Y), string> ReadSourceAdtHashes(JsonElement root, string manifestPath)
     {
         if (!root.TryGetProperty("source_adts", out JsonElement sources) || sources.ValueKind != JsonValueKind.Array)
         {
             throw new InvalidDataException($"Forever manifest has no source_adts array: {manifestPath}");
         }
 
-        HashSet<(int X, int Y)> result = [];
+        Dictionary<(int X, int Y), string> result = [];
         foreach (JsonElement source in sources.EnumerateArray())
         {
             string fileName = ReadRequiredString(source, "file_name", manifestPath);
             string sourceHash = ReadRequiredString(source, "sha256", manifestPath);
             if (!source.TryGetProperty("adt_xy", out JsonElement pair) || pair.ValueKind != JsonValueKind.Array ||
                 pair.GetArrayLength() != 2 || !pair[0].TryGetInt32(out int x) || !pair[1].TryGetInt32(out int y) ||
-                x is < 0 or >= 64 || y is < 0 or >= 64 || !result.Add((x, y)) ||
+                x is < 0 or >= 64 || y is < 0 or >= 64 || !result.TryAdd((x, y), sourceHash) ||
                 !string.Equals(fileName, Path.GetFileName(fileName), StringComparison.Ordinal) ||
                 sourceHash.Length != 64 || !sourceHash.All(Uri.IsHexDigit))
             {
@@ -215,9 +259,9 @@ public static class ForeverNavmeshCacheManifest
 
     private static TileRecord[] ReadAndValidateTiles(string cacheDirectory, JsonElement root, string manifestPath)
     {
-        if (!root.TryGetProperty("tiles", out JsonElement tiles) || tiles.ValueKind != JsonValueKind.Array || tiles.GetArrayLength() == 0)
+        if (!root.TryGetProperty("tiles", out JsonElement tiles) || tiles.ValueKind != JsonValueKind.Array)
         {
-            throw new InvalidDataException($"Forever navmesh manifest lists no tiles: {manifestPath}");
+            throw new InvalidDataException($"Forever navmesh manifest has no tile array: {manifestPath}");
         }
 
         HashSet<string> expectedFiles = new(StringComparer.OrdinalIgnoreCase);
@@ -268,6 +312,134 @@ public static class ForeverNavmeshCacheManifest
         return [.. records];
     }
 
+    private static HashSet<(int X, int Z)> ReadEmptyNavmeshTiles(string cacheDirectory,
+        JsonElement root, string manifestPath, string product, int build, int mapId,
+        string settingsHash, Dictionary<(int X, int Y), string> sourceHashes)
+    {
+        if (!root.TryGetProperty("empty_navmesh_tiles", out JsonElement records)) return [];
+        if (records.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"Forever manifest empty_navmesh_tiles is not an array: {manifestPath}");
+        }
+
+        string cacheRoot = Path.GetFullPath(cacheDirectory);
+        string expectedDotRecastVersion = ReadOptionalNestedString(root, "bake_settings", "dot_recast_version");
+        string expectedGeometryVersion = ReadOptionalNestedString(root, "bake_settings", "geometry_export_version");
+        string expectedRawFormat = ReadOptionalNestedString(root, "bake_settings", "raw_geometry_format");
+        HashSet<(int X, int Z)> result = [];
+        foreach (JsonElement record in records.EnumerateArray())
+        {
+            if (!record.TryGetProperty("evidence", out JsonElement payload) || payload.ValueKind != JsonValueKind.Object)
+            {
+                throw new InvalidDataException($"Empty navmesh manifest record has no evidence payload: {manifestPath}");
+            }
+            int x = ReadRequiredInt(payload, "dt_tile_x", manifestPath);
+            int z = ReadRequiredInt(payload, "dt_tile_z", manifestPath);
+            string evidenceFile = ReadRequiredString(record, "evidence_file", manifestPath);
+            string evidenceSha = ReadRequiredString(record, "evidence_sha256", manifestPath);
+            string evidencePrefix = $"{EmptyNavmeshEvidencePathPrefix}{x}-{z}-";
+            byte[] bytes = ReadVerifiedCoverageFile(cacheRoot, evidenceFile, evidenceSha,
+                evidencePrefix, ".json", manifestPath);
+            byte[] expectedPayloadBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            if (!expectedPayloadBytes.SequenceEqual(bytes))
+            {
+                throw new InvalidDataException($"Empty navmesh evidence file does not match its manifest record: {evidenceFile}");
+            }
+
+            string evidencePath = Path.Combine(cacheRoot, evidenceFile.Replace('/', Path.DirectorySeparatorChar));
+            if (!NavmeshCoords.IsValidTile(x, z) || !result.Add((x, z)) ||
+                ReadRequiredString(payload, "format", evidencePath) != EmptyNavmeshEvidenceFormat ||
+                ReadRequiredString(payload, "result", evidencePath) != "completed_no_walkable_polygons" ||
+                !ReadRequiredString(payload, "client_product", evidencePath).Equals(product, StringComparison.OrdinalIgnoreCase) ||
+                ReadRequiredInt(payload, "client_build", evidencePath) != build ||
+                ReadRequiredInt(payload, "map_id", evidencePath) != mapId ||
+                !ReadRequiredString(payload, "settings_hash", evidencePath).Equals(settingsHash, StringComparison.OrdinalIgnoreCase) ||
+                ReadRequiredInt(payload, "polygon_count", evidencePath) != 0)
+            {
+                throw new InvalidDataException($"Empty navmesh evidence identity, result or tile coordinate is invalid: {evidencePath}");
+            }
+
+            string geometrySha = ReadRequiredString(payload, "geometry_sha256", evidencePath);
+            string sourceSetSha = ReadRequiredString(payload, "source_set_sha256", evidencePath);
+            if (!IsSha256(geometrySha) || !IsSha256(sourceSetSha))
+            {
+                throw new InvalidDataException($"Empty navmesh evidence is missing geometry or source-set hashes: {evidencePath}");
+            }
+
+            int[][] sourceCoordinates = ReadRequiredPairArray(payload, "source_adts_xy", evidencePath);
+            string[] sourceFileHashes = ReadRequiredStringArray(payload, "source_sha256s", evidencePath);
+            if (sourceCoordinates.Length == 0 || sourceCoordinates.Length != sourceFileHashes.Length ||
+                sourceFileHashes.Any(hash => !IsSha256(hash)))
+            {
+                throw new InvalidDataException($"Empty navmesh evidence has invalid source ADT/hash records: {evidencePath}");
+            }
+
+            for (int i = 0; i < sourceCoordinates.Length; i++)
+            {
+                (int sourceX, int sourceY) = (sourceCoordinates[i][0], sourceCoordinates[i][1]);
+                if (!sourceHashes.TryGetValue((sourceX, sourceY), out string? manifestHash) ||
+                    !manifestHash.Equals(sourceFileHashes[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException($"Empty navmesh evidence source ADT ({sourceX},{sourceY}) or hash differs from the manifest: {evidencePath}");
+                }
+            }
+
+            string canonicalSourceSet = string.Join('\n', sourceCoordinates
+                .Select((pair, index) => (Pair: pair, Hash: sourceFileHashes[index]))
+                .OrderBy(static source => source.Pair[1]).ThenBy(static source => source.Pair[0])
+                .Select(static source => $"{source.Pair[0]},{source.Pair[1]}:{source.Hash}"));
+            string computedSourceSetSha = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonicalSourceSet))).ToLowerInvariant();
+            if (!computedSourceSetSha.Equals(sourceSetSha, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"Empty navmesh evidence source-set hash is inconsistent: {evidencePath}");
+            }
+
+            int terrainTriangles = ReadRequiredInt(payload, "terrain_triangles", evidencePath);
+            int collisionTriangles = ReadRequiredInt(payload, "collision_triangles", evidencePath);
+            int liquidTriangles = ReadRequiredInt(payload, "liquid_triangles", evidencePath);
+            if (terrainTriangles < 0 || collisionTriangles < 0 || liquidTriangles < 0 ||
+                (long)terrainTriangles + collisionTriangles + liquidTriangles <= 0)
+            {
+                throw new InvalidDataException($"Empty navmesh evidence has no raw geometry contribution: {evidencePath}");
+            }
+
+            if (expectedDotRecastVersion.Length == 0 || expectedGeometryVersion.Length == 0 || expectedRawFormat.Length == 0 ||
+                ReadRequiredString(payload, "dotrecast_version", evidencePath) != expectedDotRecastVersion ||
+                ReadRequiredString(payload, "geometry_export_version", evidencePath) != expectedGeometryVersion ||
+                ReadRequiredString(payload, "raw_geometry_format", evidencePath) != expectedRawFormat)
+            {
+                throw new InvalidDataException($"Empty navmesh evidence bake algorithm identity is missing or inconsistent: {evidencePath}");
+            }
+        }
+        return result;
+    }
+
+    private static int[][] ReadRequiredPairArray(JsonElement parent, string name, string path)
+    {
+        if (!parent.TryGetProperty(name, out JsonElement values) || values.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"Empty navmesh evidence field '{name}' is missing: {path}");
+        }
+        List<int[]> result = [];
+        HashSet<(int X, int Y)> unique = [];
+        foreach (JsonElement pair in values.EnumerateArray())
+        {
+            if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2 ||
+                !pair[0].TryGetInt32(out int x) || !pair[1].TryGetInt32(out int y) ||
+                x is < 0 or >= 64 || y is < 0 or >= 64 || !unique.Add((x, y)))
+            {
+                throw new InvalidDataException($"Empty navmesh evidence field '{name}' has an invalid or duplicate pair: {path}");
+            }
+            result.Add([x, y]);
+        }
+        return [.. result];
+    }
+
+    private static string ReadOptionalNestedString(JsonElement parent, string objectName, string propertyName) =>
+        parent.TryGetProperty(objectName, out JsonElement child) && child.ValueKind == JsonValueKind.Object
+            ? ReadOptionalString(child, propertyName)
+            : "";
+
     private static void ValidateDnmHeader(string tilePath, int expectedX, int expectedZ)
     {
         try
@@ -298,11 +470,13 @@ public static class ForeverNavmeshCacheManifest
             return [];
         }
 
-        if (coverage.ValueKind != JsonValueKind.Object ||
-            !coverage.TryGetProperty(name, out JsonElement values) || values.ValueKind != JsonValueKind.Array)
+        if (coverage.ValueKind != JsonValueKind.Object)
         {
-            throw new InvalidDataException($"Continent coverage is missing {name}: {manifestPath}");
+            throw new InvalidDataException($"Forever coverage is malformed: {manifestPath}");
         }
+        if (!coverage.TryGetProperty(name, out JsonElement values)) return [];
+        if (values.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"Forever coverage field {name} is malformed: {manifestPath}");
 
         HashSet<(int X, int Y)> result = [];
         foreach (JsonElement pair in values.EnumerateArray())
@@ -325,11 +499,13 @@ public static class ForeverNavmeshCacheManifest
             return [];
         }
 
-        if (coverage.ValueKind != JsonValueKind.Object ||
-            !coverage.TryGetProperty(name, out JsonElement values) || values.ValueKind != JsonValueKind.Array)
+        if (coverage.ValueKind != JsonValueKind.Object)
         {
-            throw new InvalidDataException($"Continent coverage is missing {name}: {manifestPath}");
+            throw new InvalidDataException($"Forever coverage is malformed: {manifestPath}");
         }
+        if (!coverage.TryGetProperty(name, out JsonElement values)) return [];
+        if (values.ValueKind != JsonValueKind.Array)
+            throw new InvalidDataException($"Forever coverage field {name} is malformed: {manifestPath}");
 
         HashSet<(int X, int Z)> result = [];
         foreach (JsonElement pair in values.EnumerateArray())
@@ -429,15 +605,20 @@ public static class ForeverNavmeshCacheManifest
         {
             throw new InvalidDataException($"WDT coverage evidence has an unsupported mapextractor locale: {evidencePath}");
         }
-        string clientRoot = Path.GetFullPath(ReadRequiredString(evidence, "client_root", evidencePath));
-        string dataRoot = Path.GetFullPath(ReadRequiredString(evidence, "casc_data_root", evidencePath));
-        if (!PathEquals(dataRoot, Path.Combine(clientRoot, "Data")))
+        string clientRoot = ReadRequiredString(evidence, "client_root", evidencePath);
+        string dataRoot = ReadRequiredString(evidence, "casc_data_root", evidencePath);
+        string historicalCacheRoot = ReadRequiredString(evidence, "publication_cache_root", evidencePath);
+        string executablePath = ReadRequiredString(evidence, "mapextractor_path", evidencePath);
+        if (!IsCanonicalAbsolutePath(clientRoot) || !IsCanonicalAbsolutePath(dataRoot) ||
+            !IsCanonicalAbsolutePath(historicalCacheRoot) || !IsCanonicalAbsolutePath(executablePath) ||
+            !Path.GetFileName(executablePath).Equals("mapextractor.exe", StringComparison.OrdinalIgnoreCase) ||
+            !PathEquals(dataRoot, Path.Combine(clientRoot, "Data")))
         {
-            throw new InvalidDataException($"WDT coverage evidence CASC root is inconsistent with its client directory: {evidencePath}");
+            throw new InvalidDataException($"WDT coverage evidence contains non-canonical historical paths or a CASC root inconsistent with its client directory: {evidencePath}");
         }
 
         string[] arguments = ReadRequiredStringArray(evidence, "arguments", evidencePath);
-        if (arguments.Length != 13 || arguments[0] != "-i" || !PathEquals(arguments[1], clientRoot) ||
+        if (arguments.Length != 13 || arguments[0] != "-i" || arguments[1] != clientRoot ||
             arguments[2] != "-o" || arguments[4] != "-p" || !arguments[5].Equals(proofProduct, StringComparison.OrdinalIgnoreCase) ||
             arguments[6] != "-l" || arguments[7] != locale || arguments[8] != "-e" || arguments[9] != "1" ||
             arguments[10] != "-m" || arguments[11] != proofMapId.ToString(CultureInfo.InvariantCulture) ||
@@ -445,12 +626,16 @@ public static class ForeverNavmeshCacheManifest
         {
             throw new InvalidDataException($"WDT coverage evidence does not record the exact MapID-only invocation: {evidencePath}");
         }
-        string outputDirectory = Path.GetFullPath(arguments[3]);
-        string cacheCoverageRoot = Path.Combine(cacheRoot, "coverage");
-        if (!IsSameOrChild(outputDirectory, cacheCoverageRoot) ||
-            !Path.GetFileName(outputDirectory).StartsWith(".wdt-listing-", StringComparison.Ordinal))
+        string outputDirectory = arguments[3];
+        string expectedHistoricalCoverageRoot = Path.Combine(historicalCacheRoot, "coverage");
+        string outputName = Path.GetFileName(outputDirectory);
+        if (!IsCanonicalAbsolutePath(outputDirectory) ||
+            !PathEquals(Path.GetDirectoryName(outputDirectory)!, expectedHistoricalCoverageRoot) ||
+            !outputName.StartsWith(".wdt-listing-", StringComparison.Ordinal) ||
+            outputName.Length != ".wdt-listing-".Length + 32 ||
+            !outputName[".wdt-listing-".Length..].All(Uri.IsHexDigit))
         {
-            throw new InvalidDataException($"WDT coverage evidence output directory is outside the isolated cache workspace: {evidencePath}");
+            throw new InvalidDataException($"WDT coverage evidence output directory is not the canonical isolated historical cache workspace: {evidencePath}");
         }
 
         if (!evidence.TryGetProperty("adt_count", out JsonElement adtCountValue) ||
@@ -556,12 +741,14 @@ public static class ForeverNavmeshCacheManifest
         string expectedBuild = $"Detected client build: {build.ToString(CultureInfo.InvariantCulture)}";
         string expectedMap = $"Restricted extraction to MapID {mapId.ToString(CultureInfo.InvariantCulture)}.";
         string[] storage = lines.Where(static line => line.StartsWith("Opened casc storage '", StringComparison.Ordinal)).ToArray();
-        string expectedStorageSuffix = $"' product {product} locale {locale}";
+        string[] storageIdentity = storage.Where(static line => line.Contains("' product ", StringComparison.Ordinal)).ToArray();
         string[] buildMarkers = lines.Where(static line => line.StartsWith("Detected client build:", StringComparison.Ordinal)).ToArray();
         string[] mapMarkers = lines.Where(static line => line.StartsWith("Restricted extraction to MapID ", StringComparison.Ordinal)).ToArray();
         string[] completion = lines.Where(static line => line.StartsWith("wdt-enumeration-complete ", StringComparison.Ordinal)).ToArray();
         string expectedCompletion = $"wdt-enumeration-complete map={mapId} build={build} visited={ForeverWdtTileList.TileCount} tiles={expectedAdtCount}";
-        if (storage.Length != 2 || storage.Any(line => !StorageOutputMatches(line, dataRoot, expectedStorageSuffix)) ||
+        if (storage.Length <= storageIdentity.Length ||
+            storage.Any(line => !StoragePathOutputMatches(line, dataRoot)) ||
+            storageIdentity.Length != 2 || storageIdentity.Any(line => !StorageIdentityOutputMatches(line, product, locale)) ||
             buildMarkers.Length != 1 || buildMarkers[0] != expectedBuild || mapMarkers.Length != 1 || mapMarkers[0] != expectedMap ||
             completion.Length != 1 || completion[0] != expectedCompletion || lines.Length == 0 || lines[^1] != expectedCompletion ||
             lines.Any(static line => line.StartsWith("FATAL:", StringComparison.OrdinalIgnoreCase)) ||
@@ -589,14 +776,25 @@ public static class ForeverNavmeshCacheManifest
         }
     }
 
-    private static bool StorageOutputMatches(string line, string dataRoot, string expectedSuffix)
+    private static bool StoragePathOutputMatches(string line, string dataRoot)
     {
         const string markerPrefix = "Opened casc storage '";
         if (!line.StartsWith(markerPrefix, StringComparison.Ordinal)) return false;
-        int suffixStart = line.LastIndexOf(expectedSuffix, StringComparison.Ordinal);
-        if (suffixStart < markerPrefix.Length || suffixStart + expectedSuffix.Length != line.Length) return false;
-        string listedPath = line[markerPrefix.Length..suffixStart];
+        int pathEnd = line.IndexOf('\'', markerPrefix.Length);
+        if (pathEnd < markerPrefix.Length) return false;
+        string listedPath = line[markerPrefix.Length..pathEnd];
+        string suffix = line[(pathEnd + 1)..];
+        if (suffix.Length != 0 && !suffix.StartsWith(" product ", StringComparison.Ordinal)) return false;
         return PathEquals(listedPath, dataRoot);
+    }
+
+    private static bool StorageIdentityOutputMatches(string line, string product, string locale)
+    {
+        const string identitySeparator = "' product ";
+        int identityStart = line.IndexOf(identitySeparator, StringComparison.Ordinal);
+        if (identityStart < 0) return false;
+        string suffix = line[(identityStart + identitySeparator.Length)..];
+        return suffix.Equals($"{product} locale {locale}", StringComparison.Ordinal);
     }
 
     private static bool IsSupportedLocale(string locale) => locale is
@@ -606,6 +804,15 @@ public static class ForeverNavmeshCacheManifest
         string.Equals(Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCanonicalAbsolutePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return false;
+        string fullPath = Path.GetFullPath(path);
+        return string.Equals(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+    }
 
     private static bool IsSameOrChild(string path, string parent)
     {
@@ -644,5 +851,5 @@ public static class ForeverNavmeshCacheManifest
         HashSet<(int X, int Y)> WdtAdts,
         HashSet<(int X, int Y)> ExpectedAdts, HashSet<(int X, int Y)> ProcessedAdts,
         HashSet<(int X, int Z)> ExpectedTiles, HashSet<(int X, int Z)> CompletedTiles,
-        HashSet<(int X, int Z)> ManifestTiles);
+        HashSet<(int X, int Z)> ManifestTiles, HashSet<(int X, int Z)> EmptyTiles);
 }

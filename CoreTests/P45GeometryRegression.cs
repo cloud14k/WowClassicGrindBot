@@ -120,6 +120,7 @@ internal static class P45GeometryRegression
         RunWindingClassificationRegression();
         RunCacheManifestRegression(root);
         RunBatchRunnerRegression(root);
+        RunEmptyNavmeshBakeRegression(root);
     }
 
     private static void RunCacheManifestRegression(string root)
@@ -163,6 +164,11 @@ internal static class P45GeometryRegression
         ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build, settingsHash, mapId, continent);
         ForeverNavmeshCacheManifest.ValidateForPublication(validDir, product, build, settingsHash, mapId,
             continent, expectedAdts, expectedTiles);
+        RunRuntimeEmptyTileRegression(root, product, build, mapId, settingsHash, continent);
+
+        RunCacheRelocationRegression(root, product, build, mapId, settingsHash, continent,
+            expectedAdts, expectedTiles);
+
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForPublication(validDir, product, build,
                 settingsHash, mapId, continent, [(0, 1)], expectedTiles),
             "Publication accepted a WDT ADT set different from the manifest coverage proof.");
@@ -224,7 +230,18 @@ internal static class P45GeometryRegression
         WriteCoverageProofVariant(validDir, legacyProof, legacyManifest);
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
                 settingsHash, mapId, continent),
-            "The runtime upgraded an external-log v1 coverage proof to a trusted v2 process proof.");
+            "The runtime upgraded an external-log v1 coverage proof to a trusted process proof.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject previousProcessProof = JsonNode.Parse(completeEvidence)!.AsObject();
+        previousProcessProof["format"] = "wow-forever-wdt-coverage-v2";
+        previousProcessProof.Remove("publication_cache_root");
+        previousProcessProof.Remove("mapextractor_path");
+        JsonObject previousProcessManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, previousProcessProof, previousProcessManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "A legacy v2 process proof without the relocation provenance fields was silently upgraded.");
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
         JsonObject changedEvidenceHashManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
@@ -251,6 +268,36 @@ internal static class P45GeometryRegression
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
                 settingsHash, mapId, continent),
             "The runtime accepted WDT evidence from a different MapID when its file hash was updated.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject wrongProductArgument = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+        JsonArray productArguments = wrongProductArgument["arguments"]!.AsArray();
+        productArguments[5] = "wow_classic";
+        JsonObject wrongProductArgumentManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, wrongProductArgument, wrongProductArgumentManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a historical process argument with a different Product.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject wrongMapArgument = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+        JsonArray mapArguments = wrongMapArgument["arguments"]!.AsArray();
+        mapArguments[11] = (mapId + 1).ToString(CultureInfo.InvariantCulture);
+        JsonObject wrongMapArgumentManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, wrongMapArgument, wrongMapArgumentManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a historical process argument with a different MapID.");
+        File.WriteAllText(continentManifestPath, completeCoverageManifest);
+
+        JsonObject escapedHistoricalOutput = JsonNode.Parse(File.ReadAllText(evidencePath))!.AsObject();
+        JsonArray outputArguments = escapedHistoricalOutput["arguments"]!.AsArray();
+        outputArguments[3] = Path.Combine(Path.GetTempPath(), "not-isolated-wdt-output");
+        JsonObject escapedHistoricalOutputManifest = JsonNode.Parse(completeCoverageManifest)!.AsObject();
+        WriteCoverageProofVariant(validDir, escapedHistoricalOutput, escapedHistoricalOutputManifest);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(validDir, product, build,
+                settingsHash, mapId, continent),
+            "The runtime accepted a historical WDT output path outside the isolated cache workspace.");
         File.WriteAllText(continentManifestPath, completeCoverageManifest);
 
         foreach (int[][] changedAdts in new[]
@@ -343,7 +390,8 @@ internal static class P45GeometryRegression
         string hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(tilePath))).ToLowerInvariant();
         string clientRoot = Path.GetFullPath(Path.Combine(directory, "proof-client"));
         string dataRoot = Path.Combine(clientRoot, "Data");
-        string outputRoot = Path.Combine(directory, "coverage", ".wdt-listing-fixture");
+        string outputRoot = Path.Combine(directory, "coverage", ".wdt-listing-" + new string('a', 32));
+        string executablePath = Path.Combine(directory, "mapextractor-not-installed", "mapextractor.exe");
         string[] arguments = ["-i", clientRoot, "-o", outputRoot, "-p", product,
             "-l", "zhCN", "-e", "1", "-m", mapId.ToString(CultureInfo.InvariantCulture), "--list-tiles"];
         (string nativePath, string nativeHash) = WriteCoverageBlob(directory,
@@ -351,8 +399,11 @@ internal static class P45GeometryRegression
             CreateNativeTileList(build, [(0, 0)]));
         string stdoutText = string.Join(Environment.NewLine,
         [
+            $"Opened casc storage '{dataRoot}'",
+            $"Opened casc storage '{dataRoot}'",
             $"Opened casc storage '{dataRoot}' product {product} locale zhCN",
             $"Detected client build: {build}",
+            $"Opened casc storage '{dataRoot}'",
             $"Opened casc storage '{dataRoot}' product {product} locale zhCN",
             $"Restricted extraction to MapID {mapId}.",
             $"tile\t{mapId}\t0\t0",
@@ -374,8 +425,10 @@ internal static class P45GeometryRegression
             tool_patch_sha256 = ForeverNavmeshCacheManifest.WdtEnumeratorPatchSha256,
             mapextractor_sha256 = new string('d', 64),
             locale = "zhCN",
+            publication_cache_root = Path.GetFullPath(directory),
             client_root = clientRoot,
             casc_data_root = dataRoot,
+            mapextractor_path = executablePath,
             arguments,
             process_exit_code = 0,
             process_timed_out = false,
@@ -434,6 +487,143 @@ internal static class P45GeometryRegression
         }
 
         File.WriteAllText(Path.Combine(directory, "manifest.json"), JsonSerializer.Serialize(manifest));
+    }
+
+    private static void RunCacheRelocationRegression(string root, string product, int build, int mapId,
+        string settingsHash, string continent, IReadOnlyCollection<(int X, int Y)> expectedAdts,
+        IReadOnlyCollection<(int X, int Z)> expectedTiles)
+    {
+        string source = Path.Combine(root, "cache-relocation-source");
+        string sameVolumeCopy = Path.Combine(root, "cache-relocation-same-volume");
+        string? otherVolumeCopy = null;
+        WriteCache(source, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent);
+        ForeverNavmeshCacheManifest.ValidateForRuntime(source, product, build, settingsHash, mapId, continent);
+
+        try
+        {
+            CopyDirectory(source, sameVolumeCopy);
+            ForeverNavmeshCacheManifest.ValidateForRuntime(sameVolumeCopy, product, build,
+                settingsHash, mapId, continent);
+
+            string sourceVolume = Path.GetPathRoot(Path.GetFullPath(source))!;
+            DriveInfo otherDrive = DriveInfo.GetDrives().FirstOrDefault(drive => drive.IsReady &&
+                !string.Equals(drive.RootDirectory.FullName, sourceVolume, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException("The cache relocation regression requires a writable second volume.");
+            otherVolumeCopy = Path.Combine(otherDrive.RootDirectory.FullName,
+                "wow-forever-cache-relocation-" + Guid.NewGuid().ToString("N"));
+            CopyDirectory(source, otherVolumeCopy);
+            ForeverNavmeshCacheManifest.ValidateForRuntime(otherVolumeCopy, product, build,
+                settingsHash, mapId, continent);
+
+            string historyClientRoot;
+            string historyExecutable;
+            using (JsonDocument evidence = JsonDocument.Parse(File.ReadAllBytes(ReadCoverageProofPath(otherVolumeCopy))))
+            {
+                historyClientRoot = evidence.RootElement.GetProperty("client_root").GetString()!;
+                historyExecutable = evidence.RootElement.GetProperty("mapextractor_path").GetString()!;
+            }
+            if (Directory.Exists(historyClientRoot) || File.Exists(historyExecutable))
+            {
+                throw new InvalidOperationException("The relocation fixture unexpectedly created historical client or mapextractor files.");
+            }
+
+            Directory.Delete(source, recursive: true);
+            ForeverNavmeshCacheManifest.ValidateForRuntime(otherVolumeCopy, product, build,
+                settingsHash, mapId, continent);
+        }
+        finally
+        {
+            if (Directory.Exists(source)) Directory.Delete(source, recursive: true);
+            if (Directory.Exists(sameVolumeCopy)) Directory.Delete(sameVolumeCopy, recursive: true);
+            if (otherVolumeCopy is not null && Directory.Exists(otherVolumeCopy))
+                Directory.Delete(otherVolumeCopy, recursive: true);
+        }
+
+        if (Directory.Exists(source))
+        {
+            throw new InvalidOperationException("The original cache directory was not removed after relocation.");
+        }
+    }
+
+    private static void RunRuntimeEmptyTileRegression(string root, string product, int build, int mapId,
+        string settingsHash, string continent)
+    {
+        string cache = Path.Combine(root, "cache-continent-with-empty-tile");
+        WriteCache(cache, product, build, mapId, settingsHash, "continent",
+            completeForRequested: true, publishable: true, continent);
+        string manifestPath = Path.Combine(cache, "manifest.json");
+        JsonObject manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        JsonObject bakeSettings = manifest["bake_settings"]!.AsObject();
+        bakeSettings["dot_recast_version"] = typeof(NavmeshPathfinder).Assembly.GetName().Version?.ToString() ?? "0";
+
+        int[][] expectedTiles = [[1, 2], [2, 2]];
+        manifest["coverage"]!["expected_tile_indices"] = JsonSerializer.SerializeToNode(expectedTiles);
+        manifest["coverage"]!["completed_tile_indices"] = JsonSerializer.SerializeToNode(expectedTiles);
+        string sourceHash = new('a', 64);
+        string sourceSetHash = Convert.ToHexString(SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes($"0,0:{sourceHash}"))).ToLowerInvariant();
+        JsonObject payload = new()
+        {
+            ["format"] = ForeverNavmeshCacheManifest.EmptyNavmeshEvidenceFormat,
+            ["result"] = "completed_no_walkable_polygons",
+            ["client_product"] = product,
+            ["client_build"] = build,
+            ["map_id"] = mapId,
+            ["dt_tile_x"] = 2,
+            ["dt_tile_z"] = 2,
+            ["settings_hash"] = settingsHash,
+            ["dotrecast_version"] = bakeSettings["dot_recast_version"]!.GetValue<string>(),
+            ["geometry_export_version"] = bakeSettings["geometry_export_version"]!.GetValue<string>(),
+            ["raw_geometry_format"] = bakeSettings["raw_geometry_format"]!.GetValue<string>(),
+            ["polygon_count"] = 0,
+            ["geometry_sha256"] = new string('b', 64),
+            ["source_set_sha256"] = sourceSetHash,
+            ["source_adts_xy"] = JsonSerializer.SerializeToNode(new[] { new[] { 0, 0 } }),
+            ["source_sha256s"] = JsonSerializer.SerializeToNode(new[] { sourceHash }),
+            ["terrain_triangles"] = 1,
+            ["collision_triangles"] = 0,
+            ["liquid_triangles"] = 0,
+        };
+        byte[] evidenceBytes = System.Text.Encoding.UTF8.GetBytes(payload.ToJsonString());
+        string evidenceHash = Convert.ToHexString(SHA256.HashData(evidenceBytes)).ToLowerInvariant();
+        string evidenceFile = $"{ForeverNavmeshCacheManifest.EmptyNavmeshEvidencePathPrefix}2-2-{evidenceHash}.json";
+        string evidencePath = Path.Combine(cache, evidenceFile.Replace('/', Path.DirectorySeparatorChar));
+        File.WriteAllBytes(evidencePath, evidenceBytes);
+        manifest["empty_navmesh_tiles"] = new JsonArray(new JsonObject
+        {
+            ["evidence_file"] = evidenceFile,
+            ["evidence_sha256"] = evidenceHash,
+            ["evidence"] = payload.DeepClone(),
+        });
+        File.WriteAllText(manifestPath, manifest.ToJsonString());
+
+        IReadOnlyCollection<(int X, int Z)> emptyTiles = ForeverNavmeshCacheManifest.ReadEmptyTilesForRuntime(
+            cache, product, build, settingsHash, mapId, continent);
+        if (emptyTiles.Count != 1 || !emptyTiles.Contains((2, 2)))
+            throw new InvalidOperationException("Runtime did not return the independently certified empty tile.");
+
+        JsonObject missingTileManifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        missingTileManifest["empty_navmesh_tiles"] = new JsonArray();
+        File.WriteAllText(manifestPath, missingTileManifest.ToJsonString());
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(
+                cache, product, build, settingsHash, mapId, continent),
+            "Runtime treated an expected tile with neither DNM nor verified-empty evidence as complete.");
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        }
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(destination, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target);
+        }
     }
 
     private static byte[] CreateNativeTileList(int build, IReadOnlyCollection<(int X, int Y)> adts)
@@ -910,7 +1100,8 @@ internal static class P45GeometryRegression
         foreach (string failureMode in new[]
                  {
                      "nonzero", "truncated", "incomplete", "duplicate", "wrong-map", "wrong-build",
-                     "wrong-product", "wrong-locale", "wrong-casc-root", "fatal", "stderr-fatal",
+                     "wrong-product", "wrong-locale", "wrong-casc-root", "wrong-casc-root-unqualified",
+                     "fatal", "stderr-fatal",
                      "missing-native", "native-mismatch", "native-wrong-build", "native-truncated",
                  })
         {
@@ -1049,6 +1240,312 @@ internal static class P45GeometryRegression
             new NavmeshBakeOptions());
         ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
             profile.SettingsHash, 0, "Azeroth");
+    }
+
+    private static void RunEmptyNavmeshBakeRegression(string root)
+    {
+        const int tileX = 1;
+        const int tileZ = 2;
+        NavmeshTileBakeResult flat = NavmeshTileBuilder.BakeWithResult(
+            CreateWalkableGeometry(tileX, tileZ), tileX, tileZ, new NavmeshBakeOptions());
+        if (!flat.HasNavmesh || flat.MeshData!.header.polyCount <= 0)
+            throw new InvalidOperationException("A flat ground tile did not produce a positive-polygon navmesh result.");
+
+        NavmeshTileBakeResult wall = NavmeshTileBuilder.BakeWithResult(
+            CreateVerticalWallGeometry(tileX, tileZ), tileX, tileZ, new NavmeshBakeOptions());
+        AssertLegalEmptyBake("vertical wall", wall);
+
+        NavmeshTileBakeResult steep = NavmeshTileBuilder.BakeWithResult(
+            CreateSteepSlopeGeometry(tileX, tileZ), tileX, tileZ, new NavmeshBakeOptions());
+        AssertLegalEmptyBake("slope above walkable threshold", steep);
+
+        NavmeshTileBakeResult mixed = NavmeshTileBuilder.BakeWithResult(
+            CombineGeometry(CreateWalkableGeometry(tileX, tileZ), CreateVerticalWallGeometry(tileX, tileZ)),
+            tileX, tileZ, new NavmeshBakeOptions());
+        if (!mixed.HasNavmesh || mixed.MeshData!.header.polyCount <= 0)
+            throw new InvalidOperationException("Mixed walkable ground and vertical collision did not keep its valid navmesh polygons.");
+
+        ExpectFailure(() => NavmeshTileBuilder.BakeWithResult(new TileGeometry
+        {
+            GroundVerts = [], GroundTris = [], LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = new Vector3(0, 0, 0), BMax = new Vector3(1, 1, 1),
+        }, tileX, tileZ, new NavmeshBakeOptions()),
+            "Geometry-free input was classified as a legal empty tile instead of an extraction failure.");
+
+        RunPaddingOnlyEmptyTileRegression(root);
+        RunEmptyBatchRecoveryRegression(root);
+        RunEmptyNeighborConnectivityRegression(root);
+        RunForgedEmptyManifestRegression(root);
+    }
+
+    private static void AssertLegalEmptyBake(string scenario, NavmeshTileBakeResult result)
+    {
+        if (result.Disposition != NavmeshTileBakeDisposition.NoWalkablePolygons ||
+            result.PolygonCount != 0 || result.MeshData is not null)
+        {
+            throw new InvalidOperationException($"{scenario} did not produce the explicit successful zero-polygon classification.");
+        }
+    }
+
+    private static TileGeometry CreateWalkableGeometry(int tileX, int tileZ)
+    {
+        float tileMinX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float tileMinZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        return new TileGeometry
+        {
+            GroundVerts =
+            [
+                tileMinX + 20, 10, tileMinZ + 20,
+                tileMinX + 20, 10, tileMinZ + 60,
+                tileMinX + 60, 10, tileMinZ + 20,
+                tileMinX + 60, 10, tileMinZ + 60,
+            ],
+            GroundTris = [0, 1, 2, 2, 1, 3],
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = new Vector3(tileMinX, 0, tileMinZ),
+            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+        };
+    }
+
+    private static TileGeometry CreateVerticalWallGeometry(int tileX, int tileZ)
+    {
+        float tileMinX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float tileMinZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        return new TileGeometry
+        {
+            GroundVerts =
+            [
+                tileMinX + 20, 10, tileMinZ + 20,
+                tileMinX + 20, 60, tileMinZ + 20,
+                tileMinX + 20, 10, tileMinZ + 60,
+                tileMinX + 20, 60, tileMinZ + 60,
+            ],
+            GroundTris = [0, 2, 1, 2, 1, 3],
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = new Vector3(tileMinX, 0, tileMinZ),
+            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+        };
+    }
+
+    private static TileGeometry CreateSteepSlopeGeometry(int tileX, int tileZ)
+    {
+        float tileMinX = NavmeshCoords.Origin + tileX * NavmeshSettings.TileWorldSize;
+        float tileMinZ = NavmeshCoords.Origin + tileZ * NavmeshSettings.TileWorldSize;
+        return new TileGeometry
+        {
+            GroundVerts =
+            [
+                tileMinX + 20, 0, tileMinZ + 20,
+                tileMinX + 20, 0, tileMinZ + 60,
+                tileMinX + 60, 80, tileMinZ + 20,
+                tileMinX + 60, 80, tileMinZ + 60,
+            ],
+            GroundTris = [0, 1, 2, 2, 1, 3],
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [],
+            BMin = new Vector3(tileMinX, 0, tileMinZ),
+            BMax = new Vector3(tileMinX + NavmeshSettings.TileWorldSize, 100, tileMinZ + NavmeshSettings.TileWorldSize),
+        };
+    }
+
+    private static TileGeometry CombineGeometry(TileGeometry left, TileGeometry right)
+    {
+        int[] rightTriangles = right.GroundTris.Select(index => index + left.GroundVerts.Length / 3).ToArray();
+        return new TileGeometry
+        {
+            GroundVerts = [.. left.GroundVerts, .. right.GroundVerts],
+            GroundTris = [.. left.GroundTris, .. rightTriangles],
+            LiquidVerts = [.. left.LiquidVerts, .. right.LiquidVerts],
+            LiquidTris = [.. left.LiquidTris, .. right.LiquidTris],
+            LiquidAreas = [.. left.LiquidAreas, .. right.LiquidAreas],
+            BMin = left.BMin,
+            BMax = left.BMax,
+        };
+    }
+
+    private static void RunPaddingOnlyEmptyTileRegression(string root)
+    {
+        NavmeshCoords.GetTileIndex(-1050f, -7800f, out int geometryTileX, out int geometryTileZ);
+        NavmeshCoords.GetTileWowBounds(geometryTileX, geometryTileZ, out float tileMinX, out float tileMinY,
+            out _, out _);
+        string path = Path.Combine(root, "padding-only-edge.rawgeo.json");
+        WriteRawGeoWithTerrain(path, 33, 46,
+        [
+            [tileMinX + 20, 10, tileMinY + 2],
+            [tileMinX + 60, 10, tileMinY + 2],
+            [tileMinX + 20, 10, tileMinY + 42],
+        ], [[0, 1, 2]]);
+        RawGeometryTileExportResult exported = RawGeometryTileExporter.ExportWithIndependentCoverage(path,
+            new GeometryExportRequest(0, 33, 46, PaddingYards: TileGeometryExtractor.PaddingYd));
+        ForeverGeometryTile paddedNeighbor = exported.Tiles.SingleOrDefault(tile =>
+            tile.DtTileZ == geometryTileZ && tile.DtTileX == geometryTileX - 1)
+            ?? throw new InvalidOperationException("The padding-only fixture did not export its neighboring Detour tile.");
+        if (paddedNeighbor.TileCounts.TerrainTriangles <= 0)
+            throw new InvalidOperationException("The padding-only tile lost its source triangle before baking.");
+        NavmeshTileBakeResult result = NavmeshTileBuilder.BakeWithResult(
+            paddedNeighbor.ToTileGeometry(), paddedNeighbor.DtTileX, paddedNeighbor.DtTileZ,
+            new NavmeshBakeOptions());
+        AssertLegalEmptyBake("padding-only edge tile", result);
+    }
+
+    private static void RunEmptyBatchRecoveryRegression(string root)
+    {
+        string inputRoot = Path.Combine(root, "batch-empty-input");
+        string adtFolder = Path.Combine(inputRoot, "adt33_46", "raw-geometry");
+        Directory.CreateDirectory(adtFolder);
+        string rawPath = Path.Combine(adtFolder, "map0000_adt33_46.rawgeo.json");
+        WriteNonWalkableBatchFixture(rawPath, steepSlope: false);
+        string outputRoot = Path.Combine(root, "batch-empty-state");
+        string dnmRoot = Path.Combine(root, "batch-empty-dnm");
+        ForeverGeometryBatchRequest request = new(0, 33, 46, 33, 46,
+            inputRoot, outputRoot, dnmRoot, "Azeroth", AdtList: [new(33, 46)]);
+
+        ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
+        if (first.TileCount != 1 || first.FailedTaskCount != 0 || first.Verification.TileCount != 0 ||
+            Directory.EnumerateFiles(dnmRoot, "*.dnm").Any())
+        {
+            throw new InvalidOperationException("A real DotRecast zero-polygon tile did not complete without creating a fake DNM.");
+        }
+        using (JsonDocument state = JsonDocument.Parse(File.ReadAllBytes(first.StateFile)))
+        {
+            JsonElement task = state.RootElement.GetProperty("TileTasks")[0];
+            if (task.GetProperty("Status").GetString() != "empty" ||
+                !task.GetProperty("EmptyNavmeshVerified").GetBoolean() ||
+                task.GetProperty("DnmOutputPath").GetString() != "")
+                throw new InvalidOperationException("The batch state did not persist a distinct verified-empty tile result.");
+        }
+        using (JsonDocument manifest = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"))))
+        {
+            if (manifest.RootElement.GetProperty("tiles").GetArrayLength() != 0 ||
+                manifest.RootElement.GetProperty("empty_navmesh_tiles").GetArrayLength() != 1)
+                throw new InvalidOperationException("The selected manifest did not separate empty tiles from DNM tiles.");
+        }
+        ForeverNavmeshCacheManifest.ValidateSelectedPackForTest(dnmRoot, "wow_cn_beta", 70094,
+            ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, new NavmeshBakeOptions()).SettingsHash, 0);
+        _ = ForeverGeometryBatchRunner.VerifyState(first.StateFile);
+
+        ForeverGeometryBatchResult resumed = ForeverGeometryBatchRunner.Run(request with { Resume = true });
+        if (resumed.ReusedSourceCount != 1 || resumed.ReusedTileCount != 1)
+            throw new InvalidOperationException("A valid unchanged empty tile was not independently re-baked and reused on resume.");
+
+        File.AppendAllText(rawPath, Environment.NewLine);
+        ForeverGeometryBatchResult changedSource = ForeverGeometryBatchRunner.Run(request with { Resume = true });
+        if (changedSource.ReusedSourceCount != 0 || changedSource.ReusedTileCount != 0)
+            throw new InvalidOperationException("A rawgeo SHA change did not invalidate the previously empty tile result.");
+
+        JsonObject corrupted = JsonNode.Parse(File.ReadAllText(rawPath))!.AsObject();
+        corrupted["terrain_triangles"] = new JsonArray(new JsonArray(0, 1, 999), new JsonArray(2, 1, 3));
+        File.WriteAllText(rawPath, corrupted.ToJsonString());
+        ExpectFailure(() => ForeverGeometryBatchRunner.Run(request with { Resume = true }),
+            "A malformed source triangle was swallowed as a legal empty tile.");
+        using JsonDocument failedState = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(outputRoot, "batch-state.json")));
+        if (failedState.RootElement.GetProperty("Status").GetString() != "failed" ||
+            failedState.RootElement.GetProperty("TileTasks")[0].GetProperty("Status").GetString() == "empty")
+            throw new InvalidOperationException("A malformed geometry input was recorded as a legal empty tile.");
+    }
+
+    private static void RunEmptyNeighborConnectivityRegression(string root)
+    {
+        string directory = Path.Combine(root, "adjacent-with-empty-neighbor-dnm");
+        Directory.CreateDirectory(directory);
+        foreach (int tileX in new[] { 1, 2 })
+        {
+            DtMeshData data = NavmeshTileBuilder.Bake(CreateBoundaryCrossingGeometry(tileX, 2),
+                tileX, 2, new NavmeshBakeOptions())
+                ?? throw new InvalidOperationException($"Walkable neighbor tile ({tileX},2) did not bake.");
+            using FileStream stream = File.Create(Path.Combine(directory, $"tile_{tileX}_2.dnm"));
+            using BinaryWriter writer = new(stream);
+            new DtMeshDataWriter().Write(writer, data, RcByteOrder.LITTLE_ENDIAN, false);
+        }
+        AssertLegalEmptyBake("third empty neighbor tile",
+            NavmeshTileBuilder.BakeWithResult(CreateVerticalWallGeometry(3, 2), 3, 2, new NavmeshBakeOptions()));
+        DnmSetVerification verification = ForeverGeometryBakeVerifier.VerifyDnmFiles(directory, [(1, 2), (2, 2)]);
+        if (!verification.ConnectedPathSucceeded || verification.CrossTileLinkCount == 0)
+            throw new InvalidOperationException("A certified empty tile changed the valid Detour portal between adjacent baked neighbors.");
+    }
+
+    private static void RunForgedEmptyManifestRegression(string root)
+    {
+        string source = Path.Combine(root, "batch-dnm");
+        string forged = Path.Combine(root, "forged-empty-manifest");
+        if (!Directory.Exists(source)) throw new InvalidOperationException("The valid baked fixture cache is missing.");
+        CopyDirectory(source, forged);
+        string manifestPath = Path.Combine(forged, "manifest.json");
+        JsonObject manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        JsonObject tile = manifest["tiles"]!.AsArray()[0]!.AsObject();
+        int tileX = tile["dt_tile_x"]!.GetValue<int>();
+        int tileZ = tile["dt_tile_z"]!.GetValue<int>();
+        string dnmPath = Path.Combine(forged, tile["file"]!.GetValue<string>());
+        string settingsHash = manifest["settings_hash"]!.GetValue<string>();
+        JsonArray sources = JsonNode.Parse(manifest["source_adts"]!.ToJsonString())!.AsArray();
+        JsonObject sourceRecord = sources[0]!.AsObject();
+        int[] sourcePair = JsonSerializer.Deserialize<int[]>(sourceRecord["adt_xy"]!.ToJsonString())!;
+        string sourceHash = sourceRecord["sha256"]!.GetValue<string>();
+        JsonArray expectedAdts = new(new JsonArray(sourcePair[0], sourcePair[1]));
+        manifest["tiles"] = new JsonArray();
+        manifest["empty_navmesh_tiles"] = new JsonArray(new JsonObject
+        {
+            ["evidence_file"] = $"coverage/empty-tile-{tileX}-{tileZ}-{new string('0', 64)}.json",
+            ["evidence_sha256"] = new string('0', 64),
+            ["evidence"] = new JsonObject
+            {
+                ["format"] = ForeverNavmeshCacheManifest.EmptyNavmeshEvidenceFormat,
+                ["result"] = "completed_no_walkable_polygons",
+                ["client_product"] = "wow_cn_beta",
+                ["client_build"] = 70094,
+                ["map_id"] = 0,
+                ["dt_tile_x"] = tileX,
+                ["dt_tile_z"] = tileZ,
+                ["settings_hash"] = settingsHash,
+                ["dotrecast_version"] = manifest["bake_settings"]!["dot_recast_version"]!.GetValue<string>(),
+                ["geometry_export_version"] = manifest["bake_settings"]!["geometry_export_version"]!.GetValue<string>(),
+                ["raw_geometry_format"] = manifest["bake_settings"]!["raw_geometry_format"]!.GetValue<string>(),
+                ["polygon_count"] = 0,
+                ["geometry_sha256"] = new string('a', 64),
+                ["source_set_sha256"] = new string('b', 64),
+                ["source_adts_xy"] = expectedAdts,
+                ["source_sha256s"] = new JsonArray(JsonValue.Create(sourceHash)),
+                ["terrain_triangles"] = 2,
+                ["collision_triangles"] = 0,
+                ["liquid_triangles"] = 0,
+            },
+        });
+        File.WriteAllText(manifestPath, manifest.ToJsonString());
+        File.Delete(dnmPath);
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateSelectedPackForTest(forged,
+                "wow_cn_beta", 70094, settingsHash, 0),
+            "An ordinary baked navmesh tile was accepted after a manifest-only rewrite to legal-empty without an actual bake evidence file.");
+    }
+
+    private static void WriteNonWalkableBatchFixture(string path, bool steepSlope)
+    {
+        WriteBatchFixture(path);
+        JsonObject raw = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        float[][] vertices = steepSlope
+            ? [
+                [-1050f, 100f, -7800f], [-1050f, 100f, -7760f],
+                [-1010f, 180f, -7800f], [-1010f, 180f, -7760f],
+            ]
+            : [
+                [-1050f, 100f, -7800f], [-1050f, 150f, -7800f],
+                [-1010f, 100f, -7800f], [-1010f, 150f, -7800f],
+            ];
+        raw["terrain_vertices"] = JsonSerializer.SerializeToNode(vertices);
+        raw["terrain_triangles"] = JsonSerializer.SerializeToNode(new[] { new[] { 0, 2, 1 }, new[] { 2, 1, 3 } });
+        raw["terrain_vertex_count"] = vertices.Length;
+        raw["terrain_triangle_count"] = 2;
+        File.WriteAllText(path, raw.ToJsonString());
+    }
+
+    private static void WriteRawGeoWithTerrain(string path, int adtX, int adtY,
+        float[][] vertices, int[][] triangles)
+    {
+        WriteBatchFixture(path, adtX, adtY);
+        JsonObject raw = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        raw["terrain_vertices"] = JsonSerializer.SerializeToNode(vertices);
+        raw["terrain_triangles"] = JsonSerializer.SerializeToNode(triangles);
+        raw["terrain_vertex_count"] = vertices.Length;
+        raw["terrain_triangle_count"] = triangles.Length;
+        File.WriteAllText(path, raw.ToJsonString());
     }
 
     private static string CreateFakeMapExtractorTool(string root, bool validProvenance = true)

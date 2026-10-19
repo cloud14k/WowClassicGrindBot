@@ -1,5 +1,6 @@
 ﻿#nullable enable
 using System;
+using System.IO;
 
 using DotRecast.Core;
 using DotRecast.Detour;
@@ -8,6 +9,19 @@ using DotRecast.Recast;
 using SharedLib;
 
 namespace PPather.Navmesh;
+
+public enum NavmeshTileBakeDisposition
+{
+    Baked,
+    NoWalkablePolygons,
+}
+
+public sealed record NavmeshTileBakeResult(NavmeshTileBakeDisposition Disposition,
+    DtMeshData? MeshData, int PolygonCount)
+{
+    public bool HasNavmesh => Disposition == NavmeshTileBakeDisposition.Baked &&
+                              MeshData is not null && PolygonCount > 0;
+}
 
 /// <summary>
 /// Bakes one Detour tile from extracted WoW triangle soup.
@@ -26,8 +40,12 @@ public static class NavmeshTileBuilder
     public static DtMeshData? Bake(TileGeometry geom, int dtTileX, int dtTileZ,
         NavmeshBakeOptions? bake = null)
     {
-        return Bake(geom, dtTileX, dtTileZ, new RcContext(), CreateConfig(bake), bake);
+        return BakeWithResult(geom, dtTileX, dtTileZ, new RcContext(), CreateConfig(bake), bake).MeshData;
     }
+
+    public static NavmeshTileBakeResult BakeWithResult(TileGeometry geom, int dtTileX, int dtTileZ,
+        NavmeshBakeOptions? bake = null) =>
+        BakeWithResult(geom, dtTileX, dtTileZ, new RcContext(), CreateConfig(bake), bake);
 
     /// <summary>
     /// Bakes with a caller-supplied context so profiling harnesses can read the
@@ -36,8 +54,12 @@ public static class NavmeshTileBuilder
     public static DtMeshData? Bake(TileGeometry geom, int dtTileX, int dtTileZ, RcContext ctx,
         NavmeshBakeOptions? bake = null)
     {
-        return Bake(geom, dtTileX, dtTileZ, ctx, CreateConfig(bake), bake);
+        return BakeWithResult(geom, dtTileX, dtTileZ, ctx, CreateConfig(bake), bake).MeshData;
     }
+
+    public static DtMeshData? Bake(TileGeometry geom, int dtTileX, int dtTileZ, RcContext ctx,
+        RcConfig cfg, NavmeshBakeOptions? bake = null) =>
+        BakeWithResult(geom, dtTileX, dtTileZ, ctx, cfg, bake).MeshData;
 
     /// <summary>The shipping configuration - TrinityCore-fidelity parameters.</summary>
     public static RcConfig CreateConfig(NavmeshBakeOptions? bake = null)
@@ -98,14 +120,18 @@ public static class NavmeshTileBuilder
         return now;
     }
 
-    public static DtMeshData? Bake(TileGeometry geom, int dtTileX, int dtTileZ, RcContext ctx, RcConfig cfg,
+    public static NavmeshTileBakeResult BakeWithResult(TileGeometry geom, int dtTileX, int dtTileZ,
+        RcContext ctx, RcConfig cfg,
         NavmeshBakeOptions? bake = null)
     {
+        ArgumentNullException.ThrowIfNull(geom);
+        ArgumentNullException.ThrowIfNull(ctx);
+        ArgumentNullException.ThrowIfNull(cfg);
         bake ??= new NavmeshBakeOptions();
 
-        if (geom.IsEmpty)
+        if (geom.GroundTris.Length == 0 && geom.LiquidTris.Length == 0)
         {
-            return null;
+            throw new InvalidDataException($"Tile geometry for ({dtTileX},{dtTileZ}) contains no ground or liquid triangles.");
         }
 
         RcBuilderConfig bcfg = new(cfg, geom.BMin, geom.BMax, 0, 0);
@@ -166,7 +192,8 @@ public static class NavmeshTileBuilder
         RcPolyMesh pmesh = RcMeshs.BuildPolyMesh(ctx, cset, cfg.MaxVertsPerPoly);
         if (pmesh.npolys == 0)
         {
-            return null;
+            chf.Dispose();
+            return new NavmeshTileBakeResult(NavmeshTileBakeDisposition.NoWalkablePolygons, null, 0);
         }
 
         for (int i = 0; i < pmesh.npolys; i++)
@@ -223,6 +250,10 @@ public static class NavmeshTileBuilder
 
         DtMeshData? result = DtNavMeshBuilder.CreateNavMeshData(option);
         ProbeReport("create tile", probe);
-        return result;
+        if (result is null)
+        {
+            throw new InvalidOperationException($"DotRecast produced {pmesh.npolys} polygons but no Detour mesh data for ({dtTileX},{dtTileZ}).");
+        }
+        return new NavmeshTileBakeResult(NavmeshTileBakeDisposition.Baked, result, pmesh.npolys);
     }
 }
