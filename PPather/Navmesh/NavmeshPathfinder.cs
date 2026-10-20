@@ -493,6 +493,15 @@ public sealed class NavmeshPathfinder : IDisposable
                 return Fail(NavmeshPathFailureReason.PathUnreachable, startTile, endTile, null);
             }
 
+            // Reject wide endpoint substitutions outside the original near
+            // extents. Certified Forever also disables floor retarget below.
+            if (runtimeCoverage is not null &&
+                (!WithinEndpointExtents(wowFrom, NavmeshCoords.ToWow(rcStart)) ||
+                 !WithinEndpointExtents(wowTo, resolvedTo)))
+                return Fail(NavmeshPathFailureReason.NoWalkableSurface, startTile, endTile, null);
+
+            long pathStartRef = pointRefs[0] != 0 ? pointRefs[0] : startRef;
+
             if (options.JitterYards > 0f)
             {
                 ApplyJitter(rcPoints, pointRefs, options.JitterYards, options.JitterSeed);
@@ -509,6 +518,17 @@ public sealed class NavmeshPathfinder : IDisposable
             long t3 = Stopwatch.GetTimestamp();
             List<Vector3> smoothed = CatmullRom.Smooth(rcPoints, pathSpacingYd);
             ValidateOnMesh(smoothed, options.EdgeMarginYards);
+            if (runtimeCoverage is not null)
+            {
+                // A point-by-point nearest-poly projection can cut a corner or
+                // jump below a bridge. Follow connected surfaces from the
+                // resolved start instead. If the spline leaves the corridor,
+                // follow the existing Detour polygon corridor instead.
+                if (!TryFollowConnectedSurface(smoothed, pathStartRef, out List<Vector3> connected) &&
+                    !TryFollowDetourCorridor(pathStartRef, rcStart, rcEnd, out connected))
+                    return Fail(NavmeshPathFailureReason.PathUnreachable, startTile, endTile, null);
+                smoothed = connected;
+            }
             LastStats.SmoothMs = Stopwatch.GetElapsedTime(t3).TotalMilliseconds;
             LastStats.PointCount = smoothed.Count;
 
@@ -537,6 +557,162 @@ public sealed class NavmeshPathfinder : IDisposable
         {
             tiles.Lock.ExitReadLock();
         }
+    }
+
+    private static bool WithinEndpointExtents(Vector3 requested, Vector3 resolved) =>
+        MathF.Abs(requested.X - resolved.X) <= NavmeshEndpointResolver.HorizontalExtent &&
+        MathF.Abs(requested.Y - resolved.Y) <= NavmeshEndpointResolver.HorizontalExtent &&
+        (requested.Z == 0 || MathF.Abs(requested.Z - resolved.Z) <= NavmeshEndpointResolver.VerticalExtentNear);
+
+    // Called only inside queryGate and tiles.Lock's read section. Every sample
+    // is projected onto a surface reached from its predecessor, never onto a
+    // globally nearest polygon on another floor. DNM/bake settings are unchanged.
+    private bool TryFollowConnectedSurface(List<Vector3> points, long startRef, out List<Vector3> result)
+    {
+        result = [points[0]];
+        Vector3 current = points[0];
+        long currentRef = startRef;
+        Span<long> visited = stackalloc long[512];
+        float spacing = pathSpacingYd > 0 ? MathF.Min(pathSpacingYd, 2.5f) : 2.5f;
+        for (int i = 1; i < points.Count; i++)
+        {
+            Vector3 delta = points[i] - points[i - 1];
+            int steps = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(delta.X * delta.X + delta.Z * delta.Z) / spacing));
+            for (int j = 1; j <= steps; j++)
+            {
+                Vector3 target = Vector3.Lerp(points[i - 1], points[i], (float)j / steps);
+                DtStatus moved = query.MoveAlongSurface(currentRef, current, target, filter,
+                    out Vector3 next, visited, out int count, visited.Length);
+                if (!moved.Succeeded() || moved.Has(DtStatus.DT_BUFFER_TOO_SMALL) || count == 0 ||
+                    MathF.Abs(next.X - target.X) > 0.02f || MathF.Abs(next.Z - target.Z) > 0.02f)
+                {
+                    logger.LogDebug("Forever surface step clamped: from {From}, target {Target}, result {Next}, visited {Count}.",
+                        NavmeshCoords.ToWow(current), NavmeshCoords.ToWow(target), NavmeshCoords.ToWow(next), count);
+                    return false;
+                }
+                long nextRef = visited[count - 1];
+                if (!query.GetPolyHeight(nextRef, next, out float height).Succeeded())
+                {
+                    if (!query.ClosestPointOnPoly(nextRef, next, out Vector3 onPoly, out _).Succeeded() ||
+                        MathF.Abs(next.X - onPoly.X) > 0.004f || MathF.Abs(next.Z - onPoly.Z) > 0.004f)
+                    {
+                        logger.LogDebug("Forever surface height failed at {Point}.", NavmeshCoords.ToWow(next));
+                        return false;
+                    }
+                    next = onPoly;
+                    height = onPoly.Y;
+                }
+                next.Y = height;
+                if (!VisitedPolygonsCoverSegment(current, next, visited[..count]))
+                    return false;
+                result.Add(next);
+                current = next;
+                currentRef = nextRef;
+            }
+        }
+        return true;
+    }
+
+    private bool VisitedPolygonsCoverSegment(Vector3 from, Vector3 to, ReadOnlySpan<long> visited)
+    {
+        // At world coordinates up to 17k, float ULP is at most 0.001953125 yd.
+        // Two ULP cover a rounded portal corner; 0.004 yd is < 1/64 voxel.
+        // Clip in double precision against only the portal-connected polygons
+        // visited by MoveAlongSurface. Their interval union must cover the
+        // whole straight segment: sliding around a wall cannot pass this check.
+        const double tolerance = 0.004;
+        Span<(double Start, double End)> intervals = stackalloc (double, double)[512];
+        int count = 0;
+        foreach (long polyRef in visited)
+        {
+            if (!tiles.NavMesh.GetTileAndPolyByRef(polyRef, out DtMeshTile tile, out DtPoly poly).Succeeded())
+                return false;
+            float[] verts = tile.data.verts;
+            double area = 0;
+            int first = poly.verts[0] * 3;
+            for (int i = 1; i + 1 < poly.vertCount; i++)
+            {
+                int b = poly.verts[i] * 3, c = poly.verts[i + 1] * 3;
+                area += ((double)verts[b] - verts[first]) * ((double)verts[c + 2] - verts[first + 2]) -
+                    ((double)verts[b + 2] - verts[first + 2]) * ((double)verts[c] - verts[first]);
+            }
+            if (area == 0) continue;
+            double sign = Math.Sign(area), lower = 0, upper = 1;
+            for (int i = 0; i < poly.vertCount && lower <= upper; i++)
+            {
+                int a = poly.verts[i] * 3, b = poly.verts[(i + 1) % poly.vertCount] * 3;
+                double ex = (double)verts[b] - verts[a], ez = (double)verts[b + 2] - verts[a + 2];
+                double n = sign * (ex * ((double)from.Z - verts[a + 2]) - ez * ((double)from.X - verts[a]));
+                double d = sign * (ex * ((double)to.Z - from.Z) - ez * ((double)to.X - from.X));
+                double threshold = -tolerance * Math.Sqrt(ex * ex + ez * ez);
+                if (Math.Abs(d) < 1e-15)
+                {
+                    if (n < threshold) { lower = 1; upper = 0; }
+                }
+                else if (d > 0) lower = Math.Max(lower, (threshold - n) / d);
+                else upper = Math.Min(upper, (threshold - n) / d);
+            }
+            if (lower <= upper) intervals[count++] = (lower, upper);
+        }
+        intervals[..count].Sort();
+        double covered = 0;
+        foreach ((double start, double end) in intervals[..count])
+        {
+            if (start > covered + 1e-9) return false;
+            covered = Math.Max(covered, end);
+            if (covered >= 1) return true;
+        }
+        return false;
+    }
+
+    private bool TryFollowDetourCorridor(long startRef, Vector3 start, Vector3 end, out List<Vector3> points)
+    {
+        points = [start];
+        Span<long> corridor = stackalloc long[MaxPolyPath];
+        Span<long> visited = stackalloc long[512];
+        if (!query.FindNearestPoly(end, new Vector3(0.1f, 0.5f, 0.1f), filter, out long endRef, out _, out _).Succeeded() ||
+            endRef == 0 || !query.FindPath(startRef, endRef, start, end, filter, corridor, out int count, corridor.Length).Succeeded() ||
+            count == 0 || corridor[count - 1] != endRef)
+            return false;
+        Vector3 current = start;
+        int stalled = 0;
+        // Use DotRecast's existing corridor helpers. Recompute the steer point
+        // after every move, including tile-border corners and stair portals;
+        // a fixed list of old funnel intersections can stop on the exited side.
+        const float step = 0.5f;
+        for (int iteration = 0; iteration < MaxPolyPath * 16 && count > 0; iteration++)
+        {
+            if (DtPathUtils.InRange(current, end, 0.01f, NavmeshEndpointResolver.VerticalExtentNear))
+                return Vector3.Distance(current, end) <= PathTargetReachedToleranceYards;
+            if (!DtPathUtils.GetSteerTarget(query, current, end, 0.01f, corridor, count,
+                    out var steer, out int flags, out _) ||
+                (flags & DtStraightPathFlags.DT_STRAIGHTPATH_OFFMESH_CONNECTION) != 0)
+                return false;
+            Vector3 delta = (Vector3)steer - current;
+            float distance = delta.Length();
+            if (distance == 0) return false;
+            bool last = (flags & DtStraightPathFlags.DT_STRAIGHTPATH_END) != 0;
+            Vector3 desired = current + delta * (last && distance < step ? 1 : step / distance);
+            DtStatus moved = query.MoveAlongSurface(corridor[0], current, desired, filter, out Vector3 next,
+                visited, out int visitedCount, visited.Length);
+            if (!moved.Succeeded() || moved.Has(DtStatus.DT_BUFFER_TOO_SMALL) || visitedCount == 0 ||
+                !VisitedPolygonsCoverSegment(current, next, visited[..visitedCount]))
+                return false;
+            count = DtPathUtils.MergeCorridorStartMoved(corridor, count, corridor.Length, visited, visitedCount);
+            count = DtPathUtils.FixupShortcuts(corridor, count, query);
+            if (!query.ClosestPointOnPoly(corridor[0], next, out Vector3 surface, out _).Succeeded() ||
+                MathF.Abs(next.X - surface.X) > 0.004f || MathF.Abs(next.Z - surface.Z) > 0.004f ||
+                !VisitedPolygonsCoverSegment(current, surface, visited[..visitedCount]))
+                return false;
+            if (Vector3.DistanceSquared(current, surface) < 1e-8f)
+            {
+                if (++stalled >= 8) return false;
+            }
+            else stalled = 0;
+            current = surface;
+            points.Add(current);
+        }
+        return false;
     }
 
     private Path? Fail(NavmeshPathFailureReason reason, NavmeshTileCoordinate start,
@@ -672,7 +848,7 @@ public sealed class NavmeshPathfinder : IDisposable
                 // meant, and no amount of loaded tiles connects to it. Re-aim
                 // at the nearest surface in the same column the start can
                 // actually reach, before spending anything on a wider band.
-                if (!retargeted &&
+                if (runtimeCoverage is null && !retargeted &&
                     TryRetargetReachable(startRef, rcStart, ref rcEnd, ref endRef,
                         polyBuffer, straightBuffer))
                 {
@@ -687,7 +863,7 @@ public sealed class NavmeshPathfinder : IDisposable
                 // barely closer to the destination than the start was. A poly
                 // network on the wrong floor produces exactly that - it happily
                 // wanders hundreds of yards, just never towards the goal.
-                if (!retargeted && MadeNoHeadway(points, rcStart, rcEnd) &&
+                if (runtimeCoverage is null && !retargeted && MadeNoHeadway(points, rcStart, rcEnd) &&
                     TryRetargetStart(endRef, rcEnd, ref rcStart, ref startRef, polyBuffer))
                 {
                     retargeted = true;

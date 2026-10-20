@@ -9,6 +9,13 @@ public sealed class NavmeshQueryOptions
 {
     public const string Position = "Navmesh:Query";
 
+    /// <summary>
+    /// Explicit local pilot opt-in. The operator pins a verified regional
+    /// manifest and its source/target sets in configuration. Null retains the
+    /// complete-continent WDT gate; a region never becomes a continent pack.
+    /// </summary>
+    public ForeverNavmeshRegionOptions? ForeverRegion { get; set; }
+
     /// <summary>Distance interior corners are pushed off boundary walls, yards. 0 disables the push.</summary>
     public float EdgeMargin { get; set; } = 1.5f;
 
@@ -29,4 +36,13 @@ public sealed class NavmeshQueryOptions
 
     /// <summary>Road-attractor core half-width, yards.</summary>
     public float RoadCore { get; set; } = 8f;
+}
+
+public sealed class ForeverNavmeshRegionOptions
+{
+    public int MapId { get; set; } = -1;
+    public string Continent { get; set; } = "";
+    public string ManifestSha256 { get; set; } = "";
+    public int[][] SourceAdts { get; set; } = [];
+    public int[][] Tiles { get; set; } = [];
 }

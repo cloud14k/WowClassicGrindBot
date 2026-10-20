@@ -360,6 +360,15 @@ public sealed class PPatherService : IDisposable
 
         activeMapId = mapId;
 
+        // Forever geometry comes only from its validated CASC-derived DNM pack.
+        // A shared folder of Classic MPQs must never supply its world heights.
+        if (DataConfig.ClientEra(dataConfig.Exp) == "forever")
+        {
+            geometryUnavailable.Add(mapId);
+            search = null;
+            return;
+        }
+
         if (geometryUnavailable.Contains(mapId))
         {
             return;
@@ -687,6 +696,10 @@ public sealed class PPatherService : IDisposable
         NavmeshPathQueryResult result = navmeshPathfinder.FindPathWithResult(from, to, lastStartIndoors,
             new NavmeshPathQueryOptions(jitterYards, jitterSeed, edgeMarginYards));
         Volatile.Write(ref latestNavmeshQueryResult, result);
+        // The legacy vector-array route API has no partial-path flag. Do not
+        // present an unreachable Forever route as a successful movement order.
+        if (DataConfig.ClientEra(dataConfig.Exp) == "forever" && result.Diagnostic is not null)
+            return null!;
         return result.Path!;
     }
 
@@ -1019,6 +1032,9 @@ public sealed class PPatherService : IDisposable
 
         ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create(continent,
             dataConfig.ClientProduct, dataConfig.ClientBuild!.Value, bakeOptions);
+        if (queryOptions.ForeverRegion is { } region)
+            return ForeverNavmeshCacheManifest.ReadCoverageForRegion(cacheDir, profile.ClientProduct,
+                profile.ClientBuild, profile.SettingsHash, (int)expectedMapId, profile.Continent, region);
         return ForeverNavmeshCacheManifest.ReadCoverageForRuntime(cacheDir, profile.ClientProduct,
             profile.ClientBuild, profile.SettingsHash, (int)expectedMapId, profile.Continent);
     }

@@ -18,6 +18,8 @@ using DotRecast.Detour.Io;
 using DotRecast.Recast;
 using ForeverGeometryTool;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using PPather;
 using PPather.Navmesh;
 using SharedLib;
 
@@ -34,12 +36,15 @@ internal static class P45GeometryRegression
         Directory.CreateDirectory(root);
 
         RunCoverageBoundaryRegression(root);
+        RunNativeCoordinateContractRegression(root);
+        RunExplicitRegionRegression(root);
+        RunConnectedSurfaceRegression(root);
 
-        string leftPath = WriteFixture(root, "adt33_46.rawgeo.json", 33, 46, 70094, 100f, false);
-        string rightPath = WriteFixture(root, "adt34_46.rawgeo.json", 34, 46, 70094, 100f, false);
-        GeometryInputFile left = new(leftPath, 33, 46);
-        GeometryInputFile right = new(rightPath, 34, 46);
-        AdtCoordinate[] expected = [new(33, 46), new(34, 46)];
+        string leftPath = WriteFixture(root, "adt46_33.rawgeo.json", 46, 33, 70094, 100f, false);
+        string rightPath = WriteFixture(root, "adt46_34.rawgeo.json", 46, 34, 70094, 100f, false);
+        GeometryInputFile left = new(leftPath, 46, 33);
+        GeometryInputFile right = new(rightPath, 46, 34);
+        AdtCoordinate[] expected = [new(46, 33), new(46, 34)];
 
         GeometryAggregate forward = Export([left, right], expected);
         GeometryAggregate reverse = Export([right, left], expected);
@@ -102,22 +107,22 @@ internal static class P45GeometryRegression
         }
 
         ExpectFailure(() => ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
-            0, [left], [new(33, 46), new(34, 46)])), "Missing expected ADT was not rejected.");
+            0, [left], [new(46, 33), new(46, 34)])), "Missing expected ADT was not rejected.");
         ExpectFailure(() => ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
-            0, [left, left], [new(33, 46)])), "Repeated ADT input was not rejected.");
+            0, [left, left], [new(46, 33)])), "Repeated ADT input was not rejected.");
 
-        string mixedBuildPath = WriteFixture(root, "adt34_46_build70095.rawgeo.json", 34, 46, 70095, 100f, false);
+        string mixedBuildPath = WriteFixture(root, "adt46_34_build70095.rawgeo.json", 46, 34, 70095, 100f, false);
         ExpectFailure(() => ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
-            0, [left, new GeometryInputFile(mixedBuildPath, 34, 46)], expected)),
+            0, [left, new GeometryInputFile(mixedBuildPath, 46, 34)], expected)),
             "Mixed client Builds were not rejected.");
 
-        string corruptPath = WriteFixture(root, "adt34_46_bad_index.rawgeo.json", 34, 46, 70094, 100f, true);
+        string corruptPath = WriteFixture(root, "adt46_34_bad_index.rawgeo.json", 46, 34, 70094, 100f, true);
         ExpectFailure(() => ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
-            0, [left, new GeometryInputFile(corruptPath, 34, 46)], expected)),
+            0, [left, new GeometryInputFile(corruptPath, 46, 34)], expected)),
             "Out-of-range triangle indices were not rejected.");
 
         ExpectFailure(() => ForeverGeometryAggregator.Export(new GeometryAggregateRequest(
-            0, [new GeometryInputFile(Path.Combine(root, "missing.rawgeo.json"), 33, 46)], [new(33, 46)])),
+            0, [new GeometryInputFile(Path.Combine(root, "missing.rawgeo.json"), 46, 33)], [new(46, 33)])),
             "A missing raw ADT file was not rejected.");
 
         RunWindingClassificationRegression();
@@ -127,9 +132,174 @@ internal static class P45GeometryRegression
         RunEmptyNavmeshBakeRegression(root);
     }
 
+    private static void RunNativeCoordinateContractRegression(string root)
+    {
+        // Captured from a fresh Build 70094 native ADT (30,48) export. These
+        // vertices and winding come from the native terrain grid, not from
+        // the exporter/coverage implementations under test.
+        string path = Path.Combine(root, "native-30-48.rawgeo.json");
+        WriteRawGeoWithTerrain(path, 30, 48,
+            [[-8535.41602f, 19.0400696f, 1064.58325f],
+             [-8533.33301f, 19.0458317f, 1062.5f],
+             [-8533.33301f, 18.970768f, 1066.66663f]], [[0, 1, 2]]);
+        GeometryExportRequest request = new(0, 30, 48, AgentRadius: 0, PaddingYards: 0);
+        IReadOnlyList<ForeverGeometryTile> tiles = RawGeometryTileExporter.Export(path, request);
+        if (!tiles.Select(static tile => (tile.DtTileX, tile.DtTileZ)).ToHashSet()
+                .SetEquals([(135, 63), (135, 64), (136, 63), (136, 64)]))
+            throw new InvalidOperationException("Native Stormwind terrain did not occupy its independently known world-grid corner.");
+        foreach (ForeverGeometryTile tile in tiles)
+        {
+            float[] v = tile.TerrainVerticesRc;
+            Vector3 a = new(v[0], v[1], v[2]), b = new(v[3], v[4], v[5]), c = new(v[6], v[7], v[8]);
+            if (a != new Vector3(1064.58325f, 19.0400696f, -8535.41602f) ||
+                Vector3.Normalize(Vector3.Cross(b - a, c - a)).Y < 0.99f)
+                throw new InvalidOperationException("The native coordinate contract reflected terrain or reversed its walkable normal.");
+        }
+        JsonObject raw = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        raw["format"] = "wow-raw-geometry-v1";
+        File.WriteAllText(path, raw.ToJsonString());
+        ExpectFailure(() => RawGeometryTileExporter.Export(path, request), "Reflected v1 geometry was silently accepted as corrected geometry.");
+        raw["format"] = NavmeshSettings.ForeverRawGeometryFormat;
+        foreach (JsonArray v in raw["terrain_vertices"]!.AsArray())
+            (v[0], v[2]) = (v[2]!.DeepClone(), v[0]!.DeepClone());
+        File.WriteAllText(path, raw.ToJsonString());
+        ExpectFailure(() => RawGeometryTileExporter.Export(path, request), "A relabeled old native array bypassed the independent ADT world-bounds check.");
+    }
+
+    private static void RunExplicitRegionRegression(string root)
+    {
+        string input = Path.Combine(root, "region-input");
+        Directory.CreateDirectory(input);
+        string rawPath = Path.Combine(input, "map0000_adt46_33.rawgeo.json");
+        WriteRawGeoWithTerrain(rawPath, 46, 33,
+            [[-900, 100, -7800], [-900, 100, -7760], [-860, 100, -7800], [-860, 100, -7760]],
+            [[0, 2, 1], [2, 3, 1]]);
+        NavmeshBakeOptions bake = new();
+        ForeverNavmeshBakeProfile profile = ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094, bake);
+        DataConfig data = new() { Root = Path.Combine(root, "region-data"), Exp = "forever", ClientProduct = "wow_cn_beta", ClientBuild = 70094 };
+        string cache = Path.Combine(data.Navmesh, "Azeroth", profile.SettingsHash);
+        ForeverGeometryBatchResult result = ForeverGeometryBatchRunner.Run(new(0, 46, 33, 46, 33,
+            input, Path.Combine(root, "region-state"), cache, "Azeroth"));
+        _ = ForeverGeometryBatchRunner.VerifyState(result.StateFile);
+        ForeverNavmeshRegionOptions region = new()
+        {
+            MapId = 0, Continent = "Azeroth", SourceAdts = [[46, 33]], Tiles = [[69, 121]],
+            ManifestSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(cache, "manifest.json")))),
+        };
+        ForeverNavmeshRuntimeCoverage Read() => ForeverNavmeshCacheManifest.ReadCoverageForRegion(cache,
+            "wow_cn_beta", 70094, profile.SettingsHash, 0, "Azeroth", region);
+        if (!Read().ContainsBakedTile(69, 121) || Read().ContainsExpectedTile(70, 121))
+            throw new InvalidOperationException("Explicit regional runtime did not enforce its exact target coverage.");
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(cache, "wow_cn_beta", 70094,
+            profile.SettingsHash, 0, "Azeroth"), "A pinned city region became a complete-continent cache.");
+        string originalPin = region.ManifestSha256;
+        region.ManifestSha256 = new string('0', 64);
+        ExpectFailure(() => Read(), "A regional manifest bypassed its operator pin.");
+        region.ManifestSha256 = originalPin;
+        region.SourceAdts = [[46, 34]];
+        ExpectFailure(() => Read(), "A region with the wrong source ADT set was accepted.");
+        region.SourceAdts = [[46, 33]];
+        region.Tiles = [[70, 121]];
+        ExpectFailure(() => Read(), "A region with a different target set was accepted.");
+        region.Tiles = [[69, 121]];
+        byte[] correctManifest = File.ReadAllBytes(Path.Combine(cache, "manifest.json"));
+        JsonObject changedSettings = JsonNode.Parse(correctManifest)!.AsObject();
+        changedSettings["bake_settings"]!["agent_radius"] = 0.6f;
+        File.WriteAllText(Path.Combine(cache, "manifest.json"), changedSettings.ToJsonString());
+        region.ManifestSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(cache, "manifest.json"))));
+        ExpectFailure(() => Read(), "Repinning a regional manifest allowed its recorded bake radius to disagree with runtime settings.");
+        File.WriteAllBytes(Path.Combine(cache, "manifest.json"), correctManifest);
+        region.ManifestSha256 = originalPin;
+        region.SourceAdts = [[46, 33], [46, 33]];
+        ExpectFailure(() => Read(), "Duplicate configured regional ADTs were accepted.");
+        region.SourceAdts = [[46, 33]];
+        Directory.CreateDirectory(data.ExpDbc);
+        File.WriteAllText(Path.Combine(data.ExpDbc, "WorldMapArea.json"), JsonSerializer.Serialize(new[] {
+            new WorldMapArea { UIMapId = 1453, MapID = 0, AreaID = 1519, AreaName = "synthetic region",
+                Continent = "Azeroth", LocBottom = -1100, LocTop = -800, LocRight = -8000, LocLeft = -7400 } }));
+        using (PPatherService service = new(NullLogger<PPatherService>.Instance, data, new WorldMapAreaDB(data),
+            Options.Create(bake), Options.Create(new NavmeshQueryOptions { ForeverRegion = region })))
+        {
+            service.Initialise(0);
+            if (!service.DiskOnly || service.ToWorldZ(1453, -890, -7790, 0).Z is < 99 or > 101)
+                throw new InvalidOperationException("Forever regional height did not come from its own certified DNM.");
+            PPather.Graph.Path route = service.DoSearchAtLocations(new(-890, -7790, 100, 0), new(-870, -7770, 100, 0), SearchStrategy.A_Star);
+            if (route is null || service.LatestNavmeshQueryResult?.Diagnostic is not null)
+                throw new InvalidOperationException("The production service did not load and query the explicitly pinned region.");
+            if (service.DoSearchAtLocations(new(-890, -7790, 100, 0), new(-870, -7770, 120, 0), SearchStrategy.A_Star) is not null ||
+                service.LatestNavmeshQueryResult?.Diagnostic?.Reason != NavmeshPathFailureReason.NoWalkableSurface)
+                throw new InvalidOperationException("An explicit Forever destination was silently changed to another floor by the wide endpoint retry.");
+        }
+        File.AppendAllText(Path.Combine(cache, "manifest.json"), " ");
+        ExpectFailure(() => Read(), "A regional manifest changed after pinning was accepted.");
+
+        // The usual single-ADT fixture touches its ADT edge. Its tile cannot
+        // be certified regionally without the adjacent padding source.
+        string edgeInput = Path.Combine(root, "region-edge-input");
+        Directory.CreateDirectory(edgeInput);
+        WriteBatchFixture(Path.Combine(edgeInput, "map0000_adt46_33.rawgeo.json"));
+        string edgeCache = Path.Combine(root, "region-edge-dnm");
+        ForeverGeometryBatchRunner.Run(new(0, 46, 33, 46, 33, edgeInput, Path.Combine(root, "region-edge-state"), edgeCache, "Azeroth"));
+        region.Tiles = [[69, 120]];
+        region.ManifestSha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(edgeCache, "manifest.json"))));
+        ExpectFailure(() => ForeverNavmeshCacheManifest.ReadCoverageForRegion(edgeCache, "wow_cn_beta", 70094,
+            profile.SettingsHash, 0, "Azeroth", region), "A region's partial outer padding footprint was accepted as complete.");
+    }
+
+    private static void RunConnectedSurfaceRegression(string root)
+    {
+        string cache = Path.Combine(root, "connected-surface-cache");
+        WriteCache(cache, "wow_cn_beta", 70094, 0, "surface-test", "continent", true, true, "Azeroth");
+        TileGeometry bounds = CreateWalkableGeometry(1, 2);
+        float x = bounds.BMin.X, z = bounds.BMin.Z;
+        List<float> vertices = [];
+        List<int> triangles = [];
+        void Floor(float minX, float minZ, float maxX, float maxZ, float height)
+        {
+            int start = vertices.Count / 3;
+            vertices.AddRange([x + minX, height, z + minZ, x + minX, height, z + maxZ,
+                x + maxX, height, z + minZ, x + maxX, height, z + maxZ]);
+            triangles.AddRange([start, start + 1, start + 2, start + 2, start + 1, start + 3]);
+        }
+        // A connected upper L-shaped walkway, with a distinct lower floor in
+        // the empty inner corner. Global nearest-point smoothing may fall to
+        // that lower floor or cut across the missing upper surface.
+        Floor(10, 10, 110, 110, 10);
+        Floor(20, 20, 100, 40, 14);
+        Floor(80, 35, 100, 100, 14);
+        TileGeometry geometry = new()
+        {
+            GroundVerts = vertices.ToArray(), GroundTris = triangles.ToArray(),
+            LiquidVerts = [], LiquidTris = [], LiquidAreas = [], BMin = bounds.BMin, BMax = bounds.BMax,
+        };
+        DtMeshData baked = NavmeshTileBuilder.Bake(geometry, 1, 2, new NavmeshBakeOptions())!;
+        string file = Path.Combine(cache, "tile_1_2.dnm");
+        using (BinaryWriter writer = new(File.Create(file)))
+            new DtMeshDataWriter().Write(writer, baked, RcByteOrder.LITTLE_ENDIAN, true);
+        string manifestPath = Path.Combine(cache, "manifest.json");
+        JsonObject manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+        manifest["tiles"]![0]!["sha256"] = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(file))).ToLowerInvariant();
+        File.WriteAllText(manifestPath, manifest.ToJsonString());
+        ForeverNavmeshRuntimeCoverage coverage = ForeverNavmeshCacheManifest.ReadCoverageForRuntime(cache,
+            "wow_cn_beta", 70094, "surface-test", 0, "Azeroth");
+        using NavmeshPathfinder pathfinder = CreateDiagnosticPathfinder(cache, coverage);
+        Vector3 from = NavmeshCoords.ToWow(new(x + 30, 14, z + 30));
+        Vector3 to = NavmeshCoords.ToWow(new(x + 90, 14, z + 90));
+        NavmeshPathQueryResult result = pathfinder.FindPathWithResult(from, to, null);
+        if (result.Path is null || result.Diagnostic is not null || result.Path.locations.Any(static p => p.Z < 13.5f) ||
+            ForeverRegionRuntimeRegression.CountBlockedSegments(pathfinder, result.Path.locations) != 0)
+            throw new InvalidOperationException("A Forever route cut the upper L-shaped walkway's corner or jumped onto its lower floor.");
+        if (ForeverRegionRuntimeRegression.CountBlockedSegments(pathfinder, [from, to]) == 0)
+            throw new InvalidOperationException("The independent segment verifier accepted a diagonal across the missing upper corner and its disconnected lower floor.");
+        Vector3 lowerStart = NavmeshCoords.ToWow(new(x + 30, 10, z + 80));
+        NavmeshPathQueryResult unreachableFloor = pathfinder.FindPathWithResult(lowerStart, to, null);
+        if (unreachableFloor.Diagnostic is null || unreachableFloor.Stats.Retargeted)
+            throw new InvalidOperationException("An unreachable explicit upper floor was replaced with the reachable floor four yards below it.");
+    }
+
     private static void RunMultiAdtSourceIdentityRegression(string root)
     {
-        AdtCoordinate[] adts = [new(34, 46), new(35, 46), new(34, 47), new(35, 47)];
+        AdtCoordinate[] adts = [new(46, 34), new(46, 35), new(47, 34), new(47, 35)];
         GeometryInputFile[] normalInputs = adts.Select(adt => new GeometryInputFile(
             WriteFixture(root, $"source-order-{adt.X}-{adt.Y}.rawgeo.json", adt.X, adt.Y, 70094, 100f, false),
             adt.X, adt.Y)).ToArray();
@@ -339,8 +509,8 @@ internal static class P45GeometryRegression
     {
         const float cornerX = -1600f;
         const float cornerY = -8000f;
-        int sideX = adtX == 34 ? 1 : -1;
-        int sideY = adtY == 46 ? 1 : -1;
+        int sideX = adtY == 34 ? 1 : -1;
+        int sideY = adtX == 46 ? 1 : -1;
         JsonObject raw = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
         foreach (string name in new[] { "terrain_vertices", "collision_vertices", "liquid_vertices" })
         {
@@ -1495,7 +1665,7 @@ internal static class P45GeometryRegression
         double size = NavmeshSettings.TileWorldSize;
         const int tileX = 80;
         const int tileZ = 120;
-        GeometryExportRequest noPadding = new(0, 33, 46, AgentRadius: 0f, PaddingYards: 0f);
+        GeometryExportRequest noPadding = new(0, 46, 33, AgentRadius: 0f, PaddingYards: 0f);
         double worldY = origin + tileX * size;
         double worldX = origin + tileZ * size;
 
@@ -1644,10 +1814,10 @@ internal static class P45GeometryRegression
         string path = Path.Combine(root, "coverage-boundary.rawgeo.json");
         var raw = new
         {
-            format = "wow-raw-geometry-v1",
+            format = NavmeshSettings.ForeverRawGeometryFormat,
             map_id = 0,
-            adt_xy = new[] { 33, 46 },
-            mmap_xy = new[] { 46, 33 },
+            adt_xy = new[] { 46, 33 },
+            mmap_xy = new[] { 33, 46 },
             client_product = "wow_cn_beta",
             client_build = 70094,
             units = "yard",
@@ -1692,7 +1862,7 @@ internal static class P45GeometryRegression
             ClientBuild = 70094,
             SourceSha256 = new string('0', 64),
             MapId = 0,
-            AdtXY = [33, 46],
+            AdtXY = [46, 33],
             DtTileX = tileX,
             DtTileZ = tileZ,
             BMinRc = [0, 0, 0],
@@ -1719,13 +1889,13 @@ internal static class P45GeometryRegression
     private static void RunBatchRunnerRegression(string root)
     {
         string inputRoot = Path.Combine(root, "batch-input");
-        string adtFolder = Path.Combine(inputRoot, "adt33_46", "raw-geometry");
+        string adtFolder = Path.Combine(inputRoot, "adt46_33", "raw-geometry");
         Directory.CreateDirectory(adtFolder);
-        string rawPath = Path.Combine(adtFolder, "map0000_adt33_46.rawgeo.json");
+        string rawPath = Path.Combine(adtFolder, "map0000_adt46_33.rawgeo.json");
         WriteBatchFixture(rawPath);
         string outputRoot = Path.Combine(root, "batch-state");
         string dnmRoot = Path.Combine(root, "batch-dnm");
-        ForeverGeometryBatchRequest request = new(0, 33, 46, 33, 46,
+        ForeverGeometryBatchRequest request = new(0, 46, 33, 46, 33,
             inputRoot, outputRoot, dnmRoot, "Azeroth");
         ExpectFailure(() => ForeverGeometryBatchRunner.Run(request with
             { PaddingYards = TileGeometryExtractor.PaddingYd + 0.5f }),
@@ -1802,7 +1972,7 @@ internal static class P45GeometryRegression
         string wdtListLog = Path.Combine(root, "full-wdt-tile-list.log");
         string cascDataPath = Path.Combine(clientRoot, "Data");
         File.WriteAllText(wdtListLog,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 45 33\ntile 0 46 33\n");
         byte[] rectangleManifestBeforeSeal = File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"));
         ExpectSealRejectedBeforeWdt(configChanged.StateFile, clientRoot, toolDirectory,
             "A rectangle batch was accepted for continent publication.");
@@ -1817,12 +1987,12 @@ internal static class P45GeometryRegression
             "A failed publication gate changed the selected batch manifest.");
 
         File.WriteAllText(wdtListLog,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 46 33\n");
         ForeverGeometryBatchRequest explicitRequest = request with
         {
             AgentRadius = 0.6f,
             Resume = true,
-            AdtList = [new AdtCoordinate(33, 46)],
+            AdtList = [new AdtCoordinate(46, 33)],
         };
         ForeverGeometryBatchResult explicitBatch = ForeverGeometryBatchRunner.Run(explicitRequest);
         using (JsonDocument explicitState = JsonDocument.Parse(File.ReadAllText(explicitBatch.StateFile)))
@@ -1878,12 +2048,12 @@ internal static class P45GeometryRegression
         File.WriteAllText(buildInfoPath,
             "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70094|wow_classic\n");
         ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(explicitBatch.StateFile,
-                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "33,46")),
+                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "46,33")),
             "A client Product different from the batch identity was accepted.");
         File.WriteAllText(buildInfoPath,
             "Active!DEC:1|Version!STRING:0|Product!STRING:0\n1|1.60.1.70095|wow_cn_beta\n");
         ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(explicitBatch.StateFile,
-                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "33,46")),
+                clientRoot, toolDirectory, "zhCN", CreateWdtFixtureProcessFactory("success", "46,33")),
             "A client Build different from the batch identity was accepted.");
         File.WriteAllText(buildInfoPath, validBuildInfo);
         if (!selectedManifestBeforeIdentityMismatch.SequenceEqual(File.ReadAllBytes(Path.Combine(dnmRoot, "manifest.json"))))
@@ -1895,19 +2065,19 @@ internal static class P45GeometryRegression
                 clientRoot, invalidToolDirectory, "zhCN", (executable, arguments) =>
                 {
                     invalidToolStartedProcess = true;
-                    return CreateWdtFixtureProcessFactory("success", "33,46")(executable, arguments);
+                    return CreateWdtFixtureProcessFactory("success", "46,33")(executable, arguments);
                 }),
             "A tool built from an unexpected TrinityCore patch was accepted.");
         if (invalidToolStartedProcess)
             throw new InvalidOperationException("An unverified mapextractor executable was started.");
 
         File.WriteAllText(wdtListLog,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 45\ntile 0 33 46\n");
-        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "33,45",
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 45 33\ntile 0 46 33\n");
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "45,33",
             "A requested ADT set different from the matching WDT list was published.",
-            expectedFailureContains: "WDT-only=[(33,45)]");
-        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "33,46;33,47",
-            "A WDT list with an extra ADT was published.", expectedFailureContains: "WDT-only=[(33,47)]");
+            expectedFailureContains: "WDT-only=[(45,33)]");
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "success", "46,33;47,33",
+            "A WDT list with an extra ADT was published.", expectedFailureContains: "WDT-only=[(47,33)]");
         ExpectFailure(() => ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot,
                 "wow_cn_beta", 70094, ForeverNavmeshBakeProfile.Create("Azeroth", "wow_cn_beta", 70094,
                     new NavmeshBakeOptions { AgentRadius = 0.6f }).SettingsHash, 0, "Azeroth"),
@@ -1921,17 +2091,17 @@ internal static class P45GeometryRegression
                      "missing-native", "native-mismatch", "native-wrong-build", "native-truncated",
                  })
         {
-            ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, failureMode, "33,46",
+            ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, failureMode, "46,33",
                 $"The WDT publication gate accepted controlled failure mode '{failureMode}'.");
         }
-        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "timeout", "33,46",
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "timeout", "46,33",
             "The WDT publication gate accepted an interrupted enumeration.", TimeSpan.FromSeconds(2));
 
         File.WriteAllText(wdtListLog,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 33 46\n");
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 46 33\n");
         ForeverGeometryPublicationResult sealedBatch = ForeverGeometryBatchRunner.SealForPublicationForTest(
             explicitBatch.StateFile, clientRoot, toolDirectory, "zhCN",
-            CreateWdtFixtureProcessFactory("success", "33,46"));
+            CreateWdtFixtureProcessFactory("success", "46,33"));
         if (sealedBatch.SourceCount != 1 || sealedBatch.TileCount != 1)
         {
             throw new InvalidOperationException("The complete fixture WDT coverage did not seal the verified batch.");
@@ -1944,7 +2114,7 @@ internal static class P45GeometryRegression
         byte[] publishedManifest = File.ReadAllBytes(sealedBatch.ManifestFile);
         ExpectFailure(() => ForeverGeometryBatchRunner.SealForPublicationForTest(
                 explicitBatch.StateFile, clientRoot, toolDirectory, "zhCN",
-                CreateWdtFixtureProcessFactory("success", "33,46"),
+                CreateWdtFixtureProcessFactory("success", "46,33"),
                 afterManifestWriteForTest: candidateManifestPath =>
                 {
                     string proofRelativePath;
@@ -1962,7 +2132,7 @@ internal static class P45GeometryRegression
         ForeverNavmeshCacheManifest.ValidateForRuntime(dnmRoot, "wow_cn_beta", 70094,
             sealedProfile.SettingsHash, 0, "Azeroth");
 
-        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "nonzero", "33,46",
+        ExpectSealFailure(explicitBatch.StateFile, clientRoot, toolDirectory, "nonzero", "46,33",
             "A failed reseal did not leave the previous valid continent manifest untouched.");
         if (!publishedManifest.SequenceEqual(File.ReadAllBytes(sealedBatch.ManifestFile)))
         {
@@ -1979,7 +2149,7 @@ internal static class P45GeometryRegression
     private static void RunSparseAdtBatchRegression(string root, string clientRoot, string toolDirectory)
     {
         string inputRoot = Path.Combine(root, "sparse-batch-input");
-        foreach (AdtCoordinate adt in new[] { new AdtCoordinate(33, 46), new AdtCoordinate(35, 46) })
+        foreach (AdtCoordinate adt in new[] { new AdtCoordinate(46, 33), new AdtCoordinate(46, 35) })
         {
             string folder = Path.Combine(inputRoot, $"adt{adt.X:D2}_{adt.Y:D2}", "raw-geometry");
             Directory.CreateDirectory(folder);
@@ -1989,27 +2159,27 @@ internal static class P45GeometryRegression
         string tileListPath = Path.Combine(root, "sparse-mapextractor-list.log");
         string cascDataPath = Path.Combine(clientRoot, "Data");
         File.WriteAllText(tileListPath,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 35 46\ntile 0 33 46\n");
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 46 35\ntile 0 46 33\n");
         AdtCoordinate[] adts = ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0);
-        if (!adts.SequenceEqual([new AdtCoordinate(33, 46), new AdtCoordinate(35, 46)]))
+        if (!adts.SequenceEqual([new AdtCoordinate(46, 33), new AdtCoordinate(46, 35)]))
         {
             throw new InvalidOperationException("The mapextractor ADT list was not de-duplicated and normalized by Y/X.");
         }
         ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 1),
             "The ADT list parser accepted a mapextractor record for a different MapID.");
-        File.WriteAllText(tileListPath, "33,46\n33,46\n");
+        File.WriteAllText(tileListPath, "46,33\n46,33\n");
         ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0),
             "The ADT list parser accepted a duplicate ADT coordinate.");
         File.WriteAllText(tileListPath, "64,46\n");
         ExpectFailure(() => ForeverGeometryBatchRunner.ReadAdtList(tileListPath, 0),
             "The ADT list parser accepted an out-of-range ADT coordinate.");
         File.WriteAllText(tileListPath,
-            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 35 46\ntile 0 33 46\n");
+            $"Opened casc storage '{cascDataPath}'\nDetected client build: 70094\nRestricted extraction to MapID 0.\ntile 0 46 35\ntile 0 46 33\n");
 
         string outputRoot = Path.Combine(root, "sparse-batch-state");
         string dnmRoot = Path.Combine(root, "sparse-batch-dnm");
         ForeverGeometryBatchRequest request = new(0, 0, 0, 0, 0, inputRoot,
-            outputRoot, dnmRoot, "Azeroth", AdtList: [new(35, 46), new(33, 46)]);
+            outputRoot, dnmRoot, "Azeroth", AdtList: [new(46, 35), new(46, 33)]);
         ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
         if (first.SourceCount != 2 || first.TileCount < 2 || first.FailedTaskCount != 0 ||
             !first.Verification.HeightQuerySucceeded || !first.Verification.ConnectedPathSucceeded ||
@@ -2021,7 +2191,7 @@ internal static class P45GeometryRegression
 
         ForeverGeometryBatchResult reorderedResume = ForeverGeometryBatchRunner.Run(request with
         {
-            AdtList = [new(33, 46), new(35, 46)],
+            AdtList = [new(46, 33), new(46, 35)],
             Resume = true,
         });
         if (reorderedResume.ReusedSourceCount != 2 || reorderedResume.ReusedTileCount != first.TileCount)
@@ -2031,7 +2201,7 @@ internal static class P45GeometryRegression
 
         ForeverGeometryBatchResult changedSet = ForeverGeometryBatchRunner.Run(request with
         {
-            AdtList = [new(33, 46)],
+            AdtList = [new(46, 33)],
             Resume = true,
         });
         if (changedSet.SourceCount != 1 || changedSet.ReusedSourceCount != 0)
@@ -2047,7 +2217,7 @@ internal static class P45GeometryRegression
 
         ForeverGeometryPublicationResult publication = ForeverGeometryBatchRunner.SealForPublicationForTest(
             restoredSet.StateFile, clientRoot, toolDirectory, "zhCN",
-            CreateWdtFixtureProcessFactory("success", "33,46;35,46"));
+            CreateWdtFixtureProcessFactory("success", "46,33;46,35"));
         if (publication.SourceCount != 2 || publication.TileCount != restoredSet.TileCount)
         {
             throw new InvalidOperationException("A matching sparse WDT list did not seal the complete sparse batch.");
@@ -2239,14 +2409,14 @@ internal static class P45GeometryRegression
         NavmeshCoords.GetTileWowBounds(geometryTileX, geometryTileZ, out float tileMinX, out float tileMinY,
             out _, out _);
         string path = Path.Combine(root, "padding-only-edge.rawgeo.json");
-        WriteRawGeoWithTerrain(path, 33, 46,
+        WriteRawGeoWithTerrain(path, 46, 33,
         [
             [tileMinX + 20, 10, tileMinY + 2],
             [tileMinX + 60, 10, tileMinY + 2],
             [tileMinX + 20, 10, tileMinY + 42],
         ], [[0, 1, 2]]);
         RawGeometryTileExportResult exported = RawGeometryTileExporter.ExportWithIndependentCoverage(path,
-            new GeometryExportRequest(0, 33, 46, PaddingYards: TileGeometryExtractor.PaddingYd));
+            new GeometryExportRequest(0, 46, 33, PaddingYards: TileGeometryExtractor.PaddingYd));
         ForeverGeometryTile paddedNeighbor = exported.Tiles.SingleOrDefault(tile =>
             tile.DtTileZ == geometryTileZ && tile.DtTileX == geometryTileX - 1)
             ?? throw new InvalidOperationException("The padding-only fixture did not export its neighboring Detour tile.");
@@ -2261,14 +2431,14 @@ internal static class P45GeometryRegression
     private static void RunEmptyBatchRecoveryRegression(string root)
     {
         string inputRoot = Path.Combine(root, "batch-empty-input");
-        string adtFolder = Path.Combine(inputRoot, "adt33_46", "raw-geometry");
+        string adtFolder = Path.Combine(inputRoot, "adt46_33", "raw-geometry");
         Directory.CreateDirectory(adtFolder);
-        string rawPath = Path.Combine(adtFolder, "map0000_adt33_46.rawgeo.json");
+        string rawPath = Path.Combine(adtFolder, "map0000_adt46_33.rawgeo.json");
         WriteNonWalkableBatchFixture(rawPath, steepSlope: false);
         string outputRoot = Path.Combine(root, "batch-empty-state");
         string dnmRoot = Path.Combine(root, "batch-empty-dnm");
-        ForeverGeometryBatchRequest request = new(0, 33, 46, 33, 46,
-            inputRoot, outputRoot, dnmRoot, "Azeroth", AdtList: [new(33, 46)]);
+        ForeverGeometryBatchRequest request = new(0, 46, 33, 46, 33,
+            inputRoot, outputRoot, dnmRoot, "Azeroth", AdtList: [new(46, 33)]);
 
         ForeverGeometryBatchResult first = ForeverGeometryBatchRunner.Run(request);
         if (first.TileCount != 1 || first.FailedTaskCount != 0 || first.Verification.TileCount != 0 ||
@@ -2476,7 +2646,7 @@ internal static class P45GeometryRegression
         try
         {
             ForeverGeometryBatchRunner.SealForPublicationForTest(stateFile, clientRoot, toolDirectory,
-                "zhCN", CreateWdtFixtureProcessFactory("success", "33,46", markerPath));
+                "zhCN", CreateWdtFixtureProcessFactory("success", "46,33", markerPath));
         }
         catch (Exception ex)
         {
@@ -2543,11 +2713,11 @@ internal static class P45GeometryRegression
         File.Delete(markerPath);
     }
 
-    private static void WriteBatchFixture(string path, int adtX = 33, int adtY = 46)
+    private static void WriteBatchFixture(string path, int adtX = 46, int adtY = 33)
     {
         float adtSize = NavmeshSettings.TileWorldSize * 4f;
-        float offsetX = (33 - adtX) * adtSize;
-        float offsetY = (46 - adtY) * adtSize;
+        float offsetX = (33 - adtY) * adtSize;
+        float offsetY = (46 - adtX) * adtSize;
         float[][] terrain =
         [
             [-1050f + offsetX, 100f, -7800f + offsetY],
@@ -2557,7 +2727,7 @@ internal static class P45GeometryRegression
         ];
         var raw = new
         {
-            format = "wow-raw-geometry-v1",
+            format = NavmeshSettings.ForeverRawGeometryFormat,
             map_id = 0,
             adt_xy = new[] { adtX, adtY },
             mmap_xy = new[] { adtY, adtX },
@@ -2796,7 +2966,7 @@ internal static class P45GeometryRegression
     private static string WriteFixture(string root, string fileName, int adtX, int adtY,
         int build, float firstCollisionHeight, bool corruptIndex)
     {
-        float[] terrain = adtX == 33
+        float[] terrain = adtY == 33
             ? [-1055f, 110f, -7800f, -1045f, 110f, -7800f, -1050f, 110f, -7790f]
             : [-1100f, 110f, -7800f, -1090f, 110f, -7800f, -1095f, 110f, -7790f];
         float[] sharedCollision =
@@ -2809,7 +2979,7 @@ internal static class P45GeometryRegression
         int[][] collisionTriangles = [[0, 1, corruptIndex ? 99 : 2]];
         int wmoTriangles = 1;
         int m2Triangles = 0;
-        if (adtX == 34)
+        if (adtY == 34)
         {
             collision = [.. sharedCollision,
                 -1067f, firstCollisionHeight, -7800f,
@@ -2825,7 +2995,7 @@ internal static class P45GeometryRegression
 
         Dictionary<string, object> raw = new()
         {
-            ["format"] = "wow-raw-geometry-v1",
+            ["format"] = NavmeshSettings.ForeverRawGeometryFormat,
             ["map_id"] = 0,
             ["adt_xy"] = new[] { adtX, adtY },
             ["mmap_xy"] = new[] { adtY, adtX },
@@ -2841,8 +3011,8 @@ internal static class P45GeometryRegression
             ["wmo_triangle_count"] = wmoTriangles,
             ["m2_triangle_count"] = m2Triangles,
             ["liquid_vertex_count"] = 3,
-            ["liquid_triangle_count"] = adtX == 33 ? 1 : 2,
-            ["liquid_type_count"] = adtX == 33 ? 1 : 2,
+            ["liquid_triangle_count"] = adtY == 33 ? 1 : 2,
+            ["liquid_type_count"] = adtY == 33 ? 1 : 2,
             ["terrain_vertices"] = ToVertices(terrain),
             ["terrain_triangles"] = new[] { new[] { 0, 1, 2 } },
             ["collision_vertices"] = ToVertices(collision),
@@ -2853,10 +3023,10 @@ internal static class P45GeometryRegression
                 new[] { -1066.9f, 99f, -7800f },
                 new[] { -1066.8f, 99f, -7799.9f },
             },
-            ["liquid_triangles"] = adtX == 33
+            ["liquid_triangles"] = adtY == 33
                 ? new[] { new[] { 0, 1, 2 } }
                 : new[] { new[] { 0, 1, 2 }, new[] { 0, 1, 2 } },
-            ["liquid_types"] = adtX == 33 ? new[] { 8 } : new[] { 8, 9 },
+            ["liquid_types"] = adtY == 33 ? new[] { 8 } : new[] { 8, 9 },
         };
 
         string path = Path.Combine(root, fileName);

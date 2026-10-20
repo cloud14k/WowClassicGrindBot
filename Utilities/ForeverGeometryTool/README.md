@@ -5,12 +5,20 @@ exports from the Forever client into aggregated per-navmesh-tile geometry JSON.
 It does not read the client or scan directories: every input file, expected
 MapID, source ADT and output tile is explicit.
 
-The input contract is `wow-raw-geometry-v1`, with yard coordinates in
+The input contract is `wow-raw-geometry-v2`, with yard coordinates in
 `[WoW_X, WoW_Z, WoW_Y]` order. Each output keeps terrain, combined WMO/M2
 collision, and liquid triangle soup in separate arrays. It also records the
 client Build, source hash, selected MapID/ADT, tile bounds, and liquid areas.
 Terrain and collision are combined only by `ToTileGeometry()` at the boundary
 to the existing `PPather.Navmesh.TileGeometry` type.
+
+The native terrain/model builder stores `[WoW_Y,WoW_Z,WoW_X]`. The v2 hook
+swaps its horizontal components when writing the declared raw contract; the
+C# importer then restores Recast coordinates without reflecting the mesh or
+reversing its faces. ADT X indexes world Y and ADT Y indexes world X. Version
+v1 incorrectly labeled the native array and is rejected, including its old
+DNM geometry identity. Re-extract into a new directory with the current hook;
+do not relabel an old file or overwrite an earlier sample.
 
 The exporter validates a one-to-one match between input files, their ADT
 metadata, and the separately supplied expected ADT set. It rejects missing
@@ -32,8 +40,8 @@ Example (run from the repository root):
 
 ```powershell
 dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c Release -- `
-  --input tmp/p1-casc-sample/raw-geometry/map0000_adt34_46.rawgeo.json `
-  --adt 34,46 --expect-adt 34,46 --output tmp/p2-geometry --map 0
+  --input tmp/Stormwind/input/adt30_48/raw-geometry/map0000_adt30_48.rawgeo.json `
+  --adt 30,48 --expect-adt 30,48 --output tmp/city-one-adt-geometry --map 0
 ```
 
 The output directory must be empty. This prevents stale tiles from being
@@ -48,9 +56,9 @@ connected path:
 
 ```powershell
 dotnet run --project Utilities/ForeverGeometryTool/ForeverGeometryTool.csproj -c Release -- `
-  --input tmp/p1-casc-sample/raw-geometry/map0000_adt34_46.rawgeo.json `
-  --adt 34,46 --expect-adt 34,46 --output tmp/p3-geometry --map 0 `
-  --continent Azeroth --dnm-output tmp/p3-dnm --bake-tile 68,118
+  --input tmp/Stormwind/input/adt30_48/raw-geometry/map0000_adt30_48.rawgeo.json `
+  --adt 30,48 --expect-adt 30,48 --output tmp/city-bake-geometry --map 0 `
+  --continent Azeroth --dnm-output tmp/city-bake-dnm --bake-tile 132,61
 ```
 
 ## Resumable explicit ADT batch preparation
@@ -141,8 +149,63 @@ The bake identity includes the raw geometry format and exporter algorithm
 version. Vertical geometry padding is fixed at 4 yards because runtime has no
 padding setting; a custom value is rejected. The Forever DNM manifest is now
 format v2 and requires the package-contained WDT coverage proof, so v1 sealed
-cache packages must be rebuilt and sealed again. Existing rawgeo files can be
-reused when their source and geometry validations still pass.
+cache packages must be rebuilt and sealed again. Only corrected v2 rawgeo
+files can be reused when their source and geometry validations still pass.
+
+## Explicit local city pilot
+
+A city pack keeps `scope=explicit_adt_and_tile_set` and remains ineligible for
+continent publication. The default runtime gate still requires the full WDT
+proof. An operator can explicitly select a local pilot through
+`Navmesh:Query:ForeverRegion`:
+
+```json
+{
+  "MapId": 0,
+  "Continent": "Azeroth",
+  "ManifestSha256": "<SHA-256 of the independently verified manifest.json>",
+  "SourceAdts": [[30, 48]],
+  "Tiles": [[132, 61]]
+}
+```
+
+This example selects one interior tile only. Supply the actual independently
+chosen source and target sets, including every ADT touched by each target's
+padded footprint. The runtime rejects missing padding sources, set changes,
+duplicate coordinates, identity/hash failures and queries outside the selected
+tiles. Put the pack under the normal `forever/Azeroth/<settings_hash>` directory
+in an isolated data root. Pinning is an explicit operator trust decision after
+`batch-verify` and real-coordinate checks; it is not proof that arbitrary
+caller-supplied geometry is complete, or a substitute for a continent WDT seal.
+
+Use `extract-single-adt.ps1 -ExportMapMetadata` to write the selected MapID's
+primary `WorldMapArea.json` entries from the same client's UiMap,
+UiMapAssignment and Map DB2 tables. This does not export area hierarchy or
+exploration levels, which stay zero. Unknown DB2 layouts and copied/ambiguous
+assignments fail instead of using an older era's bounds. Preserve the metadata
+hash and client identity alongside the pilot configuration.
+
+For an existing prepared pilot directory containing `appsettings.json`,
+`data_config.json` and explicit world XYZ `routes.json`, run:
+
+```powershell
+dotnet run --project CoreTests -c Release -- forever-region <pilot-directory>
+```
+
+This read-only suite loads the pack through PPatherService, checks arrival and
+endpoint displacement, raycasts every output segment and checks its floor
+height. Rays on shared vertices are additionally checked through dense
+sub-voxel surface samples, using a 0.004 yd (two world float ULP) boundary
+tolerance. A diagonal through a missing upper floor is explicitly rejected by
+regression. It writes `route-verification.json` and `navmesh-polygons.json`. These
+checks exercise the real DNM/service; landmark coordinates and actual character
+movement still require separate confirmation in the game.
+
+The real suite requires `Pathing:ForeverClientRoot` and
+`Pathing:ForeverToolDirectory` (with the current pinned mapextractor and its
+provenance). It runs WDT metadata enumeration only, verifies the process/native
+tile list through the existing enumerator, and requires every regional source
+ADT to belong to that WDT. It never extracts terrain or bakes a tile.
 
 ## Rebuild the restricted CASC tools
 

@@ -97,7 +97,7 @@ index a16d1669..d7ec3919 100644
          std::vector<int> liquidTris;
          std::vector<uint8> liquidType;
 diff --git a/src/common/mmaps_common/Generator/TileBuilder.cpp b/src/common/mmaps_common/Generator/TileBuilder.cpp
-index 31ec90a8..04249b8f 100644
+index 31ec90a8..53bf5500 100644
 --- a/src/common/mmaps_common/Generator/TileBuilder.cpp
 +++ b/src/common/mmaps_common/Generator/TileBuilder.cpp
 @@ -23,9 +23,143 @@
@@ -123,7 +123,7 @@ index 31ec90a8..04249b8f 100644
 +            if (i)
 +                out << ',';
 +            std::size_t offset = (firstVertex + i) * 3;
-+            out << '[' << values[offset] << ',' << values[offset + 1] << ',' << values[offset + 2] << ']';
++            out << '[' << values[offset + 2] << ',' << values[offset + 1] << ',' << values[offset] << ']';
 +        }
 +        out << ']';
 +    }
@@ -201,7 +201,7 @@ index 31ec90a8..04249b8f 100644
 +                return false;
 +
 +        out << std::setprecision(9);
-+        out << "{\"format\":\"wow-raw-geometry-v1\",\"map_id\":" << mapID
++        out << "{\"format\":\"wow-raw-geometry-v2\",\"map_id\":" << mapID
 +            << ",\"adt_xy\":[" << tileY << ',' << tileX << ']'
 +            << ",\"mmap_xy\":[" << tileX << ',' << tileY << ']'
 +            << ",\"client_product\":\"" << product << "\",\"client_build\":" << build
@@ -282,10 +282,21 @@ index 31ec90a8..04249b8f 100644
          TerrainBuilder::cleanVertices(meshData.solidVerts, meshData.solidTris);
          TerrainBuilder::cleanVertices(meshData.liquidVerts, meshData.liquidTris);
 diff --git a/src/tools/map_extractor/System.cpp b/src/tools/map_extractor/System.cpp
-index 884e32f1..042baa76 100644
+index 884e32f1..53ab5399 100644
 --- a/src/tools/map_extractor/System.cpp
 +++ b/src/tools/map_extractor/System.cpp
-@@ -83,6 +83,10 @@ std::set<uint32> CameraFileDataIds;
+@@ -22,6 +22,10 @@
+ #include "DB2Meta.h"
+ #include "DBFilesClientList.h"
+ #include "ExtractorDB2LoadInfo.h"
++#include "ForeverUiMapLoadInfo.h"
++#include <fstream>
++#include <iomanip>
++#include <sstream>
+ #include "IteratorPair.h"
+ #include "Locales.h"
+ #include "MapDefines.h"
+@@ -83,6 +87,10 @@ std::set<uint32> CameraFileDataIds;
  bool PrintProgress = true;
  boost::filesystem::path input_path;
  boost::filesystem::path output_path;
@@ -296,7 +307,7 @@ index 884e32f1..042baa76 100644
  
  // **************************************************
  // Extractor options
-@@ -180,6 +184,13 @@ void HandleArgs(int argc, char* arg[])
+@@ -180,6 +188,13 @@ void HandleArgs(int argc, char* arg[])
  {
      for (int c = 1; c < argc; ++c)
      {
@@ -310,7 +321,7 @@ index 884e32f1..042baa76 100644
          // i - input path
          // o - output path
          // e - extract only MAP(1)/DBC(2)/Camera(4)/gt(8) - standard: all(11)
-@@ -238,6 +249,31 @@ void HandleArgs(int argc, char* arg[])
+@@ -238,6 +253,31 @@ void HandleArgs(int argc, char* arg[])
                  else
                      Usage(arg[0]);
                  break;
@@ -342,7 +353,7 @@ index 884e32f1..042baa76 100644
              case 'c':
                  if (c + 1 < argc)                            // all ok
                      CONF_UseRemoteCasc = atoi(arg[c++ + 1]) != 0;
-@@ -257,6 +293,9 @@ void HandleArgs(int argc, char* arg[])
+@@ -257,6 +297,9 @@ void HandleArgs(int argc, char* arg[])
                  break;
          }
      }
@@ -352,10 +363,85 @@ index 884e32f1..042baa76 100644
  }
  
  void TryLoadDB2(char const* name, DB2CascFileSource* source, DB2FileLoader* db2, DB2FileLoadInfo const* loadInfo)
-@@ -1088,6 +1127,94 @@ void ExtractMaps(uint32 build)
+@@ -317,6 +360,72 @@ void ReadMapDBC()
+     printf("Done! (" SZFMTD " maps loaded)\n", map_ids.size());
+ }
+
++
++// Optional metadata companion for a restricted regional extraction. The normal
++// WDT enumeration path and its output/proof contract are unchanged.
++void ExportForeverWorldMapAreas(uint32 build)
++{
++    char const* destination = std::getenv("TC_WORLD_MAP_AREA_EXPORT");
++    if (!destination || !*destination)
++        return;
++    if (CONF_MapId < 0)
++        throw std::runtime_error("WorldMapArea export requires one explicit MapID.");
++    DB2CascFileSource uiSource(CascStorage, UiMapMeta::Instance.FileDataId);
++    DB2CascFileSource assignmentSource(CascStorage, UiMapAssignmentMeta::Instance.FileDataId);
++    DB2FileLoader ui, assignments;
++    TryLoadDB2("UiMap.db2", &uiSource, &ui, &UiMapLoadInfo::Instance);
++    TryLoadDB2("UiMapAssignment.db2", &assignmentSource, &assignments, &UiMapAssignmentLoadInfo::Instance);
++    // Fail closed rather than silently dropping inherited map assignments.
++    if (ui.GetRecordCopyCount() || assignments.GetRecordCopyCount())
++        throw std::runtime_error("WorldMapArea export requires explicit (non-copy) UiMap records.");
++    std::unordered_map<uint32, std::string> names;
++    for (uint32 i = 0; i < ui.GetRecordCount(); ++i)
++    {
++        DB2Record r = ui.GetRecord(i);
++        if (r && r.GetUInt8("System") == 0)
++            names.emplace(r.GetId(), r.GetString("Name") ? r.GetString("Name") : "");
++    }
++    auto quote = [](std::string const& value)
++    {
++        std::ostringstream text;
++        text << '"';
++        for (unsigned char c : value)
++            if (c < 32) text << "\\u" << std::hex << std::setw(4) << std::setfill('0') << unsigned(c);
++            else if (c == '"' || c == '\\') text << '\\' << c;
++            else text << c;
++        text << '"';
++        return text.str();
++    };
++    std::ofstream file(destination, std::ios::binary | std::ios::trunc);
++    file.exceptions(std::ios::badbit | std::ios::failbit);
++    file << "[\n" << std::setprecision(9);
++    std::set<uint32> written;
++    for (uint32 i = 0; i < assignments.GetRecordCount(); ++i)
++    {
++        DB2Record r = assignments.GetRecord(i);
++        if (!r || r.GetInt32("OrderIndex") != 0 || r.GetInt32("MapID") != CONF_MapId)
++            continue;
++        uint32 id = r.GetUInt32("UiMapID");
++        if (!names.contains(id)) continue;
++        float bottom = r.GetFloat("Region1X"), right = r.GetFloat("Region1Y");
++        float top = r.GetFloat("Region2X"), left = r.GetFloat("Region2Y");
++        if (!(bottom < top && right < left)) continue;
++        auto map = std::find_if(map_ids.begin(), map_ids.end(), [](MapEntry const& m) { return m.Id == uint32(CONF_MapId); });
++        if (map == map_ids.end() || !written.insert(id).second)
++            throw std::runtime_error("Missing Map.db2 directory or ambiguous primary UiMap assignment.");
++        if (written.size() > 1) file << ",\n";
++        file << "{\"UIMapId\":" << id << ",\"MapID\":" << CONF_MapId
++            << ",\"AreaID\":" << r.GetInt32("AreaID") << ",\"AreaName\":" << quote(names.at(id))
++            << ",\"LocBottom\":" << bottom << ",\"LocRight\":" << right
++            << ",\"LocTop\":" << top << ",\"LocLeft\":" << left
++            << ",\"Continent\":" << quote(map->Directory) << ",\"ParentAreaId\":0,\"ExplorationLevel\":0}";
++    }
++    if (written.empty()) throw std::runtime_error("No primary UiMap bounds exported for requested MapID.");
++    file << "\n]\n";
++    file.close();
++    printf("WorldMapArea export complete: map=%d build=%u maps=%zu\n", CONF_MapId, build, written.size());
++}
++
+ void ReadLiquidMaterialTable()
+ {
+     printf("Read LiquidMaterial.db2 file...\n");
+@@ -1087,6 +1196,95 @@ void ExtractMaps(uint32 build)
+     printf("Extracting maps...\n");
  
      ReadMapDBC();
- 
++    ExportForeverWorldMapAreas(build);
++
 +    if (CONF_MapId >= 0)
 +    {
 +        std::erase_if(map_ids, [](MapEntry const& map) { return map.Id != uint32(CONF_MapId); });
@@ -443,11 +529,10 @@ index 884e32f1..042baa76 100644
 +            map.Id, build, visited, tileCount);
 +        return;
 +    }
-+
+
      ReadLiquidMaterialTable();
      ReadLiquidObjectTable();
-     ReadLiquidTypeTable();
-@@ -1101,6 +1228,7 @@ void ExtractMaps(uint32 build)
+@@ -1101,6 +1299,7 @@ void ExtractMaps(uint32 build)
          // Loadup map grid data
          ChunkedFile wdt;
          std::bitset<(WDT_MAP_SIZE) * (WDT_MAP_SIZE)> existingTiles;
@@ -455,7 +540,7 @@ index 884e32f1..042baa76 100644
          if (wdt.loadFile(CascStorage, map_ids[z].WdtFileDataId, Trinity::StringFormat("WDT for map {}", map_ids[z].Id), false))
          {
              FileChunk const* mphd = wdt.GetChunk("MPHD");
-@@ -1110,9 +1238,13 @@ void ExtractMaps(uint32 build)
+@@ -1110,9 +1309,13 @@ void ExtractMaps(uint32 build)
              {
                  for (uint32 x = 0; x < WDT_MAP_SIZE; ++x)
                  {
@@ -469,7 +554,7 @@ index 884e32f1..042baa76 100644
                      outputFileName = Trinity::StringFormat("{}/maps/{:04}_{:02}_{:02}.map", output_path.string(), map_ids[z].Id, y, x);
                      bool ignoreDeepWater = IsDeepWaterIgnored(map_ids[z].Id, y, x);
                      if (mphd && mphd->As<wdt_MPHD>()->flags & 0x200)
-@@ -1132,6 +1264,12 @@ void ExtractMaps(uint32 build)
+@@ -1132,6 +1335,12 @@ void ExtractMaps(uint32 build)
              }
          }
  
@@ -482,22 +567,35 @@ index 884e32f1..042baa76 100644
          if (auto tileList = Trinity::make_unique_ptr_with_deleter<&::fclose>(fopen(Trinity::StringFormat("{}/maps/{:04}.tilelist", output_path.string(), map_ids[z].Id).c_str(), "wb")))
          {
              fwrite(MapMagic.data(), 1, MapMagic.size(), tileList.get());
-@@ -1411,1 +1549,3 @@ bool OpenCascStorage(int locale)
+@@ -1408,6 +1617,8 @@ bool OpenCascStorage(int locale)
+             return false;
+         }
+
 +        printf("Opened casc storage '%s' product %s locale %s\n", storage_dir.string().c_str(), CONF_Product, localeNames[locale]);
 +
          return true;
-@@ -1551,3 +1691,3 @@ int main(int argc, char * arg[])
+     }
+     catch (std::exception const& error)
+@@ -1549,7 +1760,7 @@ int main(int argc, char * arg[])
+     if (firstInstalledLocale < 0)
+     {
          printf("No locales detected\n");
 -        return 0;
 +        return CONF_ListTiles ? 1 : 0;
      }
-@@ -1570,3 +1710,5 @@ int main(int argc, char * arg[])
+
+     if (CONF_extract & EXTRACT_CAMERA)
+@@ -1568,7 +1779,9 @@ int main(int argc, char * arg[])
+
+     if (CONF_extract & EXTRACT_MAP)
      {
 -        OpenCascStorage(firstInstalledLocale);
 +        bool storageOpened = OpenCascStorage(firstInstalledLocale);
 +        if (CONF_ListTiles && !storageOpened)
 +            return 1;
          ExtractMaps(build);
+         CascStorage.reset();
+     }
 diff --git a/src/tools/vmap4_extractor/vmapexport.cpp b/src/tools/vmap4_extractor/vmapexport.cpp
 index d9df06dd..44e2944e 100644
 --- a/src/tools/vmap4_extractor/vmapexport.cpp
@@ -769,3 +867,139 @@ index 9bec54d0..e8328660 100644
      uint32 liquflags;
  
      std::vector<uint16> DoodadReferences;
+diff --git a/src/tools/map_extractor/ForeverUiMapLoadInfo.h b/src/tools/map_extractor/ForeverUiMapLoadInfo.h
+new file mode 100644
+--- /dev/null
++++ b/src/tools/map_extractor/ForeverUiMapLoadInfo.h
+@@ -0,0 +1,131 @@
++/*
++ * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms of the GNU General Public License as published by the
++ * Free Software Foundation; either version 2 of the License, or (at your
++ * option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along
++ * with this program. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++// Uses the pinned source tree DB2 schemas, not another client era.
++#pragma once
++#include "DB2FileLoader.h"
++#include "DB2Meta.h"
++
++struct UiMapMeta
++{
++    static constexpr DB2MetaField Fields[15] =
++    {
++        { .Type = FT_STRING,               .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned = false },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_BYTE,                 .ArraySize =  1, .IsSigned = false },
++        { .Type = FT_BYTE,                 .ArraySize =  1, .IsSigned = false },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned = false },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_BYTE,                 .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_BYTE,                 .ArraySize =  1, .IsSigned =  true },
++    };
++
++    static constexpr DB2Meta Instance =
++    {
++        .FileDataId         = 1957206,
++        .IndexField         = 1,
++        .ParentIndexField   = 2,
++        .FieldCount         = 15,
++        .FileFieldCount     = 15,
++        .LayoutHash         = 0xDB51D55F,
++        .Fields             = Fields
++    };
++};
++struct UiMapLoadInfo
++{
++    static constexpr DB2FieldMeta Fields[15] =
++    {
++        { .IsSigned = false, .Type = FT_STRING, .Name = "Name" },
++        { .IsSigned = false, .Type = FT_INT, .Name = "ID" },
++        { .IsSigned = false, .Type = FT_INT, .Name = "ParentUiMapID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "Flags" },
++        { .IsSigned = false, .Type = FT_BYTE, .Name = "System" },
++        { .IsSigned = false, .Type = FT_BYTE, .Name = "Type" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "BountySetID" },
++        { .IsSigned = false, .Type = FT_INT, .Name = "BountyDisplayLocation" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "VisibilityPlayerConditionID" },
++        { .IsSigned = true, .Type = FT_BYTE, .Name = "HelpTextPosition" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "BkgAtlasID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "AlternateUiMapGroup" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "ContentTuningID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "AdventureMapTextureKitID" },
++        { .IsSigned = true, .Type = FT_BYTE, .Name = "MapArtZoneTextPosition" },
++    };
++
++    static constexpr DB2FileLoadInfo Instance{ Fields, 15, &UiMapMeta::Instance };
++};
++struct UiMapAssignmentMeta
++{
++    static constexpr DB2MetaField Fields[11] =
++    {
++        { .Type = FT_FLOAT,                .ArraySize =  2, .IsSigned =  true },
++        { .Type = FT_FLOAT,                .ArraySize =  2, .IsSigned =  true },
++        { .Type = FT_FLOAT,                .ArraySize =  6, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned = false },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++        { .Type = FT_INT,                  .ArraySize =  1, .IsSigned =  true },
++    };
++
++    static constexpr DB2Meta Instance =
++    {
++        .FileDataId         = 1957219,
++        .IndexField         = 3,
++        .ParentIndexField   = 4,
++        .FieldCount         = 11,
++        .FileFieldCount     = 11,
++        .LayoutHash         = 0xC9CC8DFB,
++        .Fields             = Fields
++    };
++};
++struct UiMapAssignmentLoadInfo
++{
++    static constexpr DB2FieldMeta Fields[18] =
++    {
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "UiMinX" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "UiMinY" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "UiMaxX" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "UiMaxY" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region1X" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region1Y" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region1Z" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region2X" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region2Y" },
++        { .IsSigned = false, .Type = FT_FLOAT, .Name = "Region2Z" },
++        { .IsSigned = false, .Type = FT_INT, .Name = "ID" },
++        { .IsSigned = false, .Type = FT_INT, .Name = "UiMapID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "OrderIndex" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "MapID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "AreaID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "WmoDoodadPlacementID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "WmoGroupID" },
++        { .IsSigned = true, .Type = FT_INT, .Name = "Unknown1125" },
++    };
++
++    static constexpr DB2FileLoadInfo Instance{ Fields, 18, &UiMapAssignmentMeta::Instance };
++};

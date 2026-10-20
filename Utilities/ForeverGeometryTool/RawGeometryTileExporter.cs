@@ -171,7 +171,7 @@ public static class RawGeometryTileExporter
         if (raw.Format != ExpectedInputFormat || raw.Units != "yard" ||
             raw.Coordinates != ExpectedCoordinates || raw.TargetRcTransform != ExpectedTransform)
         {
-            throw new InvalidDataException("Input format, units, or coordinate transform does not match the P1 raw-geometry contract.");
+            throw new InvalidDataException($"Input format, units, or coordinate transform does not match {ExpectedInputFormat}; re-extract old v1 inputs with the corrected native hook.");
         }
 
         if (raw.ClientProduct != "wow_cn_beta" || raw.ClientBuild <= 0)
@@ -217,10 +217,11 @@ public static class RawGeometryTileExporter
     {
         const float toleranceYards = 0.05f;
         float adtSize = NavmeshSettings.TileWorldSize * 4f;
-        float minX = (31 - request.AdtX) * adtSize;
-        float maxX = (32 - request.AdtX) * adtSize;
-        float minY = (31 - request.AdtY) * adtSize;
-        float maxY = (32 - request.AdtY) * adtSize;
+        // ADT X indexes WoW Y; ADT Y indexes WoW X (MCNKHelper.GetADTCoord).
+        float minX = (31 - request.AdtY) * adtSize;
+        float maxX = (32 - request.AdtY) * adtSize;
+        float minY = (31 - request.AdtX) * adtSize;
+        float maxY = (32 - request.AdtX) * adtSize;
         foreach (float[] vertex in raw.TerrainVertices)
         {
             if (vertex[0] < minX - toleranceYards || vertex[0] > maxX + toleranceYards ||

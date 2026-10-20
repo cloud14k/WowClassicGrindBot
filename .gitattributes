@@ -1,6 +1,9 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
+# The tool provenance pins the bytes of this patch on Windows and Unix.
+Utilities/ForeverGeometryTool/patches/*.patch text eol=lf
+
 # Legacy Cataclysm 4.3.4 generated/backport files - collapse in GitHub diffs
 Addons/DataToColor/Legacy/LegacyTextureToFileID.lua linguist-generated
 Addons/DataToColor/Legacy/WorldMapAreaIDToUiMapID.lua linguist-generated

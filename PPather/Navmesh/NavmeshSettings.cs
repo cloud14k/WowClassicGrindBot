@@ -24,7 +24,9 @@ public sealed class NavmeshSettings
     /// Bump GeometryExportAlgorithmVersion when triangle-to-tile assignment or
     /// coordinate handling changes in RawGeometryTileExporter.
     /// </summary>
-    public const string ForeverRawGeometryFormat = "wow-raw-geometry-v1";
+    // v2 fixes the native export's mislabeled horizontal axes. Its distinct
+    // cache identity prevents the reflected v1 geometry from being reused.
+    public const string ForeverRawGeometryFormat = "wow-raw-geometry-v2";
     public const string ForeverGeometryExportAlgorithmVersion = "tile-aabb-v1";
 
     /// <summary>Bump when serialized tile bytes change (params, DotRecast fork, areas).</summary>

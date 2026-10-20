@@ -13,8 +13,8 @@ using DotRecast.Detour.Io;
 namespace PPather.Navmesh;
 
 /// <summary>
-/// Immutable tile coverage captured only after the complete continent manifest
-/// and its WDT proof have passed runtime validation.
+/// Immutable tile coverage captured after complete-continent validation, or
+/// the explicitly configured operator-pinned regional validation.
 /// </summary>
 public sealed class ForeverNavmeshRuntimeCoverage
 {
@@ -58,9 +58,9 @@ public sealed class ForeverNavmeshRuntimeCoverage
 }
 
 /// <summary>
-/// Scope-aware validation for Forever navmesh packs. A selected test pack can
-/// be checked only through the explicitly named test API; it can never satisfy
-/// the continent eligibility checks used by publication or runtime loading.
+/// Scope-aware validation for Forever navmesh packs. A selected pack never
+/// satisfies continent publication/default runtime eligibility. A local pilot
+/// requires its separately named, operator-pinned regional runtime entry.
 /// </summary>
 public static class ForeverNavmeshCacheManifest
 {
@@ -78,7 +78,7 @@ public static class ForeverNavmeshCacheManifest
     public const string WdtStderrPathPrefix = "coverage/wdt-stderr-";
     public const string WdtEnumeratorSourceRepository = "https://github.com/advocaite/TrinityCore.git";
     public const string WdtEnumeratorSourceCommit = "440d365e791baff1cdf555ed2179c71bd6ebd014";
-    public const string WdtEnumeratorPatchSha256 = "7acf42579137365809265819cd685ec7b8f1749e81a74f9bb2e7a51314d91d54";
+    public const string WdtEnumeratorPatchSha256 = "d68795309b120b2dd30894b15c760ab8565492b667a7b3859f1f6d58be271993";
 
     /// <summary>Explicit test entry for packs that are intentionally incomplete.</summary>
     public static void ValidateSelectedPackForTest(string cacheDirectory, string expectedProduct,
@@ -152,8 +152,67 @@ public static class ForeverNavmeshCacheManifest
             expectedMapId, expectedContinent, manifest.ExpectedTiles, manifest.DnmSha256s, manifest.EmptyTiles);
     }
 
+    /// <summary>
+    /// Explicit, operator-pinned local region. This does not confer continent
+    /// eligibility. The same file/hash/identity and empty-evidence checks apply,
+    /// plus an independently configured source set, target set and manifest SHA.
+    /// </summary>
+    public static ForeverNavmeshRuntimeCoverage ReadCoverageForRegion(string cacheDirectory,
+        string expectedProduct, int expectedBuild, string expectedSettingsHash, int expectedMapId,
+        string expectedContinent, SharedLib.ForeverNavmeshRegionOptions region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        if (region.MapId != expectedMapId || region.Continent != expectedContinent ||
+            !IsSha256(region.ManifestSha256))
+            throw new InvalidDataException("Explicit Forever region identity or pinned manifest SHA-256 is invalid.");
+
+        ManifestSnapshot manifest = ReadAndValidateFiles(cacheDirectory, expectedProduct,
+            expectedBuild, expectedSettingsHash, expectedMapId, expectedContinent, region.ManifestSha256);
+        if (manifest.Scope != "explicit_adt_and_tile_set" ||
+            !manifest.CompleteForRequestedSourcesAndTiles || manifest.CompleteForContinent ||
+            manifest.PublishableAsContinentCache ||
+            manifest.ProcessedAdts.Count > 0 && !manifest.SourceAdts.SetEquals(manifest.ProcessedAdts) ||
+            manifest.ExpectedAdts.Count > 0 && !manifest.SourceAdts.SetEquals(manifest.ExpectedAdts))
+            throw new InvalidDataException("The explicit region must be complete for its exact source/target sets and remain non-publishable as a continent.");
+
+        if (region.SourceAdts is null || region.Tiles is null ||
+            region.SourceAdts.Any(static pair => pair is not { Length: 2 } || pair.Any(static n => n is < 0 or >= 64)) ||
+            region.Tiles.Any(static pair => pair is not { Length: 2 } || !NavmeshCoords.IsValidTile(pair[0], pair[1])))
+            throw new InvalidDataException("Explicit region ADT/tile coordinates are malformed.");
+        HashSet<(int X, int Y)> sources = region.SourceAdts.Select(static pair => (pair[0], pair[1])).ToHashSet();
+        HashSet<(int X, int Z)> targets = region.Tiles.Select(static pair => (pair[0], pair[1])).ToHashSet();
+        if (sources.Count == 0 || targets.Count == 0 || sources.Count != region.SourceAdts.Length ||
+            targets.Count != region.Tiles.Length || !sources.SetEquals(manifest.SourceAdts) ||
+            !targets.SetEquals(manifest.ExpectedTiles))
+            throw new InvalidDataException("Regional source/target sets differ from the independently configured sets or contain duplicates.");
+        ValidateTileResultSets(manifest);
+
+        // Every target's padded footprint must have source ADTs on all sides.
+        // A partial outer ADT contribution cannot certify a complete target.
+        if (!float.IsFinite(manifest.AgentRadius) || manifest.AgentRadius < 0)
+            throw new InvalidDataException("Regional manifest has no valid agent radius for padded coverage validation.");
+        float border = TileGeometryExtractor.BorderCells(manifest.AgentRadius) *
+            NavmeshSettings.CellSize + TileGeometryExtractor.PaddingYd;
+        double adtSize = NavmeshSettings.TileWorldSize * 4d;
+        foreach ((int x, int z) in manifest.ExpectedTiles)
+        {
+            NavmeshCoords.GetTileWowBounds(x, z, out float minX, out float minY, out float maxX, out float maxY);
+            int fromX = (int)Math.Floor((-NavmeshCoords.Origin - maxY - border) / adtSize);
+            int toX = (int)Math.Floor((-NavmeshCoords.Origin - minY + border) / adtSize);
+            int fromY = (int)Math.Floor((-NavmeshCoords.Origin - maxX - border) / adtSize);
+            int toY = (int)Math.Floor((-NavmeshCoords.Origin - minX + border) / adtSize);
+            for (int ax = fromX; ax <= toX; ax++)
+                for (int ay = fromY; ay <= toY; ay++)
+                    if (!manifest.SourceAdts.Contains((ax, ay)))
+                        throw new InvalidDataException($"Region tile ({x},{z}) lacks padded source ADT ({ax},{ay}).");
+        }
+        return new ForeverNavmeshRuntimeCoverage(expectedProduct, expectedBuild, expectedSettingsHash,
+            expectedMapId, expectedContinent, manifest.ExpectedTiles, manifest.DnmSha256s, manifest.EmptyTiles);
+    }
+
     private static ManifestSnapshot ReadAndValidateFiles(string cacheDirectory, string expectedProduct,
-        int expectedBuild, string expectedSettingsHash, int expectedMapId, string? expectedContinent)
+        int expectedBuild, string expectedSettingsHash, int expectedMapId, string? expectedContinent,
+        string? expectedManifestSha256 = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(cacheDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedProduct);
@@ -176,6 +235,13 @@ public static class ForeverNavmeshCacheManifest
         }
 
         using FileStream stream = File.OpenRead(manifestPath);
+        if (expectedManifestSha256 is not null)
+        {
+            string actual = Convert.ToHexString(SHA256.HashData(stream));
+            if (!actual.Equals(expectedManifestSha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("Regional manifest SHA-256 differs from the operator's configured pin.");
+            stream.Position = 0;
+        }
         using JsonDocument document = JsonDocument.Parse(stream);
         JsonElement root = document.RootElement;
         string product = ReadRequiredString(root, "client_product", manifestPath);
@@ -199,6 +265,20 @@ public static class ForeverNavmeshCacheManifest
         }
 
         ValidateGeometryBakeIdentity(root, manifestPath);
+        if (expectedManifestSha256 is not null)
+        {
+            JsonElement settings = root.GetProperty("bake_settings");
+            SharedLib.NavmeshBakeOptions recorded = new()
+            {
+                AgentRadius = settings.GetProperty("agent_radius").GetSingle(),
+                AgentMaxClimb = settings.GetProperty("agent_max_climb").GetSingle(),
+                WalkableSlope = settings.GetProperty("walkable_slope").GetSingle(),
+            };
+            if (settings.TryGetProperty("min_world_z", out JsonElement floor) && floor.ValueKind != JsonValueKind.Null)
+                recorded.MinWorldZ[continent] = floor.GetSingle();
+            if (ForeverNavmeshBakeProfile.Create(continent, product, build, recorded).SettingsHash != expectedSettingsHash)
+                throw new InvalidDataException("Pinned regional bake parameters do not reproduce the configured settings hash.");
+        }
 
         bool completeForRequested = ReadOptionalBool(root, "complete_for_requested_sources_and_tiles");
         bool completeForContinent = ReadOptionalBool(root, "complete_for_continent");
@@ -226,7 +306,9 @@ public static class ForeverNavmeshCacheManifest
             ReadOptionalCoverageTiles(root, "expected_tile_indices", manifestPath),
             ReadOptionalCoverageTiles(root, "completed_tile_indices", manifestPath),
             tiles.Select(static tile => (tile.X, tile.Z)).ToHashSet(),
-            tiles.ToDictionary(static tile => (tile.X, tile.Z), static tile => tile.Sha256), emptyTiles);
+            tiles.ToDictionary(static tile => (tile.X, tile.Z), static tile => tile.Sha256), emptyTiles,
+            root.GetProperty("bake_settings").TryGetProperty("agent_radius", out JsonElement radius)
+                && radius.TryGetSingle(out float parsedRadius) ? parsedRadius : float.NaN);
     }
 
     private static void ValidateContinentEligibility(ManifestSnapshot manifest)
@@ -911,5 +993,5 @@ public static class ForeverNavmeshCacheManifest
         HashSet<(int X, int Y)> ExpectedAdts, HashSet<(int X, int Y)> ProcessedAdts,
         HashSet<(int X, int Z)> ExpectedTiles, HashSet<(int X, int Z)> CompletedTiles,
         HashSet<(int X, int Z)> ManifestTiles, Dictionary<(int X, int Z), string> DnmSha256s,
-        HashSet<(int X, int Z)> EmptyTiles);
+        HashSet<(int X, int Z)> EmptyTiles, float AgentRadius);
 }

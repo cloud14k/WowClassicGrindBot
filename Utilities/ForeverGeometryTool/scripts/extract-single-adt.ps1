@@ -5,6 +5,7 @@ param(
     [Parameter(Mandatory=$true)][ValidateRange(0,63)][int]$AdtY,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
     [string]$ToolDirectory,
+    [switch]$ExportMapMetadata,
     [ValidateSet('zhCN','enUS','zhTW','koKR','frFR','deDE','esES','esMX','ruRU','ptBR','itIT','ptPT')][string]$Locale='zhCN'
 )
 
@@ -63,8 +64,19 @@ $mmapExe = Join-Path $ToolDirectory 'mmaps_generator.exe'
 
 # Confirm the requested tile exists in this MapID's WDT before writing map data.
 $tileListLog = Join-Path $logDirectory 'list-tiles.log'
-& $mapExe -i $ClientRoot -o $OutputDirectory -p $clientProduct -l $Locale -m $MapId --list-tiles *> $tileListLog
-if ($LASTEXITCODE -ne 0) { throw "WDT tile listing failed; see $tileListLog" }
+$previousMetadataOutput = $env:TC_WORLD_MAP_AREA_EXPORT
+try {
+    if ($ExportMapMetadata) { $env:TC_WORLD_MAP_AREA_EXPORT = Join-Path $OutputDirectory 'WorldMapArea.json' }
+    else { Remove-Item Env:TC_WORLD_MAP_AREA_EXPORT -ErrorAction SilentlyContinue }
+    & $mapExe -i $ClientRoot -o $OutputDirectory -p $clientProduct -l $Locale -m $MapId --list-tiles *> $tileListLog
+    if ($LASTEXITCODE -ne 0) { throw "WDT tile listing failed; see $tileListLog" }
+    if ($ExportMapMetadata -and -not (Test-Path (Join-Path $OutputDirectory 'WorldMapArea.json'))) {
+        throw 'The tool did not export the requested client UiMap/UiMapAssignment metadata; rebuild the current patch.'
+    }
+} finally {
+    if ($null -eq $previousMetadataOutput) { Remove-Item Env:TC_WORLD_MAP_AREA_EXPORT -ErrorAction SilentlyContinue }
+    else { $env:TC_WORLD_MAP_AREA_EXPORT = $previousMetadataOutput }
+}
 $tilePattern = "^tile\s+$MapId\s+$AdtX\s+$AdtY\s*$"
 if (-not (Select-String -Path $tileListLog -Pattern $tilePattern -Quiet)) {
     throw "MapID $MapId ADT ($AdtX,$AdtY) is not listed in the client's WDT."
